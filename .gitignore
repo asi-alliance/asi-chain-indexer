@@ -1,86 +1,56 @@
-# Dependencies
-**/node_modules
-node_modules/
-
-# Production builds
-build/
-dist/
-**/build/
-**/dist/
-
-# Environment variables
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-**/.env
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Logs
-logs/
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-lerna-debug.log*
-
-# Testing
-coverage/
-.nyc_output/
-
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-env/
-venv/
-.venv
-pip-log.txt
-pip-delete-this-directory.txt
-.pytest_cache/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# Rust
-target/
-Cargo.lock
-**/*.rs.bk
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+.env
+
+# Debug and test files
+debug_*.py
+test_*.py
+*_test.py
+deploy_test.*
+
+# Logs
+*.log
+deployment.log
 
 # Database
 *.db
 *.sqlite
 *.sqlite3
 
-# Docker
-.dockerignore
-docker-compose.override.yml
+# Binary files
+node_cli_*
+*.bin
 
 # Temporary files
-**/tmp
-tmp/
 temp/
 *.tmp
 *.bak
-*.backup
-cache/
 
-# OS files
-Thumbs.db
-Desktop.ini
-
-# Package manager locks
-package-lock.json
-yarn.lock
-pnpm-lock.yaml
-
-# Code review tools
-.claude
-CLAUDE.MD
+# IDE
+.vscode/
+.idea/
