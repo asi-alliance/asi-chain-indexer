@@ -83,6 +83,21 @@ The indexer provides complete automation for blockchain data synchronization:
 - Proper NULL handling in error_message fields
 - Multi-stage Docker builds for optimized images
 
+### Stack
+
+- **Python 3.11**: Core programming language
+- **asyncio**: Asynchronous processing framework
+- **SQLAlchemy 2.0.31**: ORM and database abstraction
+- **asyncpg 0.29.0**: PostgreSQL async driver
+- **Pydantic 2.7.4**: Configuration and data validation
+- **pydantic-settings 2.3.4**: Settings management
+- **structlog 24.2.0**: Structured logging
+- **prometheus-client 0.20.0**: Metrics exposure
+- **aiohttp 3.9.5**: HTTP client
+- **click 8.1.7**: CLI interface
+- **tenacity 8.5.0**: Retry logic
+
+
 ## Architecture
 
 ```
@@ -273,19 +288,30 @@ docker compose -f docker-compose.rust.yml restart rust-indexer
 
 ### Environment Variables
 
-Environment variables for Rust indexer:
+### Indexer Environment Variables
 
-- `RUST_CLI_PATH`: Path to node_cli binary (default: /usr/local/bin/node_cli)
-- `NODE_HOST`: RChain node hostname (default: host.docker.internal)
-- `GRPC_PORT`: gRPC port for blockchain operations (default: 40412)
-- `HTTP_PORT`: HTTP port for status queries (default: 40413)
-- `DATABASE_URL`: PostgreSQL connection string
-- `SYNC_INTERVAL`: Seconds between sync cycles (default: 5)
-- `BATCH_SIZE`: Number of blocks per batch (default: 50)
-- `START_FROM_BLOCK`: Initial block to sync from (default: 0)
-- `LOG_LEVEL`: Logging level (default: INFO)
-- `MONITORING_PORT`: API server port (default: 9090)
-- `ENABLE_ASI_TRANSFER_EXTRACTION`: Extract ASI transfers (default: true)
+| Variable | Description                               | Default |
+|----------|-------------------------------------------|---------|
+| `NODE_HOST` | ASI Chain node hostname                   | `localhost` |
+| `GRPC_PORT` | Node gRPC port for blockchain operations  | `40412` |
+| `HTTP_PORT` | Node HTTP port for status queries         | `40413` |
+| `NODE_URL` | RChain node HTTP API endpoint             | `http://localhost:40453` |
+| `NODE_TIMEOUT` | HTTP request timeout in seconds           | `30` |
+| `RUST_CLI_PATH` | Path to Rust CLI executable               | `/rust-client/target/release/node_cli` |
+| `DATABASE_URL` | PostgreSQL connection URL                 | `postgresql://indexer:indexer_pass@localhost:5432/asichain` |
+| `DATABASE_POOL_SIZE` | Database connection pool size             | `20` |
+| `DATABASE_POOL_TIMEOUT` | Database pool timeout in seconds          | `10` |
+| `SYNC_INTERVAL` | Seconds between sync cycles               | `5` |
+| `BATCH_SIZE` | Number of blocks per batch                | `100` |
+| `START_FROM_BLOCK` | Initial block to start indexing           | `0` |
+| `MONITORING_PORT` | Prometheus metrics port                   | `9090` |
+| `HEALTH_CHECK_INTERVAL` | Health check interval in seconds          | `60` |
+| `LOG_LEVEL` | Logging level (DEBUG/INFO/WARNING/ERROR)  | `INFO` |
+| `LOG_FORMAT` | Log format (json/text)                    | `json` |
+| `ENABLE_ASI_TRANSFER_EXTRACTION` | Extract ASI transfers from deployments    | `true` |
+| `ENABLE_METRICS` | Enable Prometheus metrics                 | `true` |
+| `ENABLE_HEALTH_CHECK` | Enable health check endpoint              | `true` |
+| `HASURA_ADMIN_SECRET` | Hasura admin secret (not used by indexer) | Empty |
 
 ## Database Schema
 
