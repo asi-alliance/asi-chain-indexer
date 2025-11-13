@@ -38,15 +38,16 @@ jobs:
         --query "Command.CommandId" \
         --output text \
         --parameters 'commands=[
-            "export HOME=/home/ubuntu && \
-            git config --global --add safe.directory '$REMOTE_REPO_PATH' && \
-            if [ ! -d '$REMOTE_REPO_PATH' ]; then \
-              git clone '$GITHUB_REPO_URL' '$REMOTE_REPO_PATH'; \
-            fi && \
-            cd '$REMOTE_REPO_PATH' && \
-            git fetch --all && \
-            git checkout ${{ github.sha }} && \
-            bash deploy.sh --clean"
+          "export HOME=/home/ubuntu && \
+          git config --global --add safe.directory '$REMOTE_REPO_PATH' && \
+          if [ ! -d '$REMOTE_REPO_PATH' ]; then \
+            git clone '$GITHUB_REPO_URL' '$REMOTE_REPO_PATH'; \
+          fi && \
+          cd '$REMOTE_REPO_PATH' && \
+          git remote set-url origin '$GITHUB_REPO_URL' && \
+          git fetch --all && \
+          git checkout ${{ github.sha }} && \
+          bash deploy.sh --clean"
           ]')
         
         if [ -z "$COMMAND_ID" ]; then
