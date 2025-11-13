@@ -1,4 +1,4 @@
-name: Deploy And DESTROY DB Indexer DevNet
+name: Deploy Clean Indexer DevNet
 
 on:
   workflow_dispatch:
