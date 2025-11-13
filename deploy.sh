@@ -78,16 +78,16 @@ done
 
 echo "--- Running Hasura configuration script ---"
 if [ -f "./scripts/configure_hasura.sh" ]; then
-    chmod +x ./scripts/configure_hasura.sh
-    ./scripts/configure_hasura.sh
+    chmod +x ./scripts/configure-hasura.sh
+    ./scripts/configure-hasura.sh
 else
     echo "⚠️  ./scripts/configure_hasura.sh not found, skipping."
 fi
 
 echo "--- Running setup script ---"
 if [ -f "./scripts/setup_hasura_relationships.sh" ]; then
-    chmod +x ./scripts/setup_hasura_relationships.sh
-    ./scripts/setup_hasura_relationships.sh
+    chmod +x ./scripts/setup-hasura-relationships.sh
+    ./scripts/setup-hasura-relationships.sh
 else
     echo "⚠️  ./scripts/setup_hasura_relationships.sh not found, skipping."
 fi
