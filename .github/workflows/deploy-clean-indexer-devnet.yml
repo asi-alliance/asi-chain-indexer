@@ -29,17 +29,25 @@ jobs:
 
     - name: Deploy on EC2 and Get Logs
       run: |
-        # Send the command and get its ID
+        GITHUB_REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+        
+        REMOTE_REPO_PATH="/home/ubuntu/asi-chain-indexer"
         COMMAND_ID=$(aws ssm send-command \
-          --document-name "AWS-RunShellScript" \
-          --targets "Key=instanceids,Values=${{ env.EC2_INSTANCE_ID }}" \
-          --comment "Deploy commit ${{ github.sha }}" \
-          --query "Command.CommandId" \
-          --output text \
-          --parameters "commands=[
-            \"cd /home/ubuntu/asi-chain-indexer && \
-            bash deploy.sh --clean \
-          ]")
+        --document-name "AWS-RunShellScript" \
+        --targets "Key=instanceids,Values=${{ env.EC2_INSTANCE_ID }}" \
+        --comment "Deploy commit ${{ github.sha }}" \
+        --query "Command.CommandId" \
+        --output text \
+        --parameters 'commands=[
+        "if [ ! -d '$REMOTE_REPO_PATH' ]; then \
+          git clone '$GITHUB_REPO_URL' '$REMOTE_REPO_PATH'; \
+        fi && \
+        cd '$REMOTE_REPO_PATH' && \
+        git fetch --all && \
+        git checkout ${{ github.sha }} && \
+        bash deploy.sh --clean"
+        ]')
+        
         if [ -z "$COMMAND_ID" ]; then
           echo "::error::Failed to send command to SSM."
           exit 1
