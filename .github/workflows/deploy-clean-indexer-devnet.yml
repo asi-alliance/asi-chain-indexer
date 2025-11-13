@@ -17,7 +17,6 @@ jobs:
     permissions:
       id-token: write
       contents: read
-
     steps:
     - name: Check out code
       uses: actions/checkout@v4
@@ -28,19 +27,6 @@ jobs:
         role-to-assume: arn:aws:iam::533793137436:role/asi-chain-indexer-dev-github-actions-ecr-push-role 
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v2
-
-    - name: Build, tag, and push indexer image
-      id: build-indexer
-      env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-      run: |
-        docker build -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY_INDEXER }}:$IMAGE_TAG -f indexer/Dockerfile.rust indexer/
-        docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY_INDEXER }}:$IMAGE_TAG
-        echo "image=$ECR_REGISTRY/${{ env.ECR_REPOSITORY_INDEXER }}:$IMAGE_TAG" >> $GITHUB_OUTPUT
-    
     - name: Deploy on EC2 and Get Logs
       run: |
         # Send the command and get its ID
@@ -51,13 +37,8 @@ jobs:
           --query "Command.CommandId" \
           --output text \
           --parameters "commands=[
-            \"cd /home/ubuntu/indexer && \
-            export ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }} && \
-            export IMAGE_TAG=${{ github.sha }} && \
-            aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin \$ECR_REGISTRY && \
-            docker compose -f docker-compose.rust.yml pull --quiet && \
-            bash DESTROY-DB-deploy-auto.sh \
-            docker image prune -a -f \"
+            \"cd /home/ubuntu/asi-chain-indexer && \
+            bash deploy.sh --clean && \
           ]")
         if [ -z "$COMMAND_ID" ]; then
           echo "::error::Failed to send command to SSM."
