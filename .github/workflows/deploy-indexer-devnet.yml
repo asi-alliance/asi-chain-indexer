@@ -1,4 +1,4 @@
-name: Deploy Indexer Backend DevNet
+name: Deploy Indexer DevNet
 
 on:
   workflow_dispatch:
@@ -12,12 +12,11 @@ env:
 
 jobs:
   build-and-deploy:
-    name: Build and Deploy to Dev
+    name: Build and Deploy to Dev AND DESTROY DB
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
-
     steps:
     - name: Check out code
       uses: actions/checkout@v4
@@ -28,37 +27,27 @@ jobs:
         role-to-assume: arn:aws:iam::533793137436:role/asi-chain-indexer-dev-github-actions-ecr-push-role 
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v2
-
-    - name: Build, tag, and push indexer image
-      id: build-indexer
-      env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-      run: |
-        docker build -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY_INDEXER }}:$IMAGE_TAG -f indexer/Dockerfile.rust indexer/
-        docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY_INDEXER }}:$IMAGE_TAG
-        echo "image=$ECR_REGISTRY/${{ env.ECR_REPOSITORY_INDEXER }}:$IMAGE_TAG" >> $GITHUB_OUTPUT
-    
     - name: Deploy on EC2 and Get Logs
       run: |
-        # Send the command and get its ID
+        GITHUB_REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+        REMOTE_REPO_PATH="/home/ubuntu/asi-chain-indexer"
         COMMAND_ID=$(aws ssm send-command \
-          --document-name "AWS-RunShellScript" \
-          --targets "Key=instanceids,Values=${{ env.EC2_INSTANCE_ID }}" \
-          --comment "Deploy commit ${{ github.sha }}" \
-          --query "Command.CommandId" \
-          --output text \
-          --parameters "commands=[
-            \"cd /home/ubuntu/indexer && \
-            export ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }} && \
-            export IMAGE_TAG=${{ github.sha }} && \
-            aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin \$ECR_REGISTRY && \
-            docker compose -f docker-compose.rust.yml pull --quiet && \
-            bash deploy-auto.sh \
-            docker image prune -a -f \"
-          ]")
+        --document-name "AWS-RunShellScript" \
+        --targets "Key=instanceids,Values=${{ env.EC2_INSTANCE_ID }}" \
+        --comment "Deploy commit ${{ github.sha }}" \
+        --query "Command.CommandId" \
+        --output text \
+        --parameters 'commands=[
+          "export HOME=/home/ubuntu && \
+            git config --global --add safe.directory '$REMOTE_REPO_PATH' && \
+          cd '$REMOTE_REPO_PATH' && \
+          git remote set-url origin '$GITHUB_REPO_URL' && \
+          git reset --hard HEAD && \
+          git fetch --all && \
+          git checkout ${{ github.sha }} && \
+          bash deploy.sh"
+        ]')
+        
         if [ -z "$COMMAND_ID" ]; then
           echo "::error::Failed to send command to SSM."
           exit 1
@@ -66,7 +55,7 @@ jobs:
         echo "Command sent. CommandId: $COMMAND_ID. Waiting for completion..."
         # Wait loop with a 3-minute timeout
         SECONDS=0
-        TIMEOUT=180
+        TIMEOUT=600
         STATUS="Pending"
         while [ "$STATUS" = "Pending" ] || [ "$STATUS" = "InProgress" ]; do
           if [ $SECONDS -gt $TIMEOUT ]; then
