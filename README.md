@@ -1,4 +1,26 @@
-# ASI-Chain Indexer
+<div align="center">
+
+# ASI Chain: Indexer
+
+[![Status](https://img.shields.io/badge/Status-BETA-FFA500?style=for-the-badge)](https://github.com/asi-alliance/asi-chain-explorer)
+[![Version](https://img.shields.io/badge/Version-0.1.0-A8E6A3?style=for-the-badge)](https://github.com/asi-alliance/asi-chain-explorer/releases)
+[![License](https://img.shields.io/badge/License-Apache%202.0-1A1A1A?style=for-the-badge)](LICENSE)
+[![Docs](https://img.shields.io/badge/Docs-Available-C4F0C1?style=for-the-badge)](https://docs.asichain.io/explorer/usage/)
+
+<h3>Blockchain Indexer Infrastructure for ASI Chain</h3>
+
+Part of the [**Artificial Superintelligence Alliance**](https://superintelligence.io) ecosystem
+
+*Uniting Fetch.ai, SingularityNET and CUDOS*
+
+</div>
+
+---
+
+**ASI Chain Indexer** provides comprehensive blockchain data synchronization and hasura interface for exploring blocks, transactions, validators, and network statistics on the ASI Chain network.
+
+---
+
 
 A high-performance blockchain indexer for ASI-Chain that synchronizes data from RChain nodes using the Rust CLI client and stores it in PostgreSQL for efficient querying.
 
@@ -108,7 +130,7 @@ cp .env.example .env
 # Edit .env with your node configuration if needed
 
 # Step 2: Start the indexer
-docker compose -f docker-compose.rust.yml up -d
+docker compose -f docker-compose.yml up -d
 
 # Step 3: Configure Hasura (for GraphQL API and explorer frontend)
 ./scripts/configure-hasura.sh
@@ -180,7 +202,7 @@ curl http://localhost:9090/status | jq .
 
 #### Docker Compose Files
 
-1. **docker-compose.rust.yml** (Production)
+1. **docker-compose.yml** (Production)
    - Uses Dockerfile.rust-builder by default
    - Services included:
      - `postgres`: PostgreSQL 14 Alpine (port 5432)
@@ -192,9 +214,8 @@ curl http://localhost:9090/status | jq .
      - `./migrations:/docker-entrypoint-initdb.d`: Auto-run SQL migrations
    - Health checks configured for all services
 
-2. **docker-compose.yml** (Legacy)
-   - Original HTTP-based configuration
-   - Deprecated - use rust.yml version
+2. **docker-compose.debug.yml** (Debug)
+   - Same as production but with full dependency installation in runtime
 
 ### Environment Configuration
 
@@ -386,10 +407,10 @@ The Rust indexer provides enhanced metrics:
 2. **Container health checks failing**
    ```bash
    # Check container logs
-   docker compose -f docker-compose.rust.yml logs rust-indexer
+   docker compose -f docker-compose.yml logs rust-indexer
    
    # Verify all services are running
-   docker compose -f docker-compose.rust.yml ps
+   docker compose -f docker-compose.yml ps
    
    # Check network connectivity between containers
    docker exec asi-rust-indexer ping postgres
