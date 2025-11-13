@@ -101,22 +101,53 @@ The indexer provides complete automation for blockchain data synchronization:
 ## Architecture
 
 ```
-┌─────────────────┐     Rust CLI       ┌─────────────────┐
-│   RChain Node   │ ←────────────────→ │  Rust Indexer   │
-│  (gRPC/HTTP)    │                    │ (Python/asyncio)|
-└─────────────────┘                    └────────┬────────┘
-                                               │
-                                               ▼
-                                       ┌─────────────────┐
-                                       │   PostgreSQL    │
-                                       │   (indexed)     │
-                                       └────────┬────────┘
-                                               │
-                                               ▼
-                                       ┌─────────────────┐
-                                       │ Hasura GraphQL  │
-                                       │   (optional)    │
-                                       └─────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                     ASI Chain Node                          │
+│                  (RChain-based Network)                     │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+                      │ gRPC/HTTP
+                      │
+┌─────────────────────▼───────────────────────────────────────┐
+│                    Rust CLI Client                          │
+│         (Blockchain Data Extraction Interface)              │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+                      │ Command Execution
+                      │
+┌─────────────────────▼───────────────────────────────────────┐
+│                  Python Indexer Service                     │
+│  - Block synchronization                                    │
+│  - Deployment processing                                    │
+│  - Transfer extraction                                      │
+│  - Validator tracking                                       │
+│  - Network statistics                                       │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+                      │ asyncpg/SQLAlchemy
+                      │
+┌─────────────────────▼───────────────────────────────────────┐
+│                   PostgreSQL Database                       │
+│  Tables: blocks, deployments, transfers, validators,        │
+│          validator_bonds, balance_states, network_stats     │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+                      │ Database Connection
+                      │
+┌─────────────────────▼───────────────────────────────────────┐
+│                   Hasura GraphQL Engine                     │
+│  - Auto-generated GraphQL API                               │
+│  - Real-time queries with polling                           │
+│  - Query optimization                                       │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+                      │ GraphQL (HTTP)
+                      │
+┌─────────────────────▼───────────────────────────────────────┐
+│                  Client Applications                        │
+│  - Explorer Frontend                                        │
+│  - Your App                                                 │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## Rust CLI Commands Used
