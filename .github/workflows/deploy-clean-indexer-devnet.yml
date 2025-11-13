@@ -30,7 +30,6 @@ jobs:
     - name: Deploy on EC2 and Get Logs
       run: |
         GITHUB_REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
-        
         REMOTE_REPO_PATH="/home/ubuntu/asi-chain-indexer"
         COMMAND_ID=$(aws ssm send-command \
         --document-name "AWS-RunShellScript" \
@@ -39,7 +38,8 @@ jobs:
         --query "Command.CommandId" \
         --output text \
         --parameters 'commands=[
-            "git config --global --add safe.directory '$REMOTE_REPO_PATH' && \
+            "export HOME=/home/ubuntu && \
+            git config --global --add safe.directory '$REMOTE_REPO_PATH' && \
             if [ ! -d '$REMOTE_REPO_PATH' ]; then \
               git clone '$GITHUB_REPO_URL' '$REMOTE_REPO_PATH'; \
             fi && \
