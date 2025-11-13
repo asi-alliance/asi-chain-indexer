@@ -39,14 +39,15 @@ jobs:
         --query "Command.CommandId" \
         --output text \
         --parameters 'commands=[
-        "if [ ! -d '$REMOTE_REPO_PATH' ]; then \
-          git clone '$GITHUB_REPO_URL' '$REMOTE_REPO_PATH'; \
-        fi && \
-        cd '$REMOTE_REPO_PATH' && \
-        git fetch --all && \
-        git checkout ${{ github.sha }} && \
-        bash deploy.sh --clean"
-        ]')
+            "git config --global --add safe.directory '$REMOTE_REPO_PATH' && \
+            if [ ! -d '$REMOTE_REPO_PATH' ]; then \
+              git clone '$GITHUB_REPO_URL' '$REMOTE_REPO_PATH'; \
+            fi && \
+            cd '$REMOTE_REPO_PATH' && \
+            git fetch --all && \
+            git checkout ${{ github.sha }} && \
+            bash deploy.sh --clean"
+          ]')
         
         if [ -z "$COMMAND_ID" ]; then
           echo "::error::Failed to send command to SSM."
