@@ -22,7 +22,7 @@ Part of the [**Artificial Superintelligence Alliance**](https://superintelligenc
 ---
 
 
-A high-performance blockchain indexer for ASI-Chain that synchronizes data from RChain nodes using the Rust CLI client and stores it in PostgreSQL for efficient querying.
+A high-performance blockchain indexer for ASI-Chain that synchronizes data from ASI nodes using the Rust CLI client and stores it in PostgreSQL for efficient querying.
 
 ## Latest Version
 
