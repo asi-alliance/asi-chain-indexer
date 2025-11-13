@@ -38,7 +38,7 @@ jobs:
           --output text \
           --parameters "commands=[
             \"cd /home/ubuntu/asi-chain-indexer && \
-            bash deploy.sh --clean && \
+            bash deploy.sh --clean \
           ]")
         if [ -z "$COMMAND_ID" ]; then
           echo "::error::Failed to send command to SSM."
