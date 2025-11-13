@@ -63,24 +63,18 @@ interval=5
 elapsed=0
 
 while true; do
-    healthy_count=$(docker compose ps --format json | jq '[.[] | select(.Health == "healthy")] | length')
-    total_count=$(docker compose ps --format json | jq 'length')
+    total_count=$(docker compose ps --services | wc -l)
+    healthy_count=$(docker compose ps | grep -c "(healthy)")
 
     if [ "$healthy_count" -eq "$total_count" ] && [ "$total_count" -gt 0 ]; then
         echo "✅ All containers are healthy!"
         break
     fi
 
-    if [ "$elapsed" -ge $timeout ]; then
-        echo "⚠️  Timeout waiting for containers to become healthy."
-        docker compose ps
-        break
-    fi
-
-    echo "Waiting for containers to be ready... (${elapsed}s / ${timeout}s)"
-    sleep $interval
-    elapsed=$((elapsed + interval))
+    echo "Waiting for containers to be ready..."
+    sleep 5
 done
+
 
 echo "--- Running Hasura configuration script ---"
 if [ -f "./scripts/configure_hasura.sh" ]; then
