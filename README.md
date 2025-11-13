@@ -1,4 +1,26 @@
-# ASI-Chain Indexer
+<div align="center">
+
+# ASI Chain: Indexer
+
+[![Status](https://img.shields.io/badge/Status-BETA-FFA500?style=for-the-badge)](https://github.com/asi-alliance/asi-chain-explorer)
+[![Version](https://img.shields.io/badge/Version-0.1.0-A8E6A3?style=for-the-badge)](https://github.com/asi-alliance/asi-chain-explorer/releases)
+[![License](https://img.shields.io/badge/License-Apache%202.0-1A1A1A?style=for-the-badge)](LICENSE)
+[![Docs](https://img.shields.io/badge/Docs-Available-C4F0C1?style=for-the-badge)](https://docs.asichain.io/explorer/usage/)
+
+<h3>Blockchain Indexer Infrastructure for ASI Chain</h3>
+
+Part of the [**Artificial Superintelligence Alliance**](https://superintelligence.io) ecosystem
+
+*Uniting Fetch.ai, SingularityNET and CUDOS*
+
+</div>
+
+---
+
+**ASI Chain Indexer** provides comprehensive blockchain data synchronization and hasura interface for exploring blocks, transactions, validators, and network statistics on the ASI Chain network.
+
+---
+
 
 A high-performance blockchain indexer for ASI-Chain that synchronizes data from RChain nodes using the Rust CLI client and stores it in PostgreSQL for efficient querying.
 
@@ -61,6 +83,21 @@ The indexer provides complete automation for blockchain data synchronization:
 - Proper NULL handling in error_message fields
 - Multi-stage Docker builds for optimized images
 
+### Stack
+
+- **Python 3.11**: Core programming language
+- **asyncio**: Asynchronous processing framework
+- **SQLAlchemy 2.0.31**: ORM and database abstraction
+- **asyncpg 0.29.0**: PostgreSQL async driver
+- **Pydantic 2.7.4**: Configuration and data validation
+- **pydantic-settings 2.3.4**: Settings management
+- **structlog 24.2.0**: Structured logging
+- **prometheus-client 0.20.0**: Metrics exposure
+- **aiohttp 3.9.5**: HTTP client
+- **click 8.1.7**: CLI interface
+- **tenacity 8.5.0**: Retry logic
+
+
 ## Architecture
 
 ```
@@ -108,7 +145,7 @@ cp .env.example .env
 # Edit .env with your node configuration if needed
 
 # Step 2: Start the indexer
-docker compose -f docker-compose.rust.yml up -d
+docker compose -f docker-compose.yml up -d
 
 # Step 3: Configure Hasura (for GraphQL API and explorer frontend)
 ./scripts/configure-hasura.sh
@@ -180,7 +217,7 @@ curl http://localhost:9090/status | jq .
 
 #### Docker Compose Files
 
-1. **docker-compose.rust.yml** (Production)
+1. **docker-compose.yml** (Production)
    - Uses Dockerfile.rust-builder by default
    - Services included:
      - `postgres`: PostgreSQL 14 Alpine (port 5432)
@@ -192,9 +229,8 @@ curl http://localhost:9090/status | jq .
      - `./migrations:/docker-entrypoint-initdb.d`: Auto-run SQL migrations
    - Health checks configured for all services
 
-2. **docker-compose.yml** (Legacy)
-   - Original HTTP-based configuration
-   - Deprecated - use rust.yml version
+2. **docker-compose.debug.yml** (Debug)
+   - Same as production but with full dependency installation in runtime
 
 ### Environment Configuration
 
@@ -252,19 +288,30 @@ docker compose -f docker-compose.rust.yml restart rust-indexer
 
 ### Environment Variables
 
-Environment variables for Rust indexer:
+### Indexer Environment Variables
 
-- `RUST_CLI_PATH`: Path to node_cli binary (default: /usr/local/bin/node_cli)
-- `NODE_HOST`: RChain node hostname (default: host.docker.internal)
-- `GRPC_PORT`: gRPC port for blockchain operations (default: 40412)
-- `HTTP_PORT`: HTTP port for status queries (default: 40413)
-- `DATABASE_URL`: PostgreSQL connection string
-- `SYNC_INTERVAL`: Seconds between sync cycles (default: 5)
-- `BATCH_SIZE`: Number of blocks per batch (default: 50)
-- `START_FROM_BLOCK`: Initial block to sync from (default: 0)
-- `LOG_LEVEL`: Logging level (default: INFO)
-- `MONITORING_PORT`: API server port (default: 9090)
-- `ENABLE_ASI_TRANSFER_EXTRACTION`: Extract ASI transfers (default: true)
+| Variable | Description                               | Default |
+|----------|-------------------------------------------|---------|
+| `NODE_HOST` | ASI Chain node hostname                   | `localhost` |
+| `GRPC_PORT` | Node gRPC port for blockchain operations  | `40412` |
+| `HTTP_PORT` | Node HTTP port for status queries         | `40413` |
+| `NODE_URL` | RChain node HTTP API endpoint             | `http://localhost:40453` |
+| `NODE_TIMEOUT` | HTTP request timeout in seconds           | `30` |
+| `RUST_CLI_PATH` | Path to Rust CLI executable               | `/rust-client/target/release/node_cli` |
+| `DATABASE_URL` | PostgreSQL connection URL                 | `postgresql://indexer:indexer_pass@localhost:5432/asichain` |
+| `DATABASE_POOL_SIZE` | Database connection pool size             | `20` |
+| `DATABASE_POOL_TIMEOUT` | Database pool timeout in seconds          | `10` |
+| `SYNC_INTERVAL` | Seconds between sync cycles               | `5` |
+| `BATCH_SIZE` | Number of blocks per batch                | `100` |
+| `START_FROM_BLOCK` | Initial block to start indexing           | `0` |
+| `MONITORING_PORT` | Prometheus metrics port                   | `9090` |
+| `HEALTH_CHECK_INTERVAL` | Health check interval in seconds          | `60` |
+| `LOG_LEVEL` | Logging level (DEBUG/INFO/WARNING/ERROR)  | `INFO` |
+| `LOG_FORMAT` | Log format (json/text)                    | `json` |
+| `ENABLE_ASI_TRANSFER_EXTRACTION` | Extract ASI transfers from deployments    | `true` |
+| `ENABLE_METRICS` | Enable Prometheus metrics                 | `true` |
+| `ENABLE_HEALTH_CHECK` | Enable health check endpoint              | `true` |
+| `HASURA_ADMIN_SECRET` | Hasura admin secret (not used by indexer) | Empty |
 
 ## Database Schema
 
@@ -386,10 +433,10 @@ The Rust indexer provides enhanced metrics:
 2. **Container health checks failing**
    ```bash
    # Check container logs
-   docker compose -f docker-compose.rust.yml logs rust-indexer
+   docker compose -f docker-compose.yml logs rust-indexer
    
    # Verify all services are running
-   docker compose -f docker-compose.rust.yml ps
+   docker compose -f docker-compose.yml ps
    
    # Check network connectivity between containers
    docker exec asi-rust-indexer ping postgres
