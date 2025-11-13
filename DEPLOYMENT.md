@@ -168,7 +168,7 @@ services:
       context: .
       dockerfile: Dockerfile.rust-simple
     environment:
-      - NODE_HOST=${NODE_HOST:-your-rchain-node}
+      - NODE_HOST=${NODE_HOST:-your-node}
       - GRPC_PORT=${GRPC_PORT:-40412}
       - HTTP_PORT=${HTTP_PORT:-40413}
       - DATABASE_URL=postgresql://indexer:${DB_PASSWORD}@postgres:5432/asichain

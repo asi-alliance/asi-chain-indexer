@@ -8,8 +8,8 @@ from pydantic import Field
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
-    # RChain Node Configuration
-    # Client for interacting with RChain node HTTP API.
+    # Node Configuration
+    # Client for interacting with node HTTP API.
     # Maybe deprecated param
     node_url: str = Field(
         default="http://localhost:40453",
