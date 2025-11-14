@@ -165,12 +165,17 @@ The indexer leverages these Rust CLI commands for comprehensive data extraction:
 9. **show-main-chain** - Verify main chain consistency
 
 ## ⚡ Quick Start
+## Requirements
 
-**Three simple steps to get started:**
+- Docker and Docker Compose (recommended)
+- OR Python 3.9+ and PostgreSQL 14+
+- Running node (gRPC port & HTTP port)
+
+## Installation
+
+### Recommended Installation
 
 ```bash
-cd indexer
-
 # Step 1: Create and configure .env file in /indexer directory
 cp .env.example .env
 # Edit .env with your node configuration if needed
@@ -181,6 +186,20 @@ cp .env.example .env
 # Check status
 curl http://localhost:9090/status | jq .
 ```
+
+### Docker Installation
+
+```bash
+# Clone the repository
+git clone <repository-url>
+
+# Manual Docker Compose
+docker compose -f docker-compose.yml up -d
+
+# Verify it's working
+curl http://localhost:9090/status | jq .
+```
+
 
 **That's it!** The indexer will automatically:
 - Build Rust CLI from source (10-15 min first time, cached after)
@@ -195,52 +214,6 @@ After running the Hasura configuration scripts in Step 3:
 - Indexer API: http://localhost:9090
 - Hasura Console: http://localhost:8080/console
 - GraphQL endpoint: http://localhost:8080/v1/graphql
-
-**Note:** Step 3 (Hasura scripts) is required if you want to use the GraphQL API or run the explorer frontend.
-
-## Requirements
-
-- Docker and Docker Compose (recommended)
-- OR Python 3.9+ and PostgreSQL 14+
-- Running RChain node (gRPC port 40412, HTTP port 40413)
-- Pre-compiled Rust CLI binary (included for Linux x86_64)
-
-## Installation
-
-### Docker Installation (Recommended)
-
-```bash
-# Clone the repository
-git clone <repository-url>
-cd indexer
-
-# Manual Docker Compose
-docker compose -f docker-compose.rust.yml up -d
-
-# Verify it's working
-curl http://localhost:9090/status | jq .
-```
-
-### Docker Configuration Files
-
-#### Dockerfiles
-
-1. **Dockerfile.rust-builder** (Default - Build from source)
-   - Builds Rust CLI from rust-client submodule
-   - Multi-stage build: Rust → Python → Runtime
-   - Takes 10-15 minutes first build, cached thereafter
-   - Cross-platform compatible
-   - Used by: `docker-compose.rust.yml`
-
-2. **Dockerfile.rust-simple** (Pre-compiled binary)
-   - Uses pre-compiled `node_cli_linux` binary
-   - Faster deployment (no Rust compilation)
-   - Requires binary at `indexer/node_cli_linux`
-   - Single-stage Python build
-
-3. **Dockerfile** (Legacy HTTP indexer)
-   - Original HTTP-based indexer
-   - Deprecated - use Rust CLI versions instead
 
 #### Docker Compose Files
 
