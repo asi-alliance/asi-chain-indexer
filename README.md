@@ -176,11 +176,7 @@ cp .env.example .env
 # Edit .env with your node configuration if needed
 
 # Step 2: Start the indexer
-docker compose -f docker-compose.yml up -d
-
-# Step 3: Configure Hasura (for GraphQL API and explorer frontend)
-./scripts/configure-hasura.sh
-./scripts/setup-hasura-relationships.sh
+./deploy.sh
 
 # Check status
 curl http://localhost:9090/status | jq .
@@ -249,7 +245,7 @@ curl http://localhost:9090/status | jq .
 #### Docker Compose Files
 
 1. **docker-compose.yml** (Production)
-   - Uses Dockerfile.rust-builder by default
+   - Uses Dockerfile by default
    - Services included:
      - `postgres`: PostgreSQL 14 Alpine (port 5432)
      - `rust-indexer`: Python indexer with Rust CLI (port 9090)
@@ -540,18 +536,14 @@ indexer/
 │   ├── 001_initial_schema.sql               # Legacy
 │   └── 002_add_enhanced_tables.sql          # Legacy
 ├── scripts/
-│   ├── configure-hasura.sh          # Hasura setup
+│   ├── full-init-hasura.sh           # FULL Hasura setup
 │   ├── setup-hasura-relationships.sh # Relationship configuration
 │   └── test-relationships.sh         # GraphQL tests
 ├── examples/
 │   └── graphql-queries.md           # Sample GraphQL queries
 ├── Docker Configuration:
-│   ├── Dockerfile                   # Legacy HTTP indexer
-│   ├── Dockerfile.rust-builder      # Build from source (default)
-│   ├── Dockerfile.rust-simple       # Pre-compiled binary
-│   ├── Dockerfile.rust              # Alternative Rust build
-│   ├── docker-compose.yml           # Legacy HTTP compose
-│   └── docker-compose.rust.yml      # Production Rust compose
+│   ├── Dockerfile                   
+│   ├── docker-compose.yml          
 ├── Environment Templates:
 │   ├── .env                         # Active configuration
 │   ├── .env.remote-observer        
