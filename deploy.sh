@@ -39,7 +39,7 @@ if [ -f ".env" ]; then
 fi
 
 # --- Required environment variables ---
-REQUIRED_VARS=(NODE_HOST HTTP_PORT GRPC_PORT HASURA_URL HASURA_ADMIN_SECRET)
+REQUIRED_VARS=(NODE_HOST HTTP_PORT GRPC_PORT HASURA_BASE HASURA_ADMIN_SECRET)
 
 for var in "${REQUIRED_VARS[@]}"; do
     if [ -z "${!var}" ]; then
@@ -77,19 +77,11 @@ done
 
 
 echo "--- Running Hasura configuration script ---"
-if [ -f "./scripts/configure-hasura.sh" ]; then
-    chmod +x ./scripts/configure-hasura.sh
-    ./scripts/configure-hasura.sh
+if [ -f "./scripts/full-init-hasura.sh" ]; then
+    chmod +x ./scripts/full-init-hasura.sh
+    ./scripts/full-init-hasura.sh
 else
-    echo "⚠️  ./scripts/configure-hasura.sh not found, skipping."
-fi
-
-echo "--- Running setup script ---"
-if [ -f "./scripts/setup-hasura-relationships.sh" ]; then
-    chmod +x ./scripts/setup-hasura-relationships.sh
-    ./scripts/setup-hasura-relationships.sh
-else
-    echo "⚠️  ./scripts/setup-hasura-relationships.sh not found, skipping."
+    echo "⚠️  ./scripts/full-init-hasura not found, skipping."
 fi
 
 echo "--- Running basic Hasura test ---"
