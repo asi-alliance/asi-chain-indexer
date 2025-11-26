@@ -86,7 +86,8 @@ fi
 
 echo "--- Running basic Hasura test ---"
 
-HASURA_URL=${HASURA_URL:-http://localhost:8080/v1/graphql}
+$HASURA_BASE=${$HASURA_BASE:-http://localhost:8080}
+HASURA_URL="${HASURA_URL:-$HASURA_BASE/v1/graphql}"
 ADMIN_SECRET=${HASURA_ADMIN_SECRET:-myadminsecretkey}
 
 echo "Checking Hasura availability at $HASURA_URL..."

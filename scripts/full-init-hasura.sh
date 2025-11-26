@@ -17,10 +17,10 @@ HASURA_ENDPOINT="${HASURA_ENDPOINT:-$HASURA_BASE/v1/metadata}"
 HASURA_GRAPHQL="${HASURA_GRAPHQL:-$HASURA_BASE/v1/graphql}"
 HASURA_SQL="${HASURA_SQL:-$HASURA_BASE/v2/query}"
 
-until curl -s "$HASURA_GRAPHQL" > /dev/null; do
-  echo "Waiting for Hasura GraphQL endpoint..."
-  sleep 2
-done
+#until curl -s "$HASURA_GRAPHQL" > /dev/null; do
+#  echo "Waiting for Hasura GraphQL endpoint..."
+#  sleep 2
+#done
 
 echo "Metadata endpoint: $HASURA_ENDPOINT"
 echo "SQL endpoint: $HASURA_SQL"

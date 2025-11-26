@@ -1,16 +1,14 @@
 """Database models for the indexer."""
 
 from datetime import datetime
-from decimal import Decimal
-from typing import Optional
 
 from sqlalchemy import (
     BigInteger, Boolean, Column, DateTime, ForeignKey, Index, Integer,
-    Numeric, String, Text, UniqueConstraint, create_engine
+    Numeric, String, Text, UniqueConstraint
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship, sessionmaker
+from sqlalchemy.orm import relationship
 
 Base = declarative_base()
 
@@ -97,7 +95,8 @@ class Transfer(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     deploy_id = Column(String(140), ForeignKey("deployments.deploy_id"), nullable=False, index=True)
     block_number = Column(BigInteger, ForeignKey("blocks.block_number"), nullable=False, index=True)
-    from_address = Column(String(150), nullable=False, index=True)  # Support validator public keys
+    from_address = Column(String(150), nullable=False, index=True)
+    from_public_key = Column(String(150), nullable=True, index=True)  # Support validator public keys
     to_address = Column(String(150), nullable=False, index=True)  # Support validator public keys
     amount_dust = Column(BigInteger, nullable=False)
     amount_asi = Column(Numeric(20, 8), nullable=False)
