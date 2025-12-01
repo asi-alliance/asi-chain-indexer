@@ -34,6 +34,7 @@ fi
 if [ -f ".env" ]; then
     sed -i 's/\r$//' .env
     set -o allexport
+    # shellcheck source=/dev/null
     source .env
     set +o allexport
 fi
@@ -71,37 +72,46 @@ while true; do
         break
     fi
 
-    echo "Waiting for containers to be ready..."
-    sleep 5
-done
+    elapsed=$((elapsed + interval))
+    if [ "$elapsed" -ge "$timeout" ]; then
+        echo "⚠️  Timeout waiting for containers to become healthy (>${timeout}s)"
+        docker compose ps
+        break
+    fi
 
+    echo "Waiting for containers to be ready..."
+    sleep "$interval"
+done
 
 echo "--- Running Hasura configuration script ---"
 if [ -f "./scripts/full-init-hasura.sh" ]; then
     chmod +x ./scripts/full-init-hasura.sh
     ./scripts/full-init-hasura.sh
 else
-    echo "⚠️  ./scripts/full-init-hasura not found, skipping."
+    echo "⚠️  ./scripts/full-init-hasura.sh not found, skipping."
 fi
 
 echo "--- Running basic Hasura test ---"
 
-$HASURA_BASE=${$HASURA_BASE:-http://localhost:8080}
+# Fallback default for HASURA_BASE if somehow not defined
+HASURA_BASE="${HASURA_BASE:-http://localhost:8080}"
 HASURA_URL="${HASURA_URL:-$HASURA_BASE/v1/graphql}"
-ADMIN_SECRET=${HASURA_ADMIN_SECRET:-myadminsecretkey}
+ADMIN_SECRET="${HASURA_ADMIN_SECRET:-myadminsecretkey}"
 
 echo "Checking Hasura availability at $HASURA_URL..."
-if curl -s -o /dev/null -w "%{http_code}" "$HASURA_URL" | grep -qE "200|400"; then
-    echo "✅ Hasura endpoint reachable!"
+status_code=$(curl -s -o /dev/null -w "%{http_code}" "$HASURA_URL" || echo "000")
+
+if echo "$status_code" | grep -qE "200|400"; then
+    echo "✅ Hasura endpoint reachable! (HTTP $status_code)"
 else
-    echo "⚠️  Hasura not responding at $HASURA_URL"
-    echo "--- Done (skipping test) ---"
+    echo "⚠️  Hasura not responding at $HASURA_URL (HTTP $status_code)"
+    echo "--- Done (skipping test query) ---"
     exit 0
 fi
 
 TEST_QUERY='{"query":"{ blocks_aggregate { aggregate { count } } }"}'
 
-echo "Sending test query to Hasura..."
+echo "Sending test query to Hasura (with admin secret)..."
 response=$(curl -s -X POST "$HASURA_URL" \
   -H "Content-Type: application/json" \
   -H "x-hasura-admin-secret: $ADMIN_SECRET" \
