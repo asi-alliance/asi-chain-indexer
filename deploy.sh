@@ -57,30 +57,46 @@ done
 echo "--- Building and starting containers ---"
 docker compose up -d --build
 
-echo "--- Waiting for containers to be healthy ---"
+echo "--- Waiting for containers to be up ---"
 
-timeout=120
-interval=5
+timeout=30
+interval=4
 elapsed=0
 
+SERVICES=$(docker compose ps --services)
+
 while true; do
-    total_count=$(docker compose ps --services | wc -l)
-    healthy_count=$(docker compose ps | grep -c "(healthy)")
+  all_ready=true
 
-    if [ "$healthy_count" -eq "$total_count" ] && [ "$total_count" -gt 0 ]; then
-        echo "✅ All containers are healthy!"
-        break
+  for svc in $SERVICES; do
+    line=$(docker compose ps "$svc" | awk 'NR==2')
+    if [ -z "$line" ]; then
+      all_ready=false
+      continue
     fi
 
-    elapsed=$((elapsed + interval))
-    if [ "$elapsed" -ge "$timeout" ]; then
-        echo "⚠️  Timeout waiting for containers to become healthy (>${timeout}s)"
-        docker compose ps
-        break
+   # we consider the service to be "ready" if it is Up or Exit 0 has ended
+    if echo "$line" | grep -qE "Up|Exit 0"; then
+      continue
+    else
+      all_ready=false
     fi
+  done
 
-    echo "Waiting for containers to be ready..."
-    sleep "$interval"
+  if [ "$all_ready" = true ]; then
+    echo "✅ All services are up (Up/Exit 0)"
+    break
+  fi
+
+  elapsed=$((elapsed + interval))
+  if [ "$elapsed" -ge "$timeout" ]; then
+    echo "⚠️  Timeout waiting for services to be up (>${timeout}s)"
+    docker compose ps
+    break
+  fi
+
+  echo "Waiting for containers to be ready..."
+  sleep "$interval"
 done
 
 echo "--- Running Hasura configuration script ---"
