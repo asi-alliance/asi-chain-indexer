@@ -276,14 +276,14 @@ cp target/x86_64-unknown-linux-musl/release/node_cli ../indexer/node_cli_linux
 vim .env
 
 # Restart indexer to apply changes
-docker compose -f docker-compose.rust.yml restart rust-indexer
+docker compose -f docker-compose.yml restart rust-indexer
 
 # Use pre-compiled binary instead of building from source
-# 1. Edit docker-compose.rust.yml
+# 1. Edit docker-compose.yml
 # 2. Change: dockerfile: indexer/Dockerfile.rust-builder
 #    To: dockerfile: indexer/Dockerfile.rust-simple
 # 3. Ensure node_cli_linux exists in indexer directory
-# 4. Rebuild: docker compose -f docker-compose.rust.yml build
+# 4. Rebuild: docker compose -f docker-compose.yml build
 ```
 
 ### Environment Variables
@@ -448,18 +448,18 @@ The Rust indexer provides enhanced metrics:
    sudo chown -R 999:999 ./postgres_data
    
    # Or remove and recreate volumes
-   docker compose -f docker-compose.rust.yml down -v
-   docker compose -f docker-compose.rust.yml up -d
+   docker compose -f docker-compose.yml down -v
+   docker compose -f docker-compose.yml up -d
    ```
 
 ### Reset and Start Fresh
 
 ```bash
 # Stop services and remove data
-docker compose -f docker-compose.rust.yml down -v
+docker compose -f docker-compose.yml down -v
 
 # Start fresh sync from block 0
-docker compose -f docker-compose.rust.yml up -d
+docker compose -f docker-compose.yml up -d
 ```
 
 ## Performance Characteristics

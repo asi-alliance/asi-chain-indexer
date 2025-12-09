@@ -34,6 +34,7 @@ fi
 if [ -f ".env" ]; then
     sed -i 's/\r$//' .env
     set -o allexport
+    # shellcheck source=/dev/null
     source .env
     set +o allexport
 fi
@@ -56,51 +57,77 @@ done
 echo "--- Building and starting containers ---"
 docker compose up -d --build
 
-echo "--- Waiting for containers to be healthy ---"
+echo "--- Waiting for containers to be up ---"
 
-timeout=120
-interval=5
+timeout=30
+interval=4
 elapsed=0
 
-while true; do
-    total_count=$(docker compose ps --services | wc -l)
-    healthy_count=$(docker compose ps | grep -c "(healthy)")
+SERVICES=$(docker compose ps --services)
 
-    if [ "$healthy_count" -eq "$total_count" ] && [ "$total_count" -gt 0 ]; then
-        echo "✅ All containers are healthy!"
-        break
+while true; do
+  all_ready=true
+
+  for svc in $SERVICES; do
+    line=$(docker compose ps "$svc" | awk 'NR==2')
+    if [ -z "$line" ]; then
+      all_ready=false
+      continue
     fi
 
-    echo "Waiting for containers to be ready..."
-    sleep 5
-done
+   # we consider the service to be "ready" if it is Up or Exit 0 has ended
+    if echo "$line" | grep -qE "Up|Exit 0"; then
+      continue
+    else
+      all_ready=false
+    fi
+  done
 
+  if [ "$all_ready" = true ]; then
+    echo "✅ All services are up (Up/Exit 0)"
+    break
+  fi
+
+  elapsed=$((elapsed + interval))
+  if [ "$elapsed" -ge "$timeout" ]; then
+    echo "⚠️  Timeout waiting for services to be up (>${timeout}s)"
+    docker compose ps
+    break
+  fi
+
+  echo "Waiting for containers to be ready..."
+  sleep "$interval"
+done
 
 echo "--- Running Hasura configuration script ---"
 if [ -f "./scripts/full-init-hasura.sh" ]; then
     chmod +x ./scripts/full-init-hasura.sh
     ./scripts/full-init-hasura.sh
 else
-    echo "⚠️  ./scripts/full-init-hasura not found, skipping."
+    echo "⚠️  ./scripts/full-init-hasura.sh not found, skipping."
 fi
 
 echo "--- Running basic Hasura test ---"
 
-HASURA_URL=${HASURA_URL:-http://localhost:8080/v1/graphql}
-ADMIN_SECRET=${HASURA_ADMIN_SECRET:-myadminsecretkey}
+# Fallback default for HASURA_BASE if somehow not defined
+HASURA_BASE="${HASURA_BASE:-http://localhost:8080}"
+HASURA_URL="${HASURA_URL:-$HASURA_BASE/v1/graphql}"
+ADMIN_SECRET="${HASURA_ADMIN_SECRET:-myadminsecretkey}"
 
 echo "Checking Hasura availability at $HASURA_URL..."
-if curl -s -o /dev/null -w "%{http_code}" "$HASURA_URL" | grep -qE "200|400"; then
-    echo "✅ Hasura endpoint reachable!"
+status_code=$(curl -s -o /dev/null -w "%{http_code}" "$HASURA_URL" || echo "000")
+
+if echo "$status_code" | grep -qE "200|400"; then
+    echo "✅ Hasura endpoint reachable! (HTTP $status_code)"
 else
-    echo "⚠️  Hasura not responding at $HASURA_URL"
-    echo "--- Done (skipping test) ---"
+    echo "⚠️  Hasura not responding at $HASURA_URL (HTTP $status_code)"
+    echo "--- Done (skipping test query) ---"
     exit 0
 fi
 
 TEST_QUERY='{"query":"{ blocks_aggregate { aggregate { count } } }"}'
 
-echo "Sending test query to Hasura..."
+echo "Sending test query to Hasura (with admin secret)..."
 response=$(curl -s -X POST "$HASURA_URL" \
   -H "Content-Type: application/json" \
   -H "x-hasura-admin-secret: $ADMIN_SECRET" \

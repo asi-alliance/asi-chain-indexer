@@ -28,7 +28,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      # RChain Node
+      # ASI Node
       NODE_URL: ${NODE_URL}
       NODE_TIMEOUT: ${NODE_TIMEOUT:-30}
       
@@ -70,6 +70,36 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  metrics-cron:
+    image: alpine:3.19
+    container_name: asi-metrics-cron
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      LOOKBACK_HOURS: 168
+      BUCKET_SECONDS: 300
+    volumes:
+      - ./scripts:/scripts:ro
+    networks:
+      - indexer-network
+    restart: unless-stopped
+    entrypoint: >
+      sh -c '
+        set -e
+        echo "[metrics-cron] Container starting..."
+        apk update >/dev/null 2>&1
+        apk add --no-cache postgresql-client dcron >/dev/null 2>&1
+        echo "[metrics-cron] Installed psql & dcron."
+        echo "*/3 * * * * /scripts/refresh-network-metrics-once.sh >> /proc/1/fd/1 2>&1" | crontab -
+        echo "[metrics-cron] Current crontab:"
+        crontab -l
+        echo "[metrics-cron] Starting crond -f..."
+        crond -f -l 2
+      '
+
 
   hasura:
     image: hasura/graphql-engine:v2.36.0

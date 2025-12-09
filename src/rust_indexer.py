@@ -9,11 +9,13 @@ from typing import Dict, List, Optional
 import structlog
 from sqlalchemy import select, text, and_
 from sqlalchemy.dialects.postgresql import insert
+
+from src.addr import convert_to_asi_address, public_key_to_asi_address
 from src.config import settings
 from src.database import db
 from src.models import (
     Block, Deployment, Transfer, Validator, ValidatorBond,
-    IndexerState, EpochTransition, NetworkStats, BalanceState
+    EpochTransition, NetworkStats, BalanceState
 )
 from src.rust_cli_client import RustCLIClient
 
@@ -86,7 +88,10 @@ class RustBlockIndexer:
 
         # Initialize Rust CLI client
         logger.info("🔧 Initializing Rust CLI client...")
-        self.client = RustCLIClient()
+        try:
+            self.client = RustCLIClient()
+        except Exception as e:
+            logger.error(str(e), exc_info=True)
 
         # Check node health
         logger.info("🔍 Checking ASI-Chain node health...")
@@ -448,6 +453,7 @@ class RustBlockIndexer:
                     deploy_id=t.deploy_id,
                     block_number=t.block_number,
                     from_address=t.from_address,
+                    from_public_key=t.from_public_key,
                     to_address=t.to_address,
                     amount_dust=t.amount_dust,
                     amount_asi=t.amount_asi,
@@ -634,6 +640,7 @@ class RustBlockIndexer:
                 return
 
             # Get recent main chain blocks
+
             main_chain = await self.client.show_main_chain(depth=20)
             if not main_chain:
                 return
@@ -682,7 +689,8 @@ class RustBlockIndexer:
             result = await session.execute(
                 text("""
                      INSERT INTO validators (public_key, name, total_stake, status, first_seen_block, last_seen_block)
-                     VALUES (:public_key, :name, :stake, 'active', :block_number, :block_number)
+                     VALUES (:public_key, :name, :stake, 'active', :block_number,
+                             :block_number)
                      ON CONFLICT (public_key) DO UPDATE SET total_stake     = GREATEST(validators.total_stake, :stake),
                                                             last_seen_block = :block_number,
                                                             status          = 'active'
@@ -724,34 +732,39 @@ class RustBlockIndexer:
         if direct_matches:
             for match in direct_matches:
                 try:
-                    from_address, to_address, amount_str = match
-                    # Validate addresses (ASI addresses can be 52-56 characters)
-                    if (from_address.startswith('1111') and len(from_address) in range(52, 57) and
-                            to_address.startswith('1111') and len(to_address) in range(52, 57)):
+                    from_any, to_address, amount_str = match
+                    from_public_key = ''
+                    # Validate addresses (ASI addresses can be 52-57 characters)
+                    if from_any.startswith('1111') and len(from_any) > 51:
+                        from_address = from_any
+                    else:
+                        from_public_key = from_any
+                        from_address = public_key_to_asi_address(from_any)
 
-                        amount_dust = int(amount_str)
-                        if amount_dust > 0:
-                            amount_asi = Decimal(amount_dust) / Decimal(100_000_000)
+                    amount_dust = int(amount_str)
+                    if amount_dust > 0:
+                        amount_asi = Decimal(amount_dust) / Decimal(100_000_000)
 
-                            transfer = Transfer(
-                                deploy_id=deploy_data.get("sig"),
-                                timestamp=deploy_data.get("timestamp", 0),
-                                block_number=block_number,
-                                from_address=from_address[:150],
-                                to_address=to_address[:150],
-                                amount_dust=amount_dust,
-                                amount_asi=amount_asi,
-                                status="success" if not deploy_data.get("errored") else "failed"
-                            )
-                            transfers.append(transfer)
+                        transfer = Transfer(
+                            deploy_id=deploy_data.get("sig"),
+                            timestamp=deploy_data.get("timestamp", 0),
+                            block_number=block_number,
+                            from_address=from_address[:150],
+                            from_public_key=from_public_key[:150],
+                            to_address=to_address[:150],
+                            amount_dust=amount_dust,
+                            amount_asi=amount_asi,
+                            status="success" if not deploy_data.get("errored") else "failed"
+                        )
+                        transfers.append(transfer)
 
-                            logger.info(
-                                "💸 Found direct ASI transfer",
-                                block=block_number,
-                                from_address=from_address[:20] + "...",
-                                to_address=to_address[:20] + "...",
-                                amount_asi=float(amount_asi)
-                            )
+                        logger.info(
+                            "💸 Found direct ASI transfer",
+                            block=block_number,
+                            from_address=from_any[:20] + "...",
+                            to_address=to_address[:20] + "...",
+                            amount_asi=float(amount_asi)
+                        )
                 except (ValueError, IndexError) as e:
                     logger.warning(f"Failed to parse direct transfer: {e}")
 
@@ -841,7 +854,7 @@ class RustBlockIndexer:
                         continue
 
                     if len(from_address) > 150 or len(to_address) > 150:
-                        logger.debug(
+                        logger.error(
                             "Skipping transfer with invalid address length",
                             from_len=len(from_address),
                             to_len=len(to_address)
@@ -855,12 +868,15 @@ class RustBlockIndexer:
 
                     amount_asi = Decimal(amount_dust) / Decimal(100_000_000)
 
+                    from_addr = convert_to_asi_address(from_address, deploy_data)
+
                     # Create transfer record
                     transfer = Transfer(
                         timestamp=deploy_data["timestamp"],
                         deploy_id=deploy_data.get("sig"),
                         block_number=block_number,
-                        from_address=from_address[:150],  # Use 150 char limit as per schema
+                        from_address=from_addr[:150],  # Use 150 char limit as per schema
+                        from_public_key=from_address[:150],  # Use 150 char limit as per schema
                         to_address=to_address[:150],
                         amount_dust=amount_dust,
                         amount_asi=amount_asi,
@@ -870,7 +886,7 @@ class RustBlockIndexer:
 
                     logger.info(
                         "💸 Found ASI transfer",
-                        from_address=from_address[:20] + "...",
+                        from_address=from_addr[:20] + "...",
                         to_address=to_address[:20] + "...",
                         amount_asi=float(amount_asi)
                     )
@@ -1107,7 +1123,10 @@ class RustBlockIndexer:
                 timestamp=block_info.get("timestamp", 0),
                 deploy_id=deploy_id,
                 block_number=0,
-                from_address="0000000000000000000000000000000000000000000000000000000000000000",  # Genesis mint
+                # Genesis mint
+                from_address=public_key_to_asi_address(
+                    "0000000000000000000000000000000000000000000000000000000000000000"),
+                from_public_key="0000000000000000000000000000000000000000000000000000000000000000",
                 to_address=address,
                 amount_dust=amount_dust,
                 amount_asi=amount_asi,
@@ -1142,7 +1161,8 @@ class RustBlockIndexer:
                 timestamp=block_info.get("timestamp", 0),
                 deploy_id=deploy_id,
                 block_number=0,
-                from_address=validator_pubkey,
+                from_address=public_key_to_asi_address(validator_pubkey),
+                from_public_key=validator_pubkey,
                 to_address="1111gW5kkGxHg7xDg6dRkZx2f7qxTizJzaCH9VEM1oJKWRvSX9Sk5",  # PoS contract address
                 amount_dust=amount_dust,
                 amount_asi=amount_asi,

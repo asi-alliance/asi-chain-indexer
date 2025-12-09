@@ -77,16 +77,17 @@ create index IF NOT EXISTS idx_deployments_type ON deployments (deployment_type)
 -- Transfers table with extended address fields
 create TABLE IF NOT EXISTS transfers
 (
-    id           BIGSERIAL PRIMARY KEY,
-    deploy_id    VARCHAR(200)              NOT NULL REFERENCES deployments (deploy_id) ON delete CASCADE,
-    block_number BIGINT                    NOT NULL REFERENCES blocks (block_number) ON delete CASCADE,
-    from_address VARCHAR(150)              NOT NULL,
-    to_address   VARCHAR(150)              NOT NULL,
-    amount_dust  BIGINT                    NOT NULL,
-    amount_asi   NUMERIC(20, 8)            NOT NULL,
-    status       VARCHAR(20) DEFAULT 'success',
-    timestamp    BIGINT                    NOT NULL,
-    created_at   TIMESTAMP   DEFAULT NOW() NOT NULL
+    id              BIGSERIAL PRIMARY KEY,
+    deploy_id       VARCHAR(200)               NOT NULL REFERENCES deployments (deploy_id) ON delete CASCADE,
+    block_number    BIGINT                     NOT NULL REFERENCES blocks (block_number) ON delete CASCADE,
+    from_address    VARCHAR(150)               NOT NULL,
+    from_public_key VARCHAR(150) DEFAULT NULL,
+    to_address      VARCHAR(150)               NOT NULL,
+    amount_dust     BIGINT                     NOT NULL,
+    amount_asi      NUMERIC(20, 8)             NOT NULL,
+    status          VARCHAR(20)  DEFAULT 'success',
+    timestamp       BIGINT                     NOT NULL,
+    created_at      TIMESTAMP    DEFAULT NOW() NOT NULL
 );
 
 create index idx_transfers_deploy_id on transfers (deploy_id);
@@ -222,23 +223,29 @@ ON CONFLICT (key) DO NOTHING;
 
 -- Create a view for network statistics
 create or replace view network_stats_view as
-with block_times as (select block_number,
-                            timestamp,
-                            lag(timestamp) over (order by block_number desc) as prev_timestamp,
-                            proposer
-                     from blocks
-                     where block_number > 0
-                     order by block_number desc
-                     LIMIT 100)
-select count(*)       as total_blocks,
-       avg(case
-               when prev_timestamp is not null
-                   then (prev_timestamp - timestamp) / 1000.0 -- Convert to seconds
-               else null
-           end)       as avg_block_time_seconds,
+with block_times as (
+    select block_number,
+           timestamp,
+           lag(timestamp) over (order by block_number asc) as prev_timestamp,
+           proposer
+    from blocks
+    where block_number > 0
+    order by block_number asc
+    limit 100
+)
+select count(*) as total_blocks,
+       avg(
+               case
+                   when prev_timestamp is not null
+                       then (timestamp - prev_timestamp) / 1000.0
+                   else null
+                   end
+       ) as avg_block_time_seconds,
        min(timestamp) as earliest_block_time,
        max(timestamp) as latest_block_time
 from block_times;
+
+
 
 -- =============================================
 -- TRIGGERS AND FUNCTIONS
@@ -433,126 +440,297 @@ COMMENT ON FUNCTION public.get_transactions_by_blocks IS
     'Returns enriched transfer rows from up to N blocks. Returns SETOF a VIEW so Hasura can track it.';
 
 
-DROP FUNCTION IF EXISTS public.get_network_metrics(integer, integer);
-DROP VIEW IF EXISTS public.get_network_metrics;
-DROP TABLE IF EXISTS public.get_network_metrics;
-DROP INDEX IF EXISTS network_metrics_cache_bucket_idx;
-
---- =============================================
--- Network performance metrics for charts (fixed aggregation)
+-- =============================================
+-- NETWORK PERFORMANCE METRICS (PRE-AGGREGATED)
 -- =============================================
 
-
--- 1) View for Hasura (timestamptz)
+-- 1) Schema holder view for Hasura (composite type)
 CREATE VIEW public.network_metrics_view AS
-SELECT
-  now()           AS bucket_start,  -- timestamptz
-  now()           AS bucket_end,    -- timestamptz
-  0::numeric      AS avg_block_time_seconds,
-  0::numeric      AS avg_tps,
-  0::bigint       AS deployments_count,
-  0::bigint       AS transfers_count
+SELECT now()      AS bucket_start, -- timestamptz
+       now()      AS bucket_end,   -- timestamptz
+       0::numeric AS avg_block_time_seconds,
+       0::numeric AS avg_tps,
+       0::bigint  AS deployments_count,
+       0::bigint  AS transfers_count
 LIMIT 0;
 
 COMMENT ON VIEW public.network_metrics_view IS
-'Schema holder for aggregated network performance metrics. Used by Hasura for tracking the get_network_metrics function.';
+    'Schema holder for aggregated network performance metrics. Used by Hasura as the return type of get_network_metrics.';
 
-DROP FUNCTION IF EXISTS public.get_network_metrics(integer, integer);
 
+-- 2) Pre-aggregated metrics table
+CREATE TABLE IF NOT EXISTS public.network_metrics_buckets
+(
+    bucket_start       timestamptz PRIMARY KEY,
+    bucket_end         timestamptz NOT NULL,
+    avg_block_time_sec numeric,
+    deployments_count  bigint      NOT NULL DEFAULT 0,
+    transfers_count    bigint      NOT NULL DEFAULT 0
+);
+
+-- 3) Index to accelerate range queries
+CREATE INDEX IF NOT EXISTS idx_network_metrics_buckets_range
+    ON public.network_metrics_buckets (bucket_start, bucket_end);
+
+
+-- 4) Hybrid get_network_metrics:
+--    - if buckets exist -> read from network_metrics_buckets (FAST)
+--    - else             -> compute from raw tables (SLOW, original logic)
 CREATE OR REPLACE FUNCTION public.get_network_metrics(
-  p_range_hours integer DEFAULT 24,
-  p_divisions   integer DEFAULT 7
+    p_range_hours integer DEFAULT 24,
+    p_divisions integer DEFAULT 7
 )
-RETURNS SETOF public.network_metrics_view
-LANGUAGE sql
-STABLE
-AS $$
-WITH
-  -- 1) We find the maximum time for all tables
-  data_bounds AS (
-    SELECT GREATEST(
-      COALESCE((SELECT max(to_timestamp(timestamp / 1000.0)) FROM blocks),      '-infinity'::timestamptz),
-      COALESCE((SELECT max(to_timestamp(timestamp / 1000.0)) FROM deployments), '-infinity'::timestamptz),
-      COALESCE((SELECT max(to_timestamp(timestamp / 1000.0)) FROM transfers),   '-infinity'::timestamptz)
-    ) AS max_ts
-  ),
+    RETURNS SETOF public.network_metrics_view
+    LANGUAGE plpgsql
+    STABLE
+AS
+$$
+DECLARE
+    v_have_buckets boolean;
+BEGIN
+    -- Are there any pre-aggregated buckets at all?
+    SELECT EXISTS (SELECT 1 FROM public.network_metrics_buckets)
+    INTO v_have_buckets;
 
-  params AS (
-    SELECT
-      -- +1 sec so that the last block is exactly inside the last interval
-      COALESCE(max_ts + interval '1 second', now())                                      AS range_end,
-      (p_range_hours || ' hours')::interval                                              AS range_window,
-      ((p_range_hours * 3600)::double precision / p_divisions || ' seconds')::interval   AS bucket_step
-    FROM data_bounds
-  ),
+    IF v_have_buckets THEN
+        ----------------------------------------------------------------
+        -- FAST PATH: only by network_metrics_buckets
+        -- range_end and window are calculated by max(bucket_end), not by blocks
+        ----------------------------------------------------------------
+        RETURN QUERY
+            WITH data_bounds AS (SELECT max(bucket_end) AS max_ts
+                                 FROM public.network_metrics_buckets),
+                 params AS (SELECT COALESCE(max_ts, now())                                                          AS range_end,
+                                   (p_range_hours || ' hours')::interval                                            AS range_window,
+                                   ((p_range_hours * 3600)::double precision / p_divisions || ' seconds')::interval AS bucket_step
+                            FROM data_bounds),
+                 bucket_ranges AS (SELECT gs                                                          AS bucket_index,
+                                          (p.range_end - p.range_window) + (gs * p.bucket_step)       AS bucket_start,
+                                          (p.range_end - p.range_window) + ((gs + 1) * p.bucket_step) AS bucket_end
+                                   FROM params p,
+                                        generate_series(0, p_divisions - 1) AS gs),
+                 raw AS (SELECT b.bucket_start,
+                                b.bucket_end,
+                                b.avg_block_time_sec,
+                                b.deployments_count,
+                                b.transfers_count
+                         FROM public.network_metrics_buckets b,
+                              params p
+                         WHERE b.bucket_start >= p.range_end - p.range_window
+                           AND b.bucket_end <= p.range_end),
+                 agg AS (SELECT br.bucket_start,
+                                br.bucket_end,
+                                AVG(r.avg_block_time_sec)        AS avg_block_time_seconds,
+                                SUM(r.deployments_count)::bigint AS deployments_count,
+                                SUM(r.transfers_count)::bigint   AS transfers_count
+                         FROM bucket_ranges br
+                                  LEFT JOIN raw r
+                                            ON r.bucket_start >= br.bucket_start
+                                                AND r.bucket_end <= br.bucket_end
+                         GROUP BY br.bucket_start, br.bucket_end)
+            SELECT bucket_start,
+                   bucket_end,
+                   COALESCE(avg_block_time_seconds, 0)    AS avg_block_time_seconds,
+                   COALESCE(deployments_count, 0::bigint)
+                       / GREATEST(EXTRACT(EPOCH FROM (bucket_end - bucket_start)), 1)
+                                                          AS avg_tps,
+                   COALESCE(deployments_count, 0::bigint) AS deployments_count,
+                   COALESCE(transfers_count, 0::bigint)   AS transfers_count
+            FROM agg
+            ORDER BY bucket_start;
 
--- 2) Exactly p_divisions of buckets of fixed width
-  bucket_ranges AS (
-    SELECT
-      gs AS bucket_index,
-      (p.range_end - p.range_window) + (gs * p.bucket_step)       AS bucket_start,
-      (p.range_end - p.range_window) + ((gs + 1) * p.bucket_step) AS bucket_end
-    FROM params p,
-         generate_series(0, p_divisions - 1) AS gs
-  ),
-
- -- 3) Blocks with calculated time
-  block_times AS (
-    SELECT
-      b.block_number,
-      (b.timestamp - LAG(b.timestamp) OVER (ORDER BY b.timestamp)) / 1000.0 AS block_time_sec,
-      to_timestamp(b.timestamp / 1000.0)                                     AS ts
-    FROM blocks b
-  ),
-
-  block_agg AS (
-    SELECT
-      br.bucket_start,
-      AVG(bt.block_time_sec) AS avg_block_time_sec
-    FROM bucket_ranges br
-    LEFT JOIN block_times bt
-      ON bt.ts >= br.bucket_start
-     AND bt.ts <  br.bucket_end
-    GROUP BY br.bucket_start
-  ),
-
-  deployments_agg AS (
-    SELECT
-      br.bucket_start,
-      COUNT(d.deploy_id) AS deployments_count
-    FROM bucket_ranges br
-    LEFT JOIN deployments d
-      ON to_timestamp(d.timestamp / 1000.0) >= br.bucket_start
-     AND to_timestamp(d.timestamp / 1000.0) <  br.bucket_end
-    GROUP BY br.bucket_start
-  ),
-
-  transfers_agg AS (
-    SELECT
-      br.bucket_start,
-      COUNT(t.id) AS transfers_count
-    FROM bucket_ranges br
-    LEFT JOIN transfers t
-      ON to_timestamp(t.timestamp / 1000.0) >= br.bucket_start
-     AND to_timestamp(t.timestamp / 1000.0) <  br.bucket_end
-    GROUP BY br.bucket_start
-  )
-
-SELECT
-  br.bucket_start,
-  br.bucket_end,
-  COALESCE(ba.avg_block_time_sec, 0) AS avg_block_time_seconds,
-  COALESCE(d.deployments_count, 0)
-    / GREATEST(EXTRACT(EPOCH FROM (br.bucket_end - br.bucket_start)), 1)
-    AS avg_tps,
-  COALESCE(d.deployments_count, 0) AS deployments_count,
-  COALESCE(t.transfers_count, 0)   AS transfers_count
-FROM bucket_ranges br
-LEFT JOIN block_agg       ba ON ba.bucket_start = br.bucket_start
-LEFT JOIN deployments_agg d  ON d.bucket_start  = br.bucket_start
-LEFT JOIN transfers_agg  t   ON t.bucket_start  = br.bucket_start
-ORDER BY br.bucket_start;
+    ELSE
+        ----------------------------------------------------------------
+        -- SLOW PATH: the old "ideal" implementation of raw tables
+        ----------------------------------------------------------------
+        RETURN QUERY
+            WITH data_bounds AS (SELECT GREATEST(
+                                                COALESCE((SELECT max(to_timestamp(timestamp / 1000.0)) FROM blocks),
+                                                         '-infinity'::timestamptz),
+                                                COALESCE(
+                                                        (SELECT max(to_timestamp(timestamp / 1000.0)) FROM deployments),
+                                                        '-infinity'::timestamptz),
+                                                COALESCE((SELECT max(to_timestamp(timestamp / 1000.0)) FROM transfers),
+                                                         '-infinity'::timestamptz)
+                                        ) AS max_ts),
+                 params AS (SELECT COALESCE(max_ts + interval '1 second', now())                                    AS range_end,
+                                   (p_range_hours || ' hours')::interval                                            AS range_window,
+                                   ((p_range_hours * 3600)::double precision / p_divisions || ' seconds')::interval AS bucket_step
+                            FROM data_bounds),
+                 bucket_ranges AS (SELECT gs                                                          AS bucket_index,
+                                          (p.range_end - p.range_window) + (gs * p.bucket_step)       AS bucket_start,
+                                          (p.range_end - p.range_window) + ((gs + 1) * p.bucket_step) AS bucket_end
+                                   FROM params p,
+                                        generate_series(0, p_divisions - 1) AS gs),
+                 block_times AS (SELECT b.block_number,
+                                        (b.timestamp - LAG(b.timestamp) OVER (ORDER BY b.timestamp)) / 1000.0 AS block_time_sec,
+                                        to_timestamp(b.timestamp / 1000.0)                                    AS ts
+                                 FROM blocks b),
+                 block_agg AS (SELECT br.bucket_start,
+                                      AVG(bt.block_time_sec) AS avg_block_time_sec
+                               FROM bucket_ranges br
+                                        LEFT JOIN block_times bt
+                                                  ON bt.ts >= br.bucket_start
+                                                      AND bt.ts < br.bucket_end
+                               GROUP BY br.bucket_start),
+                 deployments_agg AS (SELECT br.bucket_start,
+                                            COUNT(d.deploy_id) AS deployments_count
+                                     FROM bucket_ranges br
+                                              LEFT JOIN deployments d
+                                                        ON to_timestamp(d.timestamp / 1000.0) >= br.bucket_start
+                                                            AND to_timestamp(d.timestamp / 1000.0) < br.bucket_end
+                                     GROUP BY br.bucket_start),
+                 transfers_agg AS (SELECT br.bucket_start,
+                                          COUNT(t.id) AS transfers_count
+                                   FROM bucket_ranges br
+                                            LEFT JOIN transfers t
+                                                      ON to_timestamp(t.timestamp / 1000.0) >= br.bucket_start
+                                                          AND to_timestamp(t.timestamp / 1000.0) < br.bucket_end
+                                   GROUP BY br.bucket_start)
+            SELECT br.bucket_start,
+                   br.bucket_end,
+                   COALESCE(ba.avg_block_time_sec, 0) AS avg_block_time_seconds,
+                   COALESCE(d.deployments_count, 0)
+                       / GREATEST(EXTRACT(EPOCH FROM (br.bucket_end - br.bucket_start)), 1)
+                                                      AS avg_tps,
+                   COALESCE(d.deployments_count, 0)   AS deployments_count,
+                   COALESCE(t.transfers_count, 0)     AS transfers_count
+            FROM bucket_ranges br
+                     LEFT JOIN block_agg ba ON ba.bucket_start = br.bucket_start
+                     LEFT JOIN deployments_agg d ON d.bucket_start = br.bucket_start
+                     LEFT JOIN transfers_agg t ON t.bucket_start = br.bucket_start
+            ORDER BY br.bucket_start;
+    END IF;
+END;
 $$;
 
+
 COMMENT ON FUNCTION public.get_network_metrics IS
-'Aggregated performance metrics (block time, TPS, deployments, transfers) for a given time range and divisions. Uses fixed number of buckets without trailing empty bucket.';
+    'Hybrid implementation: uses pre-aggregated network_metrics_buckets when available, falls back to raw aggregation (blocks/deployments/transfers) otherwise.';
+
+-- =============================================
+-- CRON-FRIENDLY REFRESH FOR PRE-AGGREGATED METRICS
+-- =============================================
+CREATE OR REPLACE FUNCTION public.refresh_network_metrics_buckets(
+    p_lookback_hours integer DEFAULT 720, -- how much history we keep in buckets (30 days by default)
+    p_bucket_seconds integer DEFAULT 600 -- the size of one bucket in seconds (10 minutes by default)
+)
+    RETURNS void
+    LANGUAGE plpgsql
+AS
+$$
+DECLARE
+    v_max_ts      timestamptz;
+    v_range_end   timestamptz;
+    v_range_start timestamptz;
+BEGIN
+    -- 1) We find the maximum time for blocks/deployments/transfers
+    SELECT GREATEST(
+                   COALESCE((SELECT max(to_timestamp(timestamp / 1000.0)) FROM blocks),
+                            '-infinity'::timestamptz),
+                   COALESCE((SELECT max(to_timestamp(timestamp / 1000.0)) FROM deployments),
+                            '-infinity'::timestamptz),
+                   COALESCE((SELECT max(to_timestamp(timestamp / 1000.0)) FROM transfers),
+                            '-infinity'::timestamptz)
+           )
+    INTO v_max_ts;
+
+    -- If there is no data at all, we exit
+    IF v_max_ts IS NULL OR v_max_ts = '-infinity'::timestamptz THEN
+        RETURN;
+    END IF;
+
+    -- range_end as in the old function: max_ts + 1 sec
+    v_range_end := v_max_ts + interval '1 second';
+    v_range_start := v_range_end - (p_lookback_hours || ' hours')::interval;
+
+    -- 2) Do not count the old buckets:
+    -- we start from the end of the ones that have already been counted in order to count only the "tail".
+    SELECT GREATEST(
+                   v_range_start,
+                   COALESCE(max(bucket_end), v_range_start)
+           )
+    INTO v_range_start
+    FROM public.network_metrics_buckets
+    WHERE bucket_end > v_range_start;
+
+    -- If you have caught up with range_end, there is nothing to do.
+    IF v_range_start >= v_range_end THEN
+        RETURN;
+    END IF;
+
+    WITH
+        -- 3) Generate new buckets from v_range_start to v_range_end
+        bucket_ranges AS (SELECT gs                                                            AS bucket_index,
+                                 v_range_start
+                                     + (gs * (p_bucket_seconds || ' seconds')::interval)       AS bucket_start,
+                                 v_range_start
+                                     + ((gs + 1) * (p_bucket_seconds || ' seconds')::interval) AS bucket_end
+                          FROM generate_series(
+                                       0,
+                                       FLOOR(EXTRACT(EPOCH FROM (v_range_end - v_range_start))
+                                           / p_bucket_seconds
+                                       )::int
+                               ) AS gs),
+
+        -- 4) We count block_time_sec once for the range
+        block_times AS (SELECT b.block_number,
+                               (b.timestamp - LAG(b.timestamp) OVER (ORDER BY b.timestamp)) / 1000.0 AS block_time_sec,
+                               to_timestamp(b.timestamp / 1000.0)                                    AS ts
+                        FROM blocks b
+                        WHERE to_timestamp(b.timestamp / 1000.0) >= v_range_start
+                          AND to_timestamp(b.timestamp / 1000.0) < v_range_end),
+
+        block_agg AS (SELECT br.bucket_start,
+                             br.bucket_end,
+                             AVG(bt.block_time_sec) AS avg_block_time_sec
+                      FROM bucket_ranges br
+                               LEFT JOIN block_times bt
+                                         ON bt.ts >= br.bucket_start
+                                             AND bt.ts < br.bucket_end
+                      GROUP BY br.bucket_start, br.bucket_end),
+
+        deployments_agg AS (SELECT br.bucket_start,
+                                   br.bucket_end,
+                                   COUNT(d.deploy_id) AS deployments_count
+                            FROM bucket_ranges br
+                                     LEFT JOIN deployments d
+                                               ON to_timestamp(d.timestamp / 1000.0) >= br.bucket_start
+                                                   AND to_timestamp(d.timestamp / 1000.0) < br.bucket_end
+                            GROUP BY br.bucket_start, br.bucket_end),
+
+        transfers_agg AS (SELECT br.bucket_start,
+                                 br.bucket_end,
+                                 COUNT(t.id) AS transfers_count
+                          FROM bucket_ranges br
+                                   LEFT JOIN transfers t
+                                             ON to_timestamp(t.timestamp / 1000.0) >= br.bucket_start
+                                                 AND to_timestamp(t.timestamp / 1000.0) < br.bucket_end
+                          GROUP BY br.bucket_start, br.bucket_end)
+
+    -- 5) UPSERT in pre-aggregated table
+    INSERT
+    INTO public.network_metrics_buckets AS b (bucket_start,
+                                              bucket_end,
+                                              avg_block_time_sec,
+                                              deployments_count,
+                                              transfers_count)
+    SELECT br.bucket_start,
+           br.bucket_end,
+           ba.avg_block_time_sec,
+           COALESCE(da.deployments_count, 0) AS deployments_count,
+           COALESCE(ta.transfers_count, 0)   AS transfers_count
+    FROM bucket_ranges br
+             LEFT JOIN block_agg ba ON ba.bucket_start = br.bucket_start AND ba.bucket_end = br.bucket_end
+             LEFT JOIN deployments_agg da ON da.bucket_start = br.bucket_start AND da.bucket_end = br.bucket_end
+             LEFT JOIN transfers_agg ta ON ta.bucket_start = br.bucket_start AND ta.bucket_end = br.bucket_end
+    ON CONFLICT (bucket_start) DO UPDATE
+        SET bucket_end         = EXCLUDED.bucket_end,
+            avg_block_time_sec = EXCLUDED.avg_block_time_sec,
+            deployments_count  = EXCLUDED.deployments_count,
+            transfers_count    = EXCLUDED.transfers_count;
+END;
+$$;
+
+COMMENT ON FUNCTION public.refresh_network_metrics_buckets IS
+    'Incrementally fills/updates network_metrics_buckets for the last N hours with fixed bucket size.';

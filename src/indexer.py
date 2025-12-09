@@ -9,9 +9,11 @@ from typing import Dict, List
 import structlog
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
+
+from src.addr import public_key_to_asi_address
 from src.config import settings
 from src.database import db
-from src.models import Block, Deployment, Transfer, Validator, ValidatorBond, IndexerState
+from src.models import Block, Deployment, Transfer, Validator, ValidatorBond
 from src.rchain_client import RChainClient
 
 logger = structlog.get_logger(__name__)
@@ -330,10 +332,10 @@ class BlockIndexer:
                     if len(match) == 2:
                         # Pattern with just recipient and amount
                         to_address, amount_str = match
-                        from_address = deploy_data["deployer"]  # Assume deployer is sender
+                        from_public_key = deploy_data["deployer"]  # Assume deployer is sender
                     elif len(match) == 3:
                         # Pattern with sender, recipient, and amount
-                        from_address, to_address, amount_str = match
+                        from_public_key, to_address, amount_str = match
                     else:
                         continue
 
@@ -342,6 +344,7 @@ class BlockIndexer:
                     if amount_dust <= 0:
                         continue
 
+                    from_address = public_key_to_asi_address(from_public_key)
                     amount_asi = Decimal(amount_dust) / Decimal(100_000_000)
 
                     # Create transfer record
@@ -350,6 +353,7 @@ class BlockIndexer:
                         deploy_id=deploy_data["sig"],
                         block_number=block_number,
                         from_address=from_address,
+                        from_public_key=from_public_key,
                         to_address=to_address,
                         amount_dust=amount_dust,
                         amount_asi=amount_asi,
