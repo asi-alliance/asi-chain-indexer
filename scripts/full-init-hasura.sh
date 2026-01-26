@@ -1,63 +1,114 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 # ============================================================
-# FULL HASURA INITIALIZATION FOR ASI-CHAIN INDEXER
+# FULL HASURA INITIALIZATION FOR ASI-CHAIN INDEXER (v2.36.x)
+# Goals:
+#  - Track all tables/views/functions
+#  - Create relationships
+#  - Grant PUBLIC role read access (no auth) with limit=5000
+#  - Disable aggregations for public
+#  - Verify everything was actually applied
+#
+# IMPORTANT for "no password public API":
+#  - Hasura must have HASURA_GRAPHQL_UNAUTHORIZED_ROLE=public
 # ============================================================
 
-# Load .env if present
+# ---------- Load .env ----------
 if [ -f ".env" ]; then
-    sed -i 's/\r$//' .env
-    set -o allexport
-    source .env
-    set +o allexport
+  sed -i 's/\r$//' .env
+  set -o allexport
+  # shellcheck source=/dev/null
+  source .env
+  set +o allexport
 fi
 
-HASURA_ADMIN_SECRET="${HASURA_ADMIN_SECRET:-myadminsecretkey}"
 HASURA_BASE="${HASURA_BASE:-http://localhost:8080}"
+HASURA_ADMIN_SECRET="${HASURA_ADMIN_SECRET:-adminsecretkey}"
+admin_secret="${HASURA_GRAPHQL_ADMIN_SECRET:-$HASURA_ADMIN_SECRET}"
 
-HASURA_ENDPOINT="${HASURA_BASE}/v1/metadata"
-HASURA_GRAPHQL="${HASURA_BASE}/v1/graphql"
-HASURA_SQL="${HASURA_BASE}/v2/query"
-HASURA_HEALTH="${HASURA_BASE}/healthz"
+HASURA_ENDPOINT="${HASURA_ENDPOINT:-$HASURA_BASE/v1/metadata}"
+HASURA_GRAPHQL="${HASURA_GRAPHQL:-$HASURA_BASE/v1/graphql}"
+HASURA_SQL="${HASURA_SQL:-$HASURA_BASE/v2/query}"
+HASURA_HEALTH="${HASURA_HEALTH:-$HASURA_BASE/healthz}"
 
 echo "Metadata endpoint: $HASURA_ENDPOINT"
 echo "SQL endpoint:      $HASURA_SQL"
 echo "GraphQL endpoint:  $HASURA_GRAPHQL"
 echo "Health endpoint:   $HASURA_HEALTH"
 
-admin_secret="${HASURA_GRAPHQL_ADMIN_SECRET:-$HASURA_ADMIN_SECRET}"
+die() { echo "❌ $*" >&2; exit 1; }
+log() { echo "▶ $*"; }
+ok()  { echo "✅ $*"; }
 
-# Wrapper for metadata API
+# ---------- HTTP wrappers ----------
 hasura_metadata() {
   local payload="$1"
-  curl -s -X POST "$HASURA_ENDPOINT" \
+  local resp
+  resp=$(curl -sS -X POST "$HASURA_ENDPOINT" \
     -H "Content-Type: application/json" \
     -H "x-hasura-admin-secret: $admin_secret" \
-    -d "$payload"
+    -d "$payload")
+
+  if echo "$resp" | grep -qE '"error"|"errors"'; then
+    echo "----- METADATA CALL FAILED -----" >&2
+    echo "Payload:" >&2
+    echo "$payload" >&2
+    echo "Response:" >&2
+    echo "$resp" >&2
+    echo "--------------------------------" >&2
+    exit 1
+  fi
+
+  echo "$resp"
 }
 
-# Wrapper for GraphQL queries
-graphql_query() {
+hasura_sql() {
   local payload="$1"
-  curl -s -X POST "$HASURA_GRAPHQL" \
+  local resp
+  resp=$(curl -sS -X POST "$HASURA_SQL" \
+    -H "Content-Type: application/json" \
+    -H "x-hasura-admin-secret: $admin_secret" \
+    -d "$payload")
+
+  if echo "$resp" | grep -qE '"error"|"errors"'; then
+    echo "----- SQL CALL FAILED -----" >&2
+    echo "Payload:" >&2
+    echo "$payload" >&2
+    echo "Response:" >&2
+    echo "$resp" >&2
+    echo "---------------------------" >&2
+    exit 1
+  fi
+
+  echo "$resp"
+}
+
+graphql_admin() {
+  local payload="$1"
+  curl -sS -X POST "$HASURA_GRAPHQL" \
     -H "Content-Type: application/json" \
     -H "x-hasura-admin-secret: $admin_secret" \
     -d "$payload"
 }
 
-# ------------------------------------------------------------
-# Wait for Hasura
-# ------------------------------------------------------------
-echo "Waiting for Hasura to be ready..."
-until curl -s "$HASURA_HEALTH" >/dev/null 2>&1; do
+graphql_public() {
+  local payload="$1"
+  curl -sS -X POST "$HASURA_GRAPHQL" \
+    -H "Content-Type: application/json" \
+    -d "$payload"
+}
+
+# ---------- Wait for Hasura ----------
+log "Waiting for Hasura to be ready..."
+until curl -sS "$HASURA_HEALTH" >/dev/null 2>&1; do
   sleep 2
 done
-echo "Hasura is ready."
+ok "Hasura is ready."
 
-# ------------------------------------------------------------
-# TRACK TABLES
-# ------------------------------------------------------------
+# ============================================================
+# CONFIG
+# ============================================================
 TABLES=(
   "blocks"
   "deployments"
@@ -71,50 +122,74 @@ TABLES=(
   "indexer_state"
 )
 
-echo "Tracking tables..."
+VIEWS=(
+  "network_metrics_view"
+  "network_stats_view"
+)
+
+FUNCTIONS=(
+  "get_network_metrics"
+)
+
+log "Sanity-checking tables exist in Postgres (information_schema)..."
+for t in "${TABLES[@]}"; do
+  hasura_sql "{
+    \"type\": \"run_sql\",
+    \"args\": {
+      \"source\": \"default\",
+      \"sql\": \"select 1 from information_schema.tables where table_schema='public' and table_name='${t}'\"
+    }
+  }" >/dev/null
+done
+ok "Postgres sanity-check OK."
+
+# ============================================================
+# Ensure source exists (default). If already exists, Hasura will error on add.
+# We do a safe check by exporting metadata and searching for the source name.
+# ============================================================
+log "Checking that source 'default' exists..."
+meta0="$(hasura_metadata '{"type":"export_metadata","args":{}}')"
+if ! echo "$meta0" | grep -q '"name":"default"'; then
+  die "Hasura source 'default' not found in metadata. Check HASURA_GRAPHQL_DATABASE_URL / sources."
+fi
+ok "Source 'default' exists."
+
+# ============================================================
+# TRACK TABLES / VIEWS / FUNCTIONS
+# ============================================================
+log "Tracking tables..."
 for table in "${TABLES[@]}"; do
   hasura_metadata "{
     \"type\": \"pg_track_table\",
     \"args\": {\"source\": \"default\", \"table\": {\"schema\": \"public\", \"name\": \"$table\"}}
   }" >/dev/null
 done
+ok "Tables tracked (or already tracked)."
 
-# ------------------------------------------------------------
-# TRACK VIEWS
-# ------------------------------------------------------------
-VIEWS=(
-  "tx_enriched_view"
-  "network_metrics_view"
-  "network_stats_view"
-)
-
-echo "Tracking views..."
+log "Tracking views..."
 for view in "${VIEWS[@]}"; do
   hasura_metadata "{
     \"type\": \"pg_track_table\",
     \"args\": {\"source\": \"default\", \"table\": {\"schema\": \"public\", \"name\": \"$view\"}}
   }" >/dev/null
 done
+ok "Views tracked (or already tracked)."
 
-# ------------------------------------------------------------
-# TRACK SQL FUNCTIONS
-# ------------------------------------------------------------
-FUNCTIONS=(
-  "get_transactions_by_blocks"
-  "get_network_metrics"
-)
-
-echo "Tracking SQL functions..."
+log "Tracking SQL functions..."
 for fn in "${FUNCTIONS[@]}"; do
   hasura_metadata "{
     \"type\": \"pg_track_function\",
     \"args\": {\"source\": \"default\", \"function\": {\"schema\": \"public\", \"name\": \"$fn\"}}
   }" >/dev/null
 done
+ok "Functions tracked (or already tracked)."
 
-# ------------------------------------------------------------
-# OBJECT RELATIONS
-# ------------------------------------------------------------
+# ============================================================
+# RELATIONSHIPS
+# Notes:
+#  - If relationship already exists, Hasura returns an error.
+#  - Since you want "full init" and likely run once, we keep fail-fast.
+# ============================================================
 declare -A OBJECT_RELATIONS=(
   ["deployments.block"]="blocks:block_number:block_number"
   ["transfers.block"]="blocks:block_number:block_number"
@@ -132,7 +207,7 @@ declare -A OBJECT_RELATIONS=(
   ["network_stats.block"]="blocks:block_number:block_number"
 )
 
-echo "Creating object relationships..."
+log "Creating object relationships..."
 for key in "${!OBJECT_RELATIONS[@]}"; do
   table="${key%%.*}"
   rel="${key##*.}"
@@ -151,10 +226,8 @@ for key in "${!OBJECT_RELATIONS[@]}"; do
     }
   }" >/dev/null
 done
+ok "Object relationships created."
 
-# ------------------------------------------------------------
-# ARRAY RELATIONS
-# ------------------------------------------------------------
 declare -A ARRAY_RELATIONS=(
   ["blocks.deployments"]="deployments:block_number:block_number"
   ["blocks.transfers"]="transfers:block_number:block_number"
@@ -170,7 +243,7 @@ declare -A ARRAY_RELATIONS=(
   ["validators.transfers_sent"]="transfers:public_key:from_public_key"
 )
 
-echo "Creating array relationships..."
+log "Creating array relationships..."
 for key in "${!ARRAY_RELATIONS[@]}"; do
   table="${key%%.*}"
   rel="${key##*.}"
@@ -189,13 +262,13 @@ for key in "${!ARRAY_RELATIONS[@]}"; do
     }
   }" >/dev/null
 done
+ok "Array relationships created."
 
-# ------------------------------------------------------------
+# ============================================================
 # PUBLIC PERMISSIONS
-# ------------------------------------------------------------
-echo "Granting public SELECT permissions..."
+# ============================================================
+log "Granting public SELECT permissions..."
 ALL_TABLES_AND_VIEWS=( "${TABLES[@]}" "${VIEWS[@]}" )
-
 for table in "${ALL_TABLES_AND_VIEWS[@]}"; do
   hasura_metadata "{
     \"type\": \"pg_create_select_permission\",
@@ -203,12 +276,18 @@ for table in "${ALL_TABLES_AND_VIEWS[@]}"; do
       \"source\": \"default\",
       \"table\": {\"schema\": \"public\", \"name\": \"$table\"},
       \"role\": \"public\",
-      \"permission\": {\"columns\": \"*\", \"filter\": {}, \"allow_aggregations\": true}
+      \"permission\": {
+        \"columns\": \"*\",
+        \"filter\": {},
+        \"limit\": 5000,
+        \"allow_aggregations\": false
+      }
     }
   }" >/dev/null
 done
+ok "Public SELECT permissions granted."
 
-echo "Granting public EXECUTE permissions on SQL functions..."
+log "Granting public EXECUTE permissions on SQL functions..."
 for fn in "${FUNCTIONS[@]}"; do
   hasura_metadata "{
     \"type\": \"pg_create_function_permission\",
@@ -219,34 +298,73 @@ for fn in "${FUNCTIONS[@]}"; do
     }
   }" >/dev/null
 done
+ok "Public function permissions granted."
 
-# ------------------------------------------------------------
-# Test queries
-# ------------------------------------------------------------
-echo "Running test query as admin..."
-graphql_query '{"query":"{ blocks(limit:1, order_by:{block_number:desc}) { block_number block_hash } }"}'
+# ============================================================
+# VERIFY TRACKING + PERMISSIONS REALLY APPLIED
+# ============================================================
+log "Verifying metadata contains tracked tables/views/functions..."
+meta="$(hasura_metadata '{"type":"export_metadata","args":{}}')"
 
-echo -e "\nRunning test query as PUBLIC..."
-curl -s -X POST "$HASURA_GRAPHQL" -H "Content-Type: application/json" \
-  -d '{"query":"{ blocks(limit:1) { block_number block_hash } }"}'
-
-# ------------------------------------------------------------
-# Pre-Warm Metrics
-# ------------------------------------------------------------
-echo -e "\nPre-warming network_metrics_buckets..."
-
-if [ -z "$DATABASE_LOCAL_URL" ]; then
-  echo "⚠️ DATABASE_LOCAL_URL not set → skipping pre-warm"
-elif [ ! -f "./scripts/refresh-network-metrics-once.sh" ]; then
-  echo "⚠️ ./scripts/refresh-network-metrics-once.sh not found → skipping pre-warm"
-else
-  chmod +x ./scripts/refresh-network-metrics-once.sh
-  if ./scripts/refresh-network-metrics-once.sh --db_url "$DATABASE_LOCAL_URL"; then
-    echo "✅ Pre-warm OK"
-  else
-    echo "❌ Failed to pre-warm metrics buckets"
+missing=0
+for t in "${TABLES[@]}"; do
+  if ! echo "$meta" | grep -q "\"name\":\"$t\""; then
+    echo "❌ Missing tracked table: $t"
+    missing=1
   fi
+done
+for v in "${VIEWS[@]}"; do
+  if ! echo "$meta" | grep -q "\"name\":\"$v\""; then
+    echo "❌ Missing tracked view: $v"
+    missing=1
+  fi
+done
+for f in "${FUNCTIONS[@]}"; do
+  if ! echo "$meta" | grep -q "\"name\":\"$f\""; then
+    echo "❌ Missing tracked function: $f"
+    missing=1
+  fi
+done
+
+[ "$missing" -eq 0 ] || die "Tracking verification failed (see missing items above)."
+ok "Tracking verification passed."
+
+log "Verifying PUBLIC select permission exists for one table (blocks)..."
+# Cheap check: export_metadata contains select_permissions for role public on blocks
+if ! echo "$meta" | grep -q "\"role\":\"public\"" || ! echo "$meta" | grep -q "\"select_permissions\""; then
+  echo "⚠️  Can't confidently find public select_permissions in exported metadata."
+  echo "    (This grep is coarse; permissions may still exist.)"
+else
+  ok "Public permissions appear present in metadata."
 fi
 
-echo -e "\n🎉 Hasura FULL initialization completed successfully!"
+# ============================================================
+# TESTS
+# ============================================================
+log "Admin test query (should PASS)..."
+admin_resp="$(graphql_admin '{"query":"{ blocks(limit:1, order_by:{block_number:desc}) { block_number block_hash } }"}')"
+echo "$admin_resp" | grep -q '"errors"' && die "Admin GraphQL test failed: $admin_resp"
+ok "Admin GraphQL OK."
+
+log "PUBLIC select test (should PASS, no secret)..."
+public_select="$(graphql_public '{"query":"{ blocks(limit:1, order_by:{block_number:desc}) { block_number block_hash } }"}')"
+if echo "$public_select" | grep -q '"errors"'; then
+  echo "Response:"
+  echo "$public_select"
+  die "PUBLIC select failed. Check HASURA_GRAPHQL_UNAUTHORIZED_ROLE=public and that Hasura picked role=public."
+fi
+ok "PUBLIC select OK."
+
+log "PUBLIC aggregate test (should FAIL because allow_aggregations=false)..."
+public_agg="$(graphql_public '{"query":"{ blocks_aggregate { aggregate { count } } }"}')"
+if echo "$public_agg" | grep -q '"errors"'; then
+  ok "PUBLIC aggregate correctly rejected."
+else
+  echo "Response:"
+  echo "$public_agg"
+  die "PUBLIC aggregate unexpectedly succeeded (allow_aggregations=false expected)."
+fi
+
+echo
+ok "🎉 Hasura FULL initialization completed successfully!"
 exit 0

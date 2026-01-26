@@ -75,7 +75,7 @@ while true; do
       continue
     fi
 
-   # we consider the service to be "ready" if it is Up or Exit 0 has ended
+    # ready if Up or Exit 0
     if echo "$line" | grep -qE "Up|Exit 0"; then
       continue
     else
@@ -107,12 +107,10 @@ else
     echo "⚠️  ./scripts/full-init-hasura.sh not found, skipping."
 fi
 
-echo "--- Running basic Hasura test ---"
+echo "--- Running basic Hasura tests (PUBLIC) ---"
 
-# Fallback default for HASURA_BASE if somehow not defined
 HASURA_BASE="${HASURA_BASE:-http://localhost:8080}"
 HASURA_URL="${HASURA_URL:-$HASURA_BASE/v1/graphql}"
-ADMIN_SECRET="${HASURA_ADMIN_SECRET:-myadminsecretkey}"
 
 echo "Checking Hasura availability at $HASURA_URL..."
 status_code=$(curl -s -o /dev/null -w "%{http_code}" "$HASURA_URL" || echo "000")
@@ -121,29 +119,48 @@ if echo "$status_code" | grep -qE "200|400"; then
     echo "✅ Hasura endpoint reachable! (HTTP $status_code)"
 else
     echo "⚠️  Hasura not responding at $HASURA_URL (HTTP $status_code)"
-    echo "--- Done (skipping test query) ---"
+    echo "--- Done (skipping tests) ---"
     exit 0
 fi
 
-TEST_QUERY='{"query":"{ blocks_aggregate { aggregate { count } } }"}'
+# ------------------------------------------------------------
+# PUBLIC select should PASS
+# ------------------------------------------------------------
+PUBLIC_SELECT_QUERY='{"query":"{ blocks(limit:1, order_by:{block_number:desc}) { block_number block_hash } }"}'
 
-echo "Sending test query to Hasura (with admin secret)..."
-response=$(curl -s -X POST "$HASURA_URL" \
+echo "▶ PUBLIC SELECT test (should PASS, no admin secret)..."
+select_resp=$(curl -s -X POST "$HASURA_URL" \
   -H "Content-Type: application/json" \
-  -H "x-hasura-admin-secret: $ADMIN_SECRET" \
-  -d "$TEST_QUERY" || echo "")
+  -d "$PUBLIC_SELECT_QUERY")
 
-if echo "$response" | grep -q "aggregate"; then
-    echo "✅ Hasura GraphQL endpoint responded successfully!"
-    if command -v jq >/dev/null 2>&1; then
-        echo "$response" | jq .
-    else
-        echo "$response"
-    fi
+# Fail if GraphQL returned errors
+if echo "$select_resp" | grep -q '"errors"'; then
+  echo "❌ PUBLIC SELECT failed (expected success). Response:"
+  echo "$select_resp"
+  exit 1
+fi
+
+echo "✅ PUBLIC SELECT passed."
+command -v jq >/dev/null 2>&1 && echo "$select_resp" | jq . || echo "$select_resp"
+
+# ------------------------------------------------------------
+# PUBLIC aggregate should FAIL (because allow_aggregations=false)
+# ------------------------------------------------------------
+PUBLIC_AGG_QUERY='{"query":"{ blocks_aggregate { aggregate { count } } }"}'
+
+echo "▶ PUBLIC AGGREGATE test (should FAIL, allow_aggregations=false)..."
+agg_resp=$(curl -s -X POST "$HASURA_URL" \
+  -H "Content-Type: application/json" \
+  -d "$PUBLIC_AGG_QUERY")
+
+# We EXPECT errors here. If no errors -> fail the deploy check.
+if echo "$agg_resp" | grep -q '"errors"'; then
+  echo "✅ PUBLIC AGGREGATE correctly rejected."
+  command -v jq >/dev/null 2>&1 && echo "$agg_resp" | jq . || echo "$agg_resp"
 else
-    echo "⚠️  Hasura test failed or no data returned."
-    echo "Response:"
-    echo "$response"
+  echo "❌ PUBLIC AGGREGATE unexpectedly succeeded (expected errors). Response:"
+  echo "$agg_resp"
+  exit 1
 fi
 
 echo "--- Done! ---"
