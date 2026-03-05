@@ -1,0 +1,87 @@
+name: Deploy Indexer InternalDev
+
+on:
+  workflow_dispatch:
+
+env:
+  ECR_REPOSITORY_INDEXER: asi-chain-indexer-dev
+  AWS_REGION: us-east-1
+  EC2_INSTANCE_ID: ${{ secrets.AWS_INSTANCE_ID_INTERNALDEV }}
+  APP_PATH: /home/ubuntu/indexer 
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  build-and-deploy:
+    name: Build and Deploy to InternalDev
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+    - name: Check out code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: arn:aws:iam::533793137436:role/asi-chain-indexer-internaldev-github-actions-ecr-push-role 
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Deploy on EC2 and Get Logs
+      run: |
+        GITHUB_REPO_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+        REMOTE_REPO_PATH="/home/ubuntu/asi-chain-indexer"
+        COMMAND_ID=$(aws ssm send-command \
+        --document-name "AWS-RunShellScript" \
+        --targets "Key=instanceids,Values=${{ env.EC2_INSTANCE_ID }}" \
+        --comment "Deploy commit ${{ github.sha }}" \
+        --query "Command.CommandId" \
+        --output text \
+        --parameters 'commands=[
+          "export HOME=/home/ubuntu && \
+            git config --global --add safe.directory '$REMOTE_REPO_PATH' && \
+          cd '$REMOTE_REPO_PATH' && \
+          git remote set-url origin '$GITHUB_REPO_URL' && \
+          git reset --hard HEAD && \
+          git fetch --all && \
+          git checkout ${{ github.sha }} && \
+          bash deploy.sh"
+        ]')
+        
+        if [ -z "$COMMAND_ID" ]; then
+          echo "::error::Failed to send command to SSM."
+          exit 1
+        fi
+        echo "Command sent. CommandId: $COMMAND_ID. Waiting for completion..."
+        # Wait loop with a 3-minute timeout
+        SECONDS=0
+        TIMEOUT=600
+        STATUS="Pending"
+        while [ "$STATUS" = "Pending" ] || [ "$STATUS" = "InProgress" ]; do
+          if [ $SECONDS -gt $TIMEOUT ]; then
+            echo "::error::Timeout while waiting for SSM command execution."
+            break
+          fi
+          sleep 10
+          SECONDS=$((SECONDS + 10))
+          STATUS=$(aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "${{ env.EC2_INSTANCE_ID }}" --query "Status" --output text || echo "InProgress")
+          echo "Current status: $STATUS ($SECONDS s)"
+        done
+        # Get and print the final result
+        echo "--- COMMAND OUTPUT (STDOUT) ---"
+        aws ssm get-command-invocation \
+          --command-id "$COMMAND_ID" \
+          --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+          --query "StandardOutputContent" \
+          --output text
+        echo "--- ERROR OUTPUT (STDERR) ---"
+        aws ssm get-command-invocation \
+          --command-id "$COMMAND_ID" \
+          --instance-id "${{ env.EC2_INSTANCE_ID }}" \
+          --query "StandardErrorContent" \
+          --output text
+        # Fail the step if the command on EC2 failed
+        if [ "$STATUS" != "Success" ]; then
+          echo "::error::Command execution on EC2 finished with status: $STATUS."
+          exit 1
+        fi
