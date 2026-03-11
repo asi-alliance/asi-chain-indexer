@@ -1,4 +1,4 @@
-name: Deploy Indexer InternalDev
+name: Deploy Clean Indexer InternalDev
 
 on:
   workflow_dispatch:
