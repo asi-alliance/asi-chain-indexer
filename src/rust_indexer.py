@@ -256,6 +256,19 @@ class RustBlockIndexer:
             bonds_map = block_info.get("bonds", [])
             justifications = block_info.get("justifications", [])
 
+            # Normalize extra_bytes due to inconsistency between node implementations:
+            # Rust node sends an empty list [] when no extra bytes are present,
+            # while Scala node sends a string (or None). We convert [] to empty string,
+            # and any non-string value to string representation to avoid DB type errors.
+            extra_bytes_raw = block_data.get("extraBytes")
+
+            if isinstance(extra_bytes_raw, list) and not extra_bytes_raw:
+                extra_bytes = ""
+            elif not isinstance(extra_bytes_raw, str):
+                extra_bytes = str(extra_bytes_raw)
+            else:
+                extra_bytes = extra_bytes_raw
+
             # Insert block
             block = Block(
                 block_number=block_number,
@@ -271,7 +284,7 @@ class RustBlockIndexer:
                 sig=block_info.get("sig"),
                 sig_algorithm=block_info.get("sigAlgorithm"),
                 shard_id=block_info.get("shardId"),
-                extra_bytes=block_info.get("extraBytes"),
+                extra_bytes=extra_bytes,
                 version=block_info.get("version"),
                 deployment_count=len(deployments),
                 fault_tolerance=block_info.get("faultTolerance", 0.0),
