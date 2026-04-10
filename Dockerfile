@@ -3,7 +3,7 @@
 # ==============================
 FROM debian:bookworm-slim AS rust-cli
 
-ARG RUST_CLIENT_VERSION=v0.1
+ARG RUST_CLIENT_VERSION=v0.3
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
   && rm -rf /var/lib/apt/lists/*
