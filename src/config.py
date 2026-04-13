@@ -1,8 +1,9 @@
 """Configuration management for the indexer."""
 
 from typing import Optional
-from pydantic_settings import BaseSettings
+
 from pydantic import Field
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
@@ -26,7 +27,6 @@ class Settings(BaseSettings):
         default=None,
         description="Path to Rust CLI executable (node_cli)"
     )
-
 
     http_port: int = Field(
         default=40453,
@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     sync_interval: int = Field(
         default=5,
         description="Seconds between sync cycles"
+    )
+    delay_before_node: float = Field(
+        default=0.02,
+        description="small delay to avoid overwhelming the node"
     )
     batch_size: int = Field(
         default=100,

@@ -210,7 +210,7 @@ class RustBlockIndexer:
                     processed_count += 1
 
                     # Small delay to avoid overwhelming the node
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(settings.delay_before_node)
 
                 except Exception as e:
                     logger.error(f"Failed to process block", error=str(e), block=block_summary)
@@ -341,7 +341,7 @@ class RustBlockIndexer:
         enhanced_info = None
         try:
             enhanced_info = await self.client.get_deploy_info(deploy_id)
-            await asyncio.sleep(0.05)  # small delay to avoid overwhelming the node
+            await asyncio.sleep(settings.delay_before_node)  # small delay to avoid overwhelming the node
         except Exception as e:
             logger.debug(f"Could not get enhanced deploy info for {deploy_id}: {e}")
 
