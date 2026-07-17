@@ -533,13 +533,14 @@ class RustCLIClient:
                 if match:
                     consensus["participation_rate"] = float(match.group(1))
 
-                # Consensus Status: Healthy/Degraded
-                if "🟢 Healthy" in line:
-                    consensus["status"] = "healthy"
-                elif "🟡 Degraded" in line:
-                    consensus["status"] = "degraded"
-                elif "🔴 Critical" in line:
-                    consensus["status"] = "critical"
+                # Consensus Status: Healthy/Limited/Critical
+                if "Consensus Status:" in line:
+                    if "Healthy" in line:
+                        consensus["status"] = "healthy"
+                    elif "Limited" in line:
+                        consensus["status"] = "limited"
+                    elif "Critical" in line:
+                        consensus["status"] = "critical"
 
             return consensus
 
