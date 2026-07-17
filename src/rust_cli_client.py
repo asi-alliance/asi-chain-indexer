@@ -347,29 +347,16 @@ class RustCLIClient:
             for line in lines:
                 # Look for lines with validator info like:
                 # 1. 04837a4c...b2df065f (stake: 50000000000000)
+                # F1R3FLY-io/rust-client only ever prints the abbreviated form here,
+                # there is no full key elsewhere in the output to reconstruct from.
                 match = re.search(r'([0-9a-fA-F]{8}\.\.\.?[0-9a-fA-F]{8})\s*\(stake:\s*(\d+)\)', line)
                 if match:
-                    # This is abbreviated, need to find full key in previous lines
-                    abbreviated = match.group(1)
-                    stake = int(match.group(2))
-
-                    # Look for full key that matches the abbreviation
-                    prefix = abbreviated.split('...')[0]
-                    suffix = abbreviated.split('...')[-1]
-
-                    # Search all lines for full key
-                    for check_line in lines:
-                        full_match = re.search(r'([0-9a-fA-F]{130})', check_line)
-                        if full_match:
-                            full_key = full_match.group(1)
-                            if full_key.startswith(prefix) and full_key.endswith(suffix):
-                                validators.append({
-                                    'validator': full_key,
-                                    'stake': stake
-                                })
-                                break
+                    validators.append({
+                        'validator': match.group(1),
+                        'stake': int(match.group(2))
+                    })
                 else:
-                    # Try to match full format with stake on same line
+                    # Full-key format, if a future CLI version ever prints it
                     match = re.search(r'([0-9a-fA-F]{130})\s*\(stake:\s*(\d+)\)', line)
                     if match:
                         validators.append({
@@ -417,8 +404,8 @@ class RustCLIClient:
                 if match:
                     epoch_info["quarantine_length"] = int(match.group(1))
 
-                # Blocks Until Next Epoch: X
-                match = re.search(r'Blocks Until Next Epoch:\s*(\d+)', line)
+                # Remaining: X blocks
+                match = re.search(r'Remaining:\s*(\d+)\s*blocks', line)
                 if match:
                     epoch_info["blocks_until_next_epoch"] = int(match.group(1))
 
