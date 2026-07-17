@@ -486,13 +486,14 @@ class RustBlockIndexer:
             active_validators = await self.client.get_active_validators()
             if active_validators is None:
                 active_validators = []
+            active_keys = {v["validator"] for v in active_validators}
 
             async with db.session() as session:
                 # Update validator records
                 for bond in bonds:
                     validator_key = bond["validator"]
                     stake = bond["stake"]
-                    is_active = validator_key in active_validators
+                    is_active = validator_key in active_keys
 
                     # Get current block number for tracking
                     current_block = await db.get_last_indexed_block()
