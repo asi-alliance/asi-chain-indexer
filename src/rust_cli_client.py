@@ -121,7 +121,7 @@ class RustCLIClient:
             stdout, _ = await self._run_command([
                 "last-finalized-block",
                 "-H", self.node_host,
-                "--http-port", str(self.http_port),
+                "--port", str(self.http_port),
             ])
 
             # Parse the text output for last-finalized-block
@@ -175,7 +175,7 @@ class RustCLIClient:
                 "-s", str(start),
                 "-e", str(end),
                 "-H", self.node_host,
-                "--grpc-port", str(self.grpc_port)
+                "--port", str(self.grpc_port)
             ], timeout=60)  # Longer timeout for potentially many blocks
 
             # Extract blocks from output
@@ -244,7 +244,7 @@ class RustCLIClient:
                 "blocks",
                 "--block-hash", block_hash,
                 "-H", self.node_host,
-                "--http-port", str(self.http_port)
+                "--port", str(self.http_port)
             ], timeout=30)
 
             # Parse the JSON response
@@ -289,7 +289,7 @@ class RustCLIClient:
             stdout, _ = await self._run_command([
                 "bonds",
                 "-H", self.node_host,
-                "--http-port", str(self.http_port)
+                "--port", str(self.http_port)
             ])
 
             # Parse bonds from output
@@ -337,7 +337,7 @@ class RustCLIClient:
             stdout, _ = await self._run_command([
                 "active-validators",
                 "-H", self.node_host,
-                "--http-port", str(self.http_port)
+                "--port", str(self.http_port)
             ])
 
             # Parse validator list from output
@@ -347,29 +347,16 @@ class RustCLIClient:
             for line in lines:
                 # Look for lines with validator info like:
                 # 1. 04837a4c...b2df065f (stake: 50000000000000)
+                # F1R3FLY-io/rust-client only ever prints the abbreviated form here,
+                # there is no full key elsewhere in the output to reconstruct from.
                 match = re.search(r'([0-9a-fA-F]{8}\.\.\.?[0-9a-fA-F]{8})\s*\(stake:\s*(\d+)\)', line)
                 if match:
-                    # This is abbreviated, need to find full key in previous lines
-                    abbreviated = match.group(1)
-                    stake = int(match.group(2))
-
-                    # Look for full key that matches the abbreviation
-                    prefix = abbreviated.split('...')[0]
-                    suffix = abbreviated.split('...')[-1]
-
-                    # Search all lines for full key
-                    for check_line in lines:
-                        full_match = re.search(r'([0-9a-fA-F]{130})', check_line)
-                        if full_match:
-                            full_key = full_match.group(1)
-                            if full_key.startswith(prefix) and full_key.endswith(suffix):
-                                validators.append({
-                                    'validator': full_key,
-                                    'stake': stake
-                                })
-                                break
+                    validators.append({
+                        'validator': match.group(1),
+                        'stake': int(match.group(2))
+                    })
                 else:
-                    # Try to match full format with stake on same line
+                    # Full-key format, if a future CLI version ever prints it
                     match = re.search(r'([0-9a-fA-F]{130})\s*\(stake:\s*(\d+)\)', line)
                     if match:
                         validators.append({
@@ -393,7 +380,7 @@ class RustCLIClient:
             stdout, _ = await self._run_command([
                 "epoch-info",
                 "-H", self.node_host,
-                "--grpc-port", str(self.grpc_port),  # Observer port for PoS queries, old: 40452
+                "--port", str(self.grpc_port),  # Observer port for PoS queries, old: 40452
                 "--http-port", str(self.http_port)
             ])
 
@@ -417,8 +404,8 @@ class RustCLIClient:
                 if match:
                     epoch_info["quarantine_length"] = int(match.group(1))
 
-                # Blocks Until Next Epoch: X
-                match = re.search(r'Blocks Until Next Epoch:\s*(\d+)', line)
+                # Remaining: X blocks
+                match = re.search(r'Remaining:\s*(\d+)\s*blocks', line)
                 if match:
                     epoch_info["blocks_until_next_epoch"] = int(match.group(1))
 
@@ -499,7 +486,7 @@ class RustCLIClient:
             stdout, _ = await self._run_command([
                 "network-consensus",
                 "-H", self.node_host,
-                "--grpc-port", str(self.grpc_port),  # Observer port, old 40452
+                "--port", str(self.grpc_port),  # Observer port, old 40452
                 "--http-port", str(self.http_port)
             ])
 
@@ -533,13 +520,14 @@ class RustCLIClient:
                 if match:
                     consensus["participation_rate"] = float(match.group(1))
 
-                # Consensus Status: Healthy/Degraded
-                if "🟢 Healthy" in line:
-                    consensus["status"] = "healthy"
-                elif "🟡 Degraded" in line:
-                    consensus["status"] = "degraded"
-                elif "🔴 Critical" in line:
-                    consensus["status"] = "critical"
+                # Consensus Status: Healthy/Limited/Critical
+                if "Consensus Status:" in line:
+                    if "Healthy" in line:
+                        consensus["status"] = "healthy"
+                    elif "Limited" in line:
+                        consensus["status"] = "limited"
+                    elif "Critical" in line:
+                        consensus["status"] = "critical"
 
             return consensus
 
@@ -561,7 +549,7 @@ class RustCLIClient:
                 "show-main-chain",
                 "-d", str(depth),
                 "-H", self.node_host,
-                "--grpc-port", str(self.grpc_port)
+                "--port", str(self.grpc_port)
             ])
 
             # Parse similar to get_blocks_by_height
