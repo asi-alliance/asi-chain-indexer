@@ -547,4 +547,4 @@ To add support for new CLI commands:
 
 ## License
 
-Apache License 2.0
+This project is licensed under the Apache License 2.0. See LICENSE file for details.
