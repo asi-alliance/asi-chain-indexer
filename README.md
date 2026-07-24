@@ -547,4 +547,4 @@ To add support for new CLI commands:
 
 ## License
 
-MIT
+Apache License 2.0
