@@ -213,13 +213,13 @@ class MonitoringServer:
         try:
             # Database stats
             db_stats = await db.execute_raw("""
-                SELECT 
+                SELECT
                     (SELECT COUNT(*) FROM blocks) as total_blocks,
                     (SELECT COUNT(*) FROM deployments) as total_deployments,
                     (SELECT COUNT(*) FROM transfers) as total_transfers,
                     (SELECT COUNT(*) FROM validators) as total_validators,
-                    (SELECT value FROM indexer_state WHERE key = 'last_indexed_block') as last_indexed_block,
-                    (SELECT updated_at FROM indexer_state WHERE key = 'last_indexed_block') as last_sync_time
+                    (SELECT MAX(block_number) FROM blocks) as last_indexed_block,
+                    (SELECT MAX(created_at) FROM blocks) as last_sync_time
             """)
 
             stats = dict(db_stats[0]) if db_stats else {}
@@ -240,7 +240,7 @@ class MonitoringServer:
                 node_status = {"connected": False}
 
             # Calculate sync status
-            last_indexed = int(stats.get("last_indexed_block", 0))
+            last_indexed = int(stats.get("last_indexed_block") or 0)
             latest_block = node_status.get("latest_block", 0)
 
             return {

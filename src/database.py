@@ -88,25 +88,10 @@ class Database:
     
     async def get_last_indexed_block(self) -> int:
         """Get the last indexed block number."""
-        query = """
-            SELECT value::bigint as block_number
-            FROM indexer_state
-            WHERE key = 'last_indexed_block'
-        """
+        query = "SELECT MAX(block_number) as block_number FROM blocks"
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query)
-            return row["block_number"] if row else 0
-    
-    async def set_last_indexed_block(self, block_number: int):
-        """Update the last indexed block number."""
-        query = """
-            INSERT INTO indexer_state (key, value, updated_at)
-            VALUES ('last_indexed_block', $1, NOW())
-            ON CONFLICT (key) DO UPDATE
-            SET value = $1, updated_at = NOW()
-        """
-        async with self.pool.acquire() as conn:
-            await conn.execute(query, str(block_number))
+            return row["block_number"] if row and row["block_number"] is not None else 0
 
 
 # Global database instance

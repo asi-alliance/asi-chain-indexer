@@ -129,21 +129,8 @@ class BlockIndexer:
                 except Exception as e:
                     logger.error(f"[indexer.py] Failed to process block {i}", error=str(e), block=block_summary)
 
-            # Update last indexed block
             if processed_count > 0 and blocks:
-                # Find the last successfully processed block
-                last_processed_block = None
-                for block in reversed(blocks[:processed_count]):
-                    if "blockNumber" in block:
-                        last_processed_block = block
-                        break
-
-                if last_processed_block:
-                    await db.set_last_indexed_block(last_processed_block["blockNumber"])
-                    logger.info("Sync cycle complete", last_block=last_processed_block["blockNumber"],
-                                processed=processed_count)
-                else:
-                    logger.error("No valid blocks found to update last indexed")
+                logger.info("Sync cycle complete", processed=processed_count)
 
         except Exception as e:
             logger.error(f"Sync cycle error: {e}", exc_info=True)
@@ -184,7 +171,6 @@ class BlockIndexer:
         # Process block in transaction
         async with db.session() as session:
             # Extract additional block data
-            parent_hash = block_data["parentsHashList"][0] if block_data.get("parentsHashList") else ""
             state_root_hash = block_data.get("postStateHash", "")
             bonds_map = block_data.get("bonds", [])
 
@@ -192,7 +178,6 @@ class BlockIndexer:
             block = Block(
                 block_number=block_data["blockNumber"],
                 block_hash=block_data["blockHash"],
-                parent_hash=parent_hash,
                 timestamp=block_data["timestamp"],
                 proposer=block_data["sender"],
                 state_hash=state_root_hash,

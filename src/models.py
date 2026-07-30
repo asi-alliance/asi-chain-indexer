@@ -18,9 +18,8 @@ class Block(Base):
 
     __tablename__ = "blocks"
 
-    block_number = Column(BigInteger, primary_key=True, index=True)
-    block_hash = Column(String(64), unique=True, nullable=False, index=True)
-    parent_hash = Column(String(64), nullable=False)
+    block_hash = Column(String(64), primary_key=True)
+    block_number = Column(BigInteger, nullable=False, index=True)
     timestamp = Column(BigInteger, nullable=False, index=True)
     proposer = Column(String(160), nullable=False, index=True)  # Increased size
     state_hash = Column(String(64))
@@ -44,10 +43,30 @@ class Block(Base):
                                foreign_keys="[Deployment.block_hash]")
     validator_bonds = relationship("ValidatorBond", back_populates="block", cascade="all, delete-orphan",
                                    foreign_keys="[ValidatorBond.block_hash]")
+    parents = relationship("BlockParent", back_populates="block", cascade="all, delete-orphan",
+                           foreign_keys="[BlockParent.block_hash]")
 
     __table_args__ = (
         Index("idx_blocks_timestamp", "timestamp"),
         Index("idx_blocks_proposer", "proposer"),
+    )
+
+
+class BlockParent(Base):
+    """Junction table tracking all parents of a block (DAG support)."""
+
+    __tablename__ = "block_parents"
+
+    block_hash = Column(String(64), ForeignKey("blocks.block_hash", ondelete="CASCADE"), primary_key=True)
+    parent_hash = Column(String(64), primary_key=True)
+    parent_index = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # Relationships
+    block = relationship("Block", back_populates="parents", foreign_keys=[block_hash])
+
+    __table_args__ = (
+        Index("idx_block_parents_parent_hash", "parent_hash"),
     )
 
 
@@ -58,7 +77,7 @@ class Deployment(Base):
 
     deploy_id = Column(String(160), primary_key=True)  # Increased size
     block_hash = Column(String(64), ForeignKey("blocks.block_hash"), nullable=False, index=True)
-    block_number = Column(BigInteger, ForeignKey("blocks.block_number"), nullable=False, index=True)
+    block_number = Column(BigInteger, nullable=False, index=True)
     deployer = Column(String(160), nullable=False, index=True)  # Increased size
     term = Column(Text, nullable=False)  # Full Rholang code
     timestamp = Column(BigInteger, nullable=False, index=True)
@@ -94,7 +113,8 @@ class Transfer(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     deploy_id = Column(String(140), ForeignKey("deployments.deploy_id"), nullable=False, index=True)
-    block_number = Column(BigInteger, ForeignKey("blocks.block_number"), nullable=False, index=True)
+    block_hash = Column(String(64), ForeignKey("blocks.block_hash"), nullable=False, index=True)
+    block_number = Column(BigInteger, nullable=False, index=True)
     from_address = Column(String(150), nullable=False, index=True)
     from_public_key = Column(String(150), nullable=True, index=True)  # Support validator public keys
     to_address = Column(String(150), nullable=False, index=True)  # Support validator public keys
@@ -140,7 +160,7 @@ class ValidatorBond(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     block_hash = Column(String(64), ForeignKey("blocks.block_hash"), nullable=False)
-    block_number = Column(BigInteger, ForeignKey("blocks.block_number"), nullable=False)
+    block_number = Column(BigInteger, nullable=False)
     validator_public_key = Column(String(130), ForeignKey("validators.public_key"), nullable=False)
     stake = Column(BigInteger, nullable=False)
 
@@ -190,7 +210,8 @@ class BalanceState(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     address = Column(String(150), nullable=False)  # Support both ASI addresses and validator public keys
-    block_number = Column(BigInteger, ForeignKey("blocks.block_number", ondelete="CASCADE"), nullable=False)
+    block_hash = Column(String(64), ForeignKey("blocks.block_hash", ondelete="CASCADE"), nullable=False)
+    block_number = Column(BigInteger, nullable=False)
     unbonded_balance_dust = Column(BigInteger, nullable=False, default=0)
     unbonded_balance_asi = Column(Numeric(20, 8), nullable=False, default=0)
     bonded_balance_dust = Column(BigInteger, nullable=False, default=0)
@@ -201,9 +222,10 @@ class BalanceState(Base):
     block = relationship("Block", backref="balance_states")
 
     __table_args__ = (
-        UniqueConstraint("address", "block_number", name="uq_balance_address_block"),
+        UniqueConstraint("address", "block_hash", name="uq_balance_address_block"),
         Index("idx_balance_states_address", "address"),
         Index("idx_balance_states_block", "block_number", postgresql_using="btree"),
+        Index("idx_balance_states_block_hash", "block_hash", postgresql_using="btree"),
         Index("idx_balance_states_updated", "updated_at", postgresql_using="btree"),
     )
 

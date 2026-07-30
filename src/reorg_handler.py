@@ -241,11 +241,8 @@ class ReorgHandler:
             
             # Step 2: Re-index canonical blocks
             await self._reindex_canonical_blocks(reorg.canonical_blocks)
-            
-            # Step 3: Update indexer state
-            await db.set_last_indexed_block(reorg.fork_point - 1)
-            
-            # Step 4: Record reorg in database
+
+            # Step 3: Record reorg in database
             await self._record_reorg(reorg)
             
             logger.info(

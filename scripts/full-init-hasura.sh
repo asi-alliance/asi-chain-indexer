@@ -111,6 +111,7 @@ ok "Hasura is ready."
 # ============================================================
 TABLES=(
   "blocks"
+  "block_parents"
   "deployments"
   "transfers"
   "validators"
@@ -125,10 +126,14 @@ TABLES=(
 VIEWS=(
   "network_metrics_view"
   "network_stats_view"
+  "block_ancestors_view"
+  "block_descendants_view"
 )
 
 FUNCTIONS=(
   "get_network_metrics"
+  "get_block_ancestors"
+  "get_block_descendants"
 )
 
 log "Sanity-checking tables exist in Postgres (information_schema)..."
@@ -191,11 +196,11 @@ ok "Functions tracked (or already tracked)."
 #  - Since you want "full init" and likely run once, we keep fail-fast.
 # ============================================================
 declare -A OBJECT_RELATIONS=(
-  ["deployments.block"]="blocks:block_number:block_number"
-  ["transfers.block"]="blocks:block_number:block_number"
+  ["deployments.block"]="blocks:block_hash:block_hash"
+  ["transfers.block"]="blocks:block_hash:block_hash"
   ["transfers.deployment"]="deployments:deploy_id:deploy_id"
 
-  ["validator_bonds.block"]="blocks:block_number:block_number"
+  ["validator_bonds.block"]="blocks:block_hash:block_hash"
   ["validator_bonds.validator"]="validators:validator_public_key:public_key"
 
   ["block_validators.block"]="blocks:block_hash:block_hash"
@@ -203,8 +208,11 @@ declare -A OBJECT_RELATIONS=(
 
   ["transfers.sender_validator"]="validators:from_public_key:public_key"
 
-  ["balance_states.block"]="blocks:block_number:block_number"
+  ["balance_states.block"]="blocks:block_hash:block_hash"
   ["network_stats.block"]="blocks:block_number:block_number"
+
+  ["block_parents.child_block"]="blocks:block_hash:block_hash"
+  ["block_parents.parent_block"]="blocks:parent_hash:block_hash"
 )
 
 log "Creating object relationships..."
@@ -229,10 +237,10 @@ done
 ok "Object relationships created."
 
 declare -A ARRAY_RELATIONS=(
-  ["blocks.deployments"]="deployments:block_number:block_number"
-  ["blocks.transfers"]="transfers:block_number:block_number"
-  ["blocks.validator_bonds"]="validator_bonds:block_number:block_number"
-  ["blocks.balance_states"]="balance_states:block_number:block_number"
+  ["blocks.deployments"]="deployments:block_hash:block_hash"
+  ["blocks.transfers"]="transfers:block_hash:block_hash"
+  ["blocks.validator_bonds"]="validator_bonds:block_hash:block_hash"
+  ["blocks.balance_states"]="balance_states:block_hash:block_hash"
   ["blocks.block_validators"]="block_validators:block_hash:block_hash"
   ["blocks.network_stats"]="network_stats:block_number:block_number"
 
@@ -241,6 +249,9 @@ declare -A ARRAY_RELATIONS=(
   ["validators.validator_bonds"]="validator_bonds:public_key:validator_public_key"
   ["validators.block_validators"]="block_validators:public_key:validator_public_key"
   ["validators.transfers_sent"]="transfers:public_key:from_public_key"
+
+  ["blocks.parent_links"]="block_parents:block_hash:block_hash"
+  ["blocks.child_links"]="block_parents:block_hash:parent_hash"
 )
 
 log "Creating array relationships..."

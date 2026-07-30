@@ -14,7 +14,7 @@ from src.addr import convert_to_asi_address, public_key_to_asi_address
 from src.config import settings
 from src.database import db
 from src.models import (
-    Block, Deployment, Transfer, Validator, ValidatorBond,
+    Block, BlockParent, Deployment, Transfer, Validator, ValidatorBond,
     EpochTransition, NetworkStats, BalanceState
 )
 from src.rust_cli_client import RustCLIClient
@@ -215,14 +215,12 @@ class RustBlockIndexer:
                 except Exception as e:
                     logger.error(f"Failed to process block", error=str(e), block=block_summary)
 
-            # Update last indexed block
             if processed_count > 0:
-                last_block_num = start + processed_count - 1
-                await db.set_last_indexed_block(last_block_num)
+                new_last_indexed = await db.get_last_indexed_block()
                 logger.info("✅ Sync cycle complete",
-                            last_indexed_block=last_block_num,
+                            last_indexed_block=new_last_indexed,
                             blocks_processed=processed_count,
-                            remaining_blocks=latest_block_number - last_block_num)
+                            remaining_blocks=latest_block_number - new_last_indexed)
 
         except Exception as e:
             logger.error(f"Sync blocks error: {e}", exc_info=True)
@@ -251,16 +249,14 @@ class RustBlockIndexer:
         # Process block in transaction
         async with db.session() as session:
             # Extract block data
-            parent_hash = block_info.get("parentsHashList", [""])[0] if block_info.get("parentsHashList") else ""
+            parent_hashes = block_info.get("parentsHashList") or []
             state_root_hash = block_info.get("postStateHash", "")
             bonds_map = block_info.get("bonds", [])
             justifications = block_info.get("justifications", [])
 
-            # Insert block
-            block = Block(
+            block_insert = insert(Block).values(
                 block_number=block_number,
                 block_hash=block_hash,
-                parent_hash=parent_hash,
                 timestamp=block_info.get("timestamp", 0),
                 proposer=block_info.get("sender", ""),
                 state_hash=state_root_hash,
@@ -276,9 +272,19 @@ class RustBlockIndexer:
                 deployment_count=len(deployments),
                 fault_tolerance=block_info.get("faultTolerance", 0.0),
                 pre_state_hash=block_info.get("preStateHash"),
-                justifications=justifications  # Store full justifications
-            )
-            session.add(block)
+                justifications=justifications
+            ).on_conflict_do_nothing(index_elements=["block_hash"])
+            await session.execute(block_insert)
+
+            if parent_hashes:
+                parent_rows = [
+                    {"block_hash": block_hash, "parent_hash": p, "parent_index": idx}
+                    for idx, p in enumerate(parent_hashes)
+                ]
+                parents_insert = insert(BlockParent).values(parent_rows).on_conflict_do_nothing(
+                    index_elements=["block_hash", "parent_hash"]
+                )
+                await session.execute(parents_insert)
 
             # Process validators from bonds
             await self._process_validators(session, block_info)
@@ -451,6 +457,7 @@ class RustBlockIndexer:
                 # ORM insert is fine here (PK is auto-generated 'id')
                 session.add(Transfer(
                     deploy_id=t.deploy_id,
+                    block_hash=block_data.get("blockHash"),
                     block_number=t.block_number,
                     from_address=t.from_address,
                     from_public_key=t.from_public_key,
@@ -486,14 +493,13 @@ class RustBlockIndexer:
             active_validators = await self.client.get_active_validators()
             if active_validators is None:
                 active_validators = []
-            active_keys = {v["validator"] for v in active_validators}
 
             async with db.session() as session:
                 # Update validator records
                 for bond in bonds:
                     validator_key = bond["validator"]
                     stake = bond["stake"]
-                    is_active = validator_key in active_keys
+                    is_active = validator_key in active_validators
 
                     # Get current block number for tracking
                     current_block = await db.get_last_indexed_block()
@@ -1123,6 +1129,7 @@ class RustBlockIndexer:
             transfer = Transfer(
                 timestamp=block_info.get("timestamp", 0),
                 deploy_id=deploy_id,
+                block_hash=block_info.get("blockHash"),
                 block_number=0,
                 # Genesis mint
                 from_address=public_key_to_asi_address(
@@ -1161,6 +1168,7 @@ class RustBlockIndexer:
             transfer = Transfer(
                 timestamp=block_info.get("timestamp", 0),
                 deploy_id=deploy_id,
+                block_hash=block_info.get("blockHash"),
                 block_number=0,
                 from_address=public_key_to_asi_address(validator_pubkey),
                 from_public_key=validator_pubkey,
@@ -1194,6 +1202,7 @@ class RustBlockIndexer:
         for address, amount_dust, amount_asi in genesis_allocations:
             balance_state = BalanceState(
                 address=address,
+                block_hash=block_info.get("blockHash"),
                 block_number=0,
                 unbonded_balance_dust=amount_dust,
                 unbonded_balance_asi=amount_asi,
@@ -1209,6 +1218,7 @@ class RustBlockIndexer:
         for validator_pubkey, amount_dust, amount_asi in validator_bonds:
             balance_state = BalanceState(
                 address=validator_pubkey,
+                block_hash=block_info.get("blockHash"),
                 block_number=0,
                 unbonded_balance_dust=0,
                 unbonded_balance_asi=0,
@@ -1223,6 +1233,7 @@ class RustBlockIndexer:
 
         pos_balance_state = BalanceState(
             address="1111gW5kkGxHg7xDg6dRkZx2f7qxTizJzaCH9VEM1oJKWRvSX9Sk5",
+            block_hash=block_info.get("blockHash"),
             block_number=0,
             unbonded_balance_dust=0,
             unbonded_balance_asi=0,

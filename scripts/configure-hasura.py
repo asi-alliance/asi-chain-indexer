@@ -279,7 +279,8 @@ def main():
     print("\n📊 Step 1: Tracking Tables")
     tables = [
         "blocks",
-        "deployments", 
+        "block_parents",
+        "deployments",
         "transfers",
         "validators",
         "validator_bonds",
@@ -302,17 +303,15 @@ def main():
     
     # Deployments -> Blocks (object relationship)
     create_relationship("deployments", "block_by_hash", "block_hash", "blocks")
-    create_relationship("deployments", "block_by_number", "block_number", "blocks")
-    
+
     # Transfers -> Deployments (object relationship)
     create_relationship("transfers", "deployment", "deploy_id", "deployments")
-    
-    # Transfers -> Blocks (object relationship) 
-    create_relationship("transfers", "block", "block_number", "blocks")
-    
+
+    # Transfers -> Blocks (object relationship)
+    create_relationship("transfers", "block", "block_hash", "blocks")
+
     # Validator Bonds -> Blocks (object relationship)
     create_relationship("validator_bonds", "block_by_hash", "block_hash", "blocks")
-    create_relationship("validator_bonds", "block_by_number", "block_number", "blocks")
     
     # Validator Bonds -> Validators (manual object relationship - no FK constraint)
     create_manual_relationship("validator_bonds", "validator", {"validator_public_key": "public_key"}, "validators")
@@ -327,7 +326,7 @@ def main():
     create_array_relationship("blocks", "deployments", "block_hash", "deployments")
     
     # Blocks -> Transfers (array relationship)
-    create_array_relationship("blocks", "transfers", "block_number", "transfers")
+    create_array_relationship("blocks", "transfers", "block_hash", "transfers")
     
     # Blocks -> Validator Bonds (array relationship)
     create_array_relationship("blocks", "validator_bonds", "block_hash", "validator_bonds")
@@ -345,10 +344,22 @@ def main():
     create_manual_array_relationship("validators", "block_validators", {"public_key": "validator_public_key"}, "block_validators")
     
     # Balance States -> Blocks (object relationship)
-    create_relationship("balance_states", "block", "block_number", "blocks")
-    
+    create_relationship("balance_states", "block", "block_hash", "blocks")
+
     # Blocks -> Balance States (array relationship)
-    create_array_relationship("blocks", "balance_states", "block_number", "balance_states")
+    create_array_relationship("blocks", "balance_states", "block_hash", "balance_states")
+
+    # Block Parents -> Blocks (object relationship, the child block - has real FK)
+    create_relationship("block_parents", "child_block", "block_hash", "blocks")
+
+    # Block Parents -> Blocks (manual object relationship, the parent block - no FK, parent may not exist yet)
+    create_manual_relationship("block_parents", "parent_block", {"parent_hash": "block_hash"}, "blocks")
+
+    # Blocks -> Block Parents (array relationship, this block's own parent links)
+    create_array_relationship("blocks", "parent_links", "block_hash", "block_parents")
+
+    # Blocks -> Block Parents (manual array relationship, links where this block is the parent, i.e. its children)
+    create_manual_array_relationship("blocks", "child_links", {"block_hash": "parent_hash"}, "block_parents")
     
     # Epoch Transitions relationships (no foreign keys, so no relationships needed)
     # Network Stats relationships (no foreign keys, so no relationships needed)
