@@ -31,5 +31,5 @@ jobs:
       
       - name: Run install script
         run: |
-          cd indexer
+          cd ~/indexer
           ssh alexnet-server "bash deploy.sh --clean"
