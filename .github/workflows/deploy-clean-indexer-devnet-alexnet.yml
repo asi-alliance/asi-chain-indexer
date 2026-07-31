@@ -19,7 +19,7 @@ jobs:
           chmod 600 ~/.ssh/target_key
           
           cat << 'EOF' > ~/.ssh/config
-          Host k3s-server
+          Host alexnet-server
             HostName ${{ secrets.DC_DEV_KRONE_TARGET_HOST }}
             User ${{ secrets.DC_DEV_KRONE_TARGET_USER }}
             Port ${{ secrets.DC_DEV_KRONE_TARGET_PORT }}
@@ -31,4 +31,4 @@ jobs:
       
       - name: Run install script
         run: |
-          ssh k3s-server "bash ~/indexer/deploy.sh --clean"
+          ssh alexnet-server "bash ~/indexer/deploy.sh --clean"
