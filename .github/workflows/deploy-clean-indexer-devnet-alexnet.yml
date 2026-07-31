@@ -18,19 +18,17 @@ jobs:
           echo "${{ secrets.DC_DEV_KRONE_TARGET_PRIVATE_KEY }}" > ~/.ssh/target_key
           chmod 600 ~/.ssh/target_key
           
-          cat > ~/.ssh/config <<EOF
-                    
+          cat << 'EOF' > ~/.ssh/config
           Host k3s-server
             HostName ${{ secrets.DC_DEV_KRONE_TARGET_HOST }}
             User ${{ secrets.DC_DEV_KRONE_TARGET_USER }}
             Port ${{ secrets.DC_DEV_KRONE_TARGET_PORT }}
             IdentityFile ~/.ssh/target_key 
             StrictHostKeyChecking no
-          EOF 
+          EOF
+          
           chmod 600 ~/.ssh/config
       
       - name: Run install script
         run: |
-          ssh k3s-server "
-          bash ~/indexer/deploy.sh --clean
-          " 
+          ssh k3s-server "bash ~/indexer/deploy.sh --clean"
