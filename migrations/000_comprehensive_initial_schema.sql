@@ -59,6 +59,7 @@ create TABLE IF NOT EXISTS deployments
     block_hash               VARCHAR(64)               NOT NULL REFERENCES blocks (block_hash) ON delete CASCADE,
     block_number             BIGINT                    NOT NULL,
     deployer                 VARCHAR(200)              NOT NULL,
+    deployer_address         VARCHAR(150)              NOT NULL,
     term                     TEXT                      NOT NULL,
     timestamp                BIGINT                    NOT NULL,
     sig                      VARCHAR(200)              NOT NULL,
@@ -85,6 +86,7 @@ create index IF NOT EXISTS idx_deployments_status ON deployments (status);
 create index IF NOT EXISTS idx_deployments_deploy_id_partial ON deployments (deploy_id varchar_pattern_ops);
 create index IF NOT EXISTS idx_deployments_deployer_partial ON deployments (deployer varchar_pattern_ops);
 create index IF NOT EXISTS idx_deployments_type ON deployments (deployment_type);
+create index IF NOT EXISTS idx_deployments_deployer_address ON deployments (deployer_address);
 
 -- Transfers table with extended address fields
 create TABLE IF NOT EXISTS transfers
@@ -723,3 +725,24 @@ COMMENT ON FUNCTION get_block_ancestors IS
     'Recursively returns all ancestor blocks of the given block_hash by walking block_parents.';
 COMMENT ON FUNCTION get_block_descendants IS
     'Recursively returns all descendant blocks of the given block_hash by walking block_parents.';
+
+-- Wallet transaction history (deployments + transfers, combined for one paginated GraphQL query)
+
+CREATE VIEW public.transaction_history_view AS
+SELECT
+    d.deploy_id,
+    d.block_hash,
+    d.block_number,
+    d.timestamp,
+    CASE WHEN t.deploy_id IS NOT NULL THEN 'transfer' ELSE 'not_transfer' END AS type,
+    d.deployer_address,
+    t.from_address,
+    t.to_address,
+    t.from_public_key,
+    t.amount_asi,
+    t.status
+FROM deployments d
+         LEFT JOIN transfers t ON t.deploy_id = d.deploy_id;
+
+COMMENT ON VIEW public.transaction_history_view IS
+    'Wallet transaction history: deployments left-joined with their transfers, one row per transfer (or per deployment if it produced none). Filtering, sorting and pagination are done via GraphQL where/order_by/offset/limit, not parameters.';

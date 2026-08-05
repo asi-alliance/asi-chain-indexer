@@ -11,7 +11,6 @@ import structlog
 
 from src.config import settings
 from src.database import db
-from src.rust_cli_client import RustCLIClient
 
 logger = structlog.get_logger(__name__)
 
@@ -61,6 +60,10 @@ class MonitoringServer:
         self.indexer = indexer
         self.app = web.Application()
         self._setup_routes()
+
+    def _client(self):
+        # reuse the indexer's client: opening one per request leaks a grpc channel every time
+        return self.indexer.client if self.indexer else None
 
     def _json_response(self, data, status=200):
         """Create a JSON response with custom serialization."""
@@ -143,16 +146,16 @@ class MonitoringServer:
         except Exception as e:
             logger.error("Database health check failed", error=str(e))
 
-        # Check Rust CLI
+        # Check node connectivity
         try:
-            client = RustCLIClient()
+            client = self._client()
             # Try to get last finalized block as health check
-            last_block = await client.get_last_finalized_block()
-            checks["rust_cli"] = last_block is not None
+            last_block = await client.get_last_finalized_block() if client else None
+            checks["node_client"] = last_block is not None
             checks["rchain_node"] = last_block is not None
         except Exception as e:
-            logger.error("Rust CLI health check failed", error=str(e))
-            checks["rust_cli"] = False
+            logger.error("Node health check failed", error=str(e))
+            checks["node_client"] = False
             checks["rchain_node"] = False
 
         # Overall status
@@ -199,8 +202,8 @@ class MonitoringServer:
             last_block_height.set(last_indexed)
 
             # Get chain height and calculate lag
-            client = RustCLIClient()
-            last_finalized = await client.get_last_finalized_block()
+            client = self._client()
+            last_finalized = await client.get_last_finalized_block() if client else None
             if last_finalized and "blockNumber" in last_finalized:
                 latest_block = last_finalized["blockNumber"]
                 lag = max(0, latest_block - last_indexed)
@@ -227,8 +230,8 @@ class MonitoringServer:
             # Node status
             node_status = {}
             try:
-                client = RustCLIClient()
-                last_finalized = await client.get_last_finalized_block()
+                client = self._client()
+                last_finalized = await client.get_last_finalized_block() if client else None
                 if last_finalized:
                     node_status = {
                         "connected": True,
@@ -246,7 +249,7 @@ class MonitoringServer:
             return {
                 "indexer": {
                     "version": "2.0.0",
-                    "indexer_type": "rust_cli",
+                    "indexer_type": "grpc",
                     "running": self.indexer.running if self.indexer else False,
                     "last_indexed_block": last_indexed,
                     "last_sync_time": stats.get("last_sync_time").isoformat() if stats.get("last_sync_time") else None,
@@ -265,12 +268,10 @@ class MonitoringServer:
                     "batch_size": settings.batch_size,
                     "start_from_block": settings.start_from_block
                 },
-                "cli": {
-                    "binary_path": settings.rust_cli_path,
-                    # "node_host": settings.node_host,
-                    # "grpc_port": settings.grpc_port,
-                    # "http_port": settings.http_port,
-                    "node_host": settings.node_host
+                "client": {
+                    "node_host": settings.node_host,
+                    "grpc_port": settings.grpc_port,
+                    "http_port": settings.http_port
                 },
                 "node": {
                     "connected": node_status.get("connected", False),

@@ -79,6 +79,7 @@ class Deployment(Base):
     block_hash = Column(String(64), ForeignKey("blocks.block_hash"), nullable=False, index=True)
     block_number = Column(BigInteger, nullable=False, index=True)
     deployer = Column(String(160), nullable=False, index=True)  # Increased size
+    deployer_address = Column(String(150), nullable=False, index=True)
     term = Column(Text, nullable=False)  # Full Rholang code
     timestamp = Column(BigInteger, nullable=False, index=True)
     sig = Column(String(160), nullable=False)  # Increased size

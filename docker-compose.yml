@@ -33,7 +33,6 @@ services:
       NODE_TIMEOUT: ${NODE_TIMEOUT:-30}
       
       # Rust CLI Configuration
-      RUST_CLI_PATH: ${RUST_CLI_PATH:-/app/node_cli_linux}
       NODE_HOST: ${NODE_HOST}
       GRPC_PORT: ${GRPC_PORT}
       HTTP_PORT: ${HTTP_PORT}

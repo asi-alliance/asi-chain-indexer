@@ -128,6 +128,7 @@ VIEWS=(
   "network_stats_view"
   "block_ancestors_view"
   "block_descendants_view"
+  "transaction_history_view"
 )
 
 FUNCTIONS=(

@@ -17,7 +17,6 @@ from sqlalchemy.orm import sessionmaker
 from src.config import settings
 from src.database import db
 from src.models import Block, Deployment, Transfer, ValidatorBond, BalanceState
-from src.rust_cli_client import RustCLIClient
 from src.event_system import event_bus, create_event, EventType, Priority
 from src.resilience import db_executor
 
@@ -50,7 +49,7 @@ class ReorgDetection:
 class ReorgHandler:
     """Handles blockchain reorganizations."""
     
-    def __init__(self, client: RustCLIClient):
+    def __init__(self, client):
         self.client = client
         self.max_reorg_depth = getattr(settings, 'max_reorg_depth', 100)
         self.confirmation_depth = getattr(settings, 'confirmation_depth', 10)
