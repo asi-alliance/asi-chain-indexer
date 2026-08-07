@@ -22,12 +22,6 @@ class Settings(BaseSettings):
         description="HTTP request timeout in seconds"
     )
 
-    # Rust CLI Configuration
-    rust_cli_path: Optional[str] = Field(
-        default=None,
-        description="Path to Rust CLI executable (node_cli)"
-    )
-
     http_port: int = Field(
         default=40453,
         description="HTTP port for status queries"
@@ -41,6 +35,13 @@ class Settings(BaseSettings):
     node_host: str = Field(
         default="localhost",
         description="host port for status queries"
+    )
+
+    fault_tolerance_threshold: float = Field(
+        default=0.67,
+        description="BFT safety threshold for consensus status, mirrors the node's own "
+                     "casper.fault-tolerance-threshold (defaults.conf); not exposed via any API, "
+                     "so it must be kept in sync with the shard's actual config by hand"
     )
 
     # Database Configuration

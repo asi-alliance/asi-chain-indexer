@@ -1,4 +1,4 @@
-"""Enhanced indexer using Rust CLI for comprehensive blockchain synchronization."""
+"""Enhanced indexer using the node gRPC/HTTP API for comprehensive blockchain synchronization."""
 
 import asyncio
 import re
@@ -14,16 +14,16 @@ from src.addr import convert_to_asi_address, public_key_to_asi_address
 from src.config import settings
 from src.database import db
 from src.models import (
-    Block, Deployment, Transfer, Validator, ValidatorBond,
+    Block, BlockParent, Deployment, Transfer, Validator, ValidatorBond,
     EpochTransition, NetworkStats, BalanceState
 )
-from src.rust_cli_client import RustCLIClient
+from src.grpc_node_client import GrpcNodeClient
 
 logger = structlog.get_logger(__name__)
 
 
 class RustBlockIndexer:
-    """Enhanced indexer using Rust CLI for full blockchain data extraction."""
+    """Enhanced indexer using the node gRPC/HTTP API for full blockchain data extraction."""
 
     # Pattern for extracting ASI transfers from Rholang terms
     TRANSFER_PATTERNS = [
@@ -77,8 +77,8 @@ class RustBlockIndexer:
     async def start(self):
         """Start the enhanced indexer."""
         self.running = True
-        print("🚀 Starting enhanced Rust CLI blockchain indexer", flush=True)
-        logger.info("🚀 Starting enhanced Rust CLI blockchain indexer")
+        print("🚀 Starting enhanced blockchain indexer", flush=True)
+        logger.info("🚀 Starting enhanced blockchain indexer")
 
         # Initialize database
         logger.info("📊 Connecting to database...")
@@ -86,10 +86,10 @@ class RustBlockIndexer:
         await db.create_tables()
         logger.info("✅ Database connected and tables ready")
 
-        # Initialize Rust CLI client
-        logger.info("🔧 Initializing Rust CLI client...")
+        # Initialize gRPC node client
+        logger.info("🔧 Initializing gRPC node client...")
         try:
-            self.client = RustCLIClient()
+            self.client = GrpcNodeClient()
         except Exception as e:
             logger.error(str(e), exc_info=True)
 
@@ -97,7 +97,7 @@ class RustBlockIndexer:
         logger.info("🔍 Checking ASI-Chain node health...")
         if not await self.client.health_check():
             logger.error("❌ Node is not healthy - cannot connect to ASI-Chain node")
-            raise RuntimeError("Cannot connect to node via Rust CLI")
+            raise RuntimeError("Cannot connect to node")
 
         logger.info("✅ ASI-Chain node connection established")
 
@@ -137,7 +137,7 @@ class RustBlockIndexer:
         await db.disconnect()
 
     async def _sync_blocks(self):
-        """Sync blocks using Rust CLI get-blocks-by-height command."""
+        """Sync blocks using the node's getBlocksByHeights RPC."""
         try:
             # Get last indexed block
             last_indexed = await db.get_last_indexed_block()
@@ -175,7 +175,7 @@ class RustBlockIndexer:
             end = min(start + batch_size - 1, latest_block_number)
 
             logger.info(
-                "🔄 Syncing blocks via Rust CLI",
+                "🔄 Syncing blocks",
                 start_block=start,
                 end_block=end,
                 blocks_behind=latest_block_number - last_indexed,
@@ -215,14 +215,12 @@ class RustBlockIndexer:
                 except Exception as e:
                     logger.error(f"Failed to process block", error=str(e), block=block_summary)
 
-            # Update last indexed block
             if processed_count > 0:
-                last_block_num = start + processed_count - 1
-                await db.set_last_indexed_block(last_block_num)
+                new_last_indexed = await db.get_last_indexed_block()
                 logger.info("✅ Sync cycle complete",
-                            last_indexed_block=last_block_num,
+                            last_indexed_block=new_last_indexed,
                             blocks_processed=processed_count,
-                            remaining_blocks=latest_block_number - last_block_num)
+                            remaining_blocks=latest_block_number - new_last_indexed)
 
         except Exception as e:
             logger.error(f"Sync blocks error: {e}", exc_info=True)
@@ -251,21 +249,19 @@ class RustBlockIndexer:
         # Process block in transaction
         async with db.session() as session:
             # Extract block data
-            parent_hash = block_info.get("parentsHashList", [""])[0] if block_info.get("parentsHashList") else ""
+            parent_hashes = block_info.get("parentsHashList") or []
             state_root_hash = block_info.get("postStateHash", "")
             bonds_map = block_info.get("bonds", [])
             justifications = block_info.get("justifications", [])
 
-            # Insert block
-            block = Block(
+            block_insert = insert(Block).values(
                 block_number=block_number,
                 block_hash=block_hash,
-                parent_hash=parent_hash,
                 timestamp=block_info.get("timestamp", 0),
                 proposer=block_info.get("sender", ""),
                 state_hash=state_root_hash,
                 state_root_hash=state_root_hash,
-                finalization_status="finalized",
+                finalization_status="finalized" if block_info.get("isFinalized") else "unfinalized",
                 bonds_map=bonds_map,
                 seq_num=block_info.get("seqNum"),
                 sig=block_info.get("sig"),
@@ -273,12 +269,21 @@ class RustBlockIndexer:
                 shard_id=block_info.get("shardId"),
                 extra_bytes=block_info.get("extraBytes"),
                 version=block_info.get("version"),
-                deployment_count=len(deployments),
                 fault_tolerance=block_info.get("faultTolerance", 0.0),
                 pre_state_hash=block_info.get("preStateHash"),
-                justifications=justifications  # Store full justifications
-            )
-            session.add(block)
+                justifications=justifications
+            ).on_conflict_do_nothing(index_elements=["block_hash"])
+            await session.execute(block_insert)
+
+            if parent_hashes:
+                parent_rows = [
+                    {"block_hash": block_hash, "parent_hash": p, "parent_index": idx}
+                    for idx, p in enumerate(parent_hashes)
+                ]
+                parents_insert = insert(BlockParent).values(parent_rows).on_conflict_do_nothing(
+                    index_elements=["block_hash", "parent_hash"]
+                )
+                await session.execute(parents_insert)
 
             # Process validators from bonds
             await self._process_validators(session, block_info)
@@ -332,35 +337,10 @@ class RustBlockIndexer:
             )
 
     async def _process_deployment_enhanced(self, session, block_data: Dict, deploy_data: Dict):
-        """Process deployment with enhanced data from get-deploy command (idempotent, no migrations)."""
+        """Process a deployment; deploy_data already has everything from the block response."""
         deploy_id = deploy_data.get("sig")
         if not deploy_id:
             return
-
-        # Try to fetch enhanced deployment info
-        enhanced_info = None
-        try:
-            enhanced_info = await self.client.get_deploy_info(deploy_id)
-            await asyncio.sleep(settings.delay_before_node)  # small delay to avoid overwhelming the node
-        except Exception as e:
-            logger.debug(f"Could not get enhanced deploy info for {deploy_id}: {e}")
-
-        # Merge enhanced info if available
-        if enhanced_info and isinstance(enhanced_info, dict):
-            deploy_info = enhanced_info.get("deployInfo", {})
-            if deploy_info:
-                # Update deploy_data with enhanced info
-                deploy_data.update({
-                    "blockHash": deploy_info.get("blockHash", deploy_data.get("blockHash")),
-                    "sender": deploy_info.get("sender", deploy_data.get("deployer")),
-                    "seqNum": deploy_info.get("seqNum"),
-                    "sig": deploy_info.get("sig", deploy_data.get("sig")),
-                    "sigAlgorithm": deploy_info.get("sigAlgorithm", deploy_data.get("sigAlgorithm")),
-                    "shardId": deploy_info.get("shardId"),
-                    "version": deploy_info.get("version"),
-                    "timestamp": deploy_info.get("timestamp", deploy_data.get("timestamp")),
-                    "status": enhanced_info.get("status", "included")
-                })
 
         # Classify deployment and normalize error flags
         term = deploy_data.get("term", "")
@@ -380,6 +360,9 @@ class RustBlockIndexer:
             block_hash=block_data.get("blockHash"),
             block_number=block_data.get("blockNumber"),
             deployer=deploy_data.get("deployer", deploy_data.get("sender", "")),
+            deployer_address=convert_to_asi_address(
+                deploy_data.get("deployer", deploy_data.get("sender", "")), deploy_data
+            ),
             term=term,
             timestamp=deploy_data.get("timestamp", block_data.get("timestamp")),
             sig=deploy_data.get("sig"),
@@ -410,6 +393,7 @@ class RustBlockIndexer:
                 "seq_num": dep_insert.excluded.seq_num,
                 "shard_id": dep_insert.excluded.shard_id,
                 "deployer": dep_insert.excluded.deployer,
+                "deployer_address": dep_insert.excluded.deployer_address,
                 "term": dep_insert.excluded.term,
                 "phlo_price": dep_insert.excluded.phlo_price,
                 "phlo_limit": dep_insert.excluded.phlo_limit,
@@ -451,6 +435,7 @@ class RustBlockIndexer:
                 # ORM insert is fine here (PK is auto-generated 'id')
                 session.add(Transfer(
                     deploy_id=t.deploy_id,
+                    block_hash=block_data.get("blockHash"),
                     block_number=t.block_number,
                     from_address=t.from_address,
                     from_public_key=t.from_public_key,
@@ -486,14 +471,13 @@ class RustBlockIndexer:
             active_validators = await self.client.get_active_validators()
             if active_validators is None:
                 active_validators = []
-            active_keys = {v["validator"] for v in active_validators}
 
             async with db.session() as session:
                 # Update validator records
                 for bond in bonds:
                     validator_key = bond["validator"]
                     stake = bond["stake"]
-                    is_active = validator_key in active_keys
+                    is_active = validator_key in active_validators
 
                     # Get current block number for tracking
                     current_block = await db.get_last_indexed_block()
@@ -1013,63 +997,18 @@ class RustBlockIndexer:
                 except Exception as e:
                     logger.warning(f"Could not get bonds from genesis block: {e}")
 
-            # Step 2: If no bonds in genesis block, try to get from active validators
+            # Step 2: If no bonds in genesis block, ask the node directly
             if not bonds:
-                # Get initial validator bonds from read-only node
-                # Temporarily switch to read-only port
-                # original_port = self.client.http_port
-                # self.client.http_port = 40453  # TODO Read-only node port, old: 40453
-
                 try:
-                    # First try to get the first few blocks to extract full validator keys from proposers
-                    validator_full_keys = {}
-                    for block_num in range(1, min(20, 100)):  # Check first 20 blocks
-                        blocks = await self.client.get_blocks_by_height(block_num, block_num)
-                        if blocks and len(blocks) > 0:
-                            block_info = blocks[0]
-                            if 'proposer' in block_info:
-                                proposer = block_info['proposer']
-                                if proposer and len(proposer) > 100:  # Full key
-                                    # Store mapping of abbreviated to full key
-                                    abbreviated = proposer[:8] + "..." + proposer[-8:]
-                                    validator_full_keys[abbreviated] = proposer
-
-                    # Get bonds (which shows abbreviated keys with stakes)
-                    stdout, _ = await self.client._run_command([
-                        "bonds",
-                        "-H", self.client.node_host,
-                        "--http-port", str(self.client.http_port)
-                    ])
-
-                    # Restore original port
-                    # self.client.http_port = original_port
-
-                    # Parse bonds output to get stakes
-                    if stdout:
-                        lines = stdout.strip().split('\n')
-                        for line in lines:
-                            # Match lines like: 1. 04837a4c...b2df065f (stake: 50000000000000)
-                            match = re.search(r'([0-9a-fA-F]{8}\.\.\.?[0-9a-fA-F]{8})\s*\(stake:\s*(\d+)\)', line)
-                            if match:
-                                abbreviated = match.group(1)
-                                stake = int(match.group(2))
-
-                                # Find the full key from our validator_full_keys mapping
-                                full_key = validator_full_keys.get(abbreviated)
-                                if full_key:
-                                    bonds.append((full_key, stake, stake / 100000000))
-                                    logger.info(f"Found validator bond: {full_key[:20]}... -> {stake / 100000000} ASI")
-                                else:
-                                    # If we couldn't find full key, use abbreviated for now
-                                    # The full key will be discovered when processing blocks
-                                    logger.warning(
-                                        f"Could not find full key for validator: {abbreviated}, will discover from blocks")
-                                    bonds.append((abbreviated, stake, stake / 100000000))
+                    bonds_data = await self.client.get_bonds()
+                    for bond in (bonds_data or {}).get("bonds", []):
+                        validator_key = bond.get("validator")
+                        stake = bond.get("stake", 0)
+                        if validator_key and stake > 0:
+                            bonds.append((validator_key, stake, stake / 100000000))
+                            logger.info(f"Found validator bond: {validator_key[:20]}... -> {stake / 100000000} ASI")
                 except Exception as e:
                     logger.error(f"Error getting validator bonds: {e}")
-                # finally:
-                # Restore original port
-                # self.client.http_port = original_port
 
             # For a network-agnostic approach, we can try to detect initial allocations
             # by looking at the first few blocks for large transfers from genesis
@@ -1110,6 +1049,8 @@ class RustBlockIndexer:
                 block_number=0,
                 block_hash=block_info.get("blockHash"),
                 deployer="0000000000000000000000000000000000000000000000000000000000000000",
+                deployer_address=public_key_to_asi_address(
+                    "0000000000000000000000000000000000000000000000000000000000000000"),
                 term=f"Genesis ASI allocation to {address}: {amount_asi:,.0f} ASI",
                 timestamp=block_info.get("timestamp"),
                 sig=deploy_id,
@@ -1123,6 +1064,7 @@ class RustBlockIndexer:
             transfer = Transfer(
                 timestamp=block_info.get("timestamp", 0),
                 deploy_id=deploy_id,
+                block_hash=block_info.get("blockHash"),
                 block_number=0,
                 # Genesis mint
                 from_address=public_key_to_asi_address(
@@ -1148,6 +1090,7 @@ class RustBlockIndexer:
                 block_number=0,
                 block_hash=block_info.get("blockHash"),
                 deployer=validator_pubkey,
+                deployer_address=public_key_to_asi_address(validator_pubkey),
                 term=f"Genesis validator bond: {amount_asi:,.0f} ASI staked",
                 timestamp=block_info.get("timestamp"),
                 sig=deploy_id,
@@ -1161,6 +1104,7 @@ class RustBlockIndexer:
             transfer = Transfer(
                 timestamp=block_info.get("timestamp", 0),
                 deploy_id=deploy_id,
+                block_hash=block_info.get("blockHash"),
                 block_number=0,
                 from_address=public_key_to_asi_address(validator_pubkey),
                 from_public_key=validator_pubkey,
@@ -1194,6 +1138,7 @@ class RustBlockIndexer:
         for address, amount_dust, amount_asi in genesis_allocations:
             balance_state = BalanceState(
                 address=address,
+                block_hash=block_info.get("blockHash"),
                 block_number=0,
                 unbonded_balance_dust=amount_dust,
                 unbonded_balance_asi=amount_asi,
@@ -1209,6 +1154,7 @@ class RustBlockIndexer:
         for validator_pubkey, amount_dust, amount_asi in validator_bonds:
             balance_state = BalanceState(
                 address=validator_pubkey,
+                block_hash=block_info.get("blockHash"),
                 block_number=0,
                 unbonded_balance_dust=0,
                 unbonded_balance_asi=0,
@@ -1223,6 +1169,7 @@ class RustBlockIndexer:
 
         pos_balance_state = BalanceState(
             address="1111gW5kkGxHg7xDg6dRkZx2f7qxTizJzaCH9VEM1oJKWRvSX9Sk5",
+            block_hash=block_info.get("blockHash"),
             block_number=0,
             unbonded_balance_dust=0,
             unbonded_balance_asi=0,

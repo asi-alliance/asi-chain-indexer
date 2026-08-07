@@ -12,9 +12,8 @@ create EXTENSION IF NOT EXISTS "uuid-ossp";
 -- Blocks table with all enhanced fields
 create TABLE IF NOT EXISTS blocks
 (
-    block_number        BIGINT PRIMARY KEY,
-    block_hash          VARCHAR(64) UNIQUE        NOT NULL,
-    parent_hash         VARCHAR(64)               NOT NULL,
+    block_hash          VARCHAR(64)               PRIMARY KEY,
+    block_number        BIGINT                    NOT NULL,
     timestamp           BIGINT                    NOT NULL,
     proposer            VARCHAR(160)              NOT NULL,
     state_hash          VARCHAR(64),
@@ -27,26 +26,40 @@ create TABLE IF NOT EXISTS blocks
     extra_bytes         TEXT,
     version             INTEGER,
     deployment_count    INTEGER     DEFAULT 0,
-    finalization_status VARCHAR(20) DEFAULT 'finalized',
+    finalization_status VARCHAR(20) NOT NULL,
     bonds_map           JSONB,
     justifications      JSONB,
     fault_tolerance     NUMERIC(5, 4),
     created_at          TIMESTAMP   DEFAULT NOW() NOT NULL
 );
 
+create TABLE IF NOT EXISTS block_parents
+(
+    block_hash          VARCHAR(64)               NOT NULL,
+    parent_hash         VARCHAR(64)               NOT NULL,
+    parent_index        INTEGER                   NOT NULL DEFAULT 0,
+    created_at          TIMESTAMP                 DEFAULT NOW() NOT NULL,
+    PRIMARY KEY (block_hash, parent_hash),
+    FOREIGN KEY (block_hash) REFERENCES blocks (block_hash) ON DELETE CASCADE
+);
+
 create index idx_blocks_hash on blocks (block_hash);
+create index idx_blocks_number on blocks (block_number);
 create index idx_blocks_timestamp on blocks (timestamp desc);
 create index idx_blocks_proposer on blocks (proposer);
 create index idx_blocks_created_at on blocks (created_at desc);
 create index IF NOT EXISTS idx_blocks_hash_partial ON blocks (block_hash varchar_pattern_ops);
+create index IF NOT EXISTS idx_block_parents_parent_hash ON block_parents (parent_hash);
+create index IF NOT EXISTS idx_block_parents_parent_index ON block_parents (block_hash, parent_index);
 
 -- Deployments table with enhanced fields
 create TABLE IF NOT EXISTS deployments
 (
     deploy_id                VARCHAR(200) PRIMARY KEY,
     block_hash               VARCHAR(64)               NOT NULL REFERENCES blocks (block_hash) ON delete CASCADE,
-    block_number             BIGINT                    NOT NULL REFERENCES blocks (block_number) ON delete CASCADE,
+    block_number             BIGINT                    NOT NULL,
     deployer                 VARCHAR(200)              NOT NULL,
+    deployer_address         VARCHAR(150)              NOT NULL,
     term                     TEXT                      NOT NULL,
     timestamp                BIGINT                    NOT NULL,
     sig                      VARCHAR(200)              NOT NULL,
@@ -73,13 +86,15 @@ create index IF NOT EXISTS idx_deployments_status ON deployments (status);
 create index IF NOT EXISTS idx_deployments_deploy_id_partial ON deployments (deploy_id varchar_pattern_ops);
 create index IF NOT EXISTS idx_deployments_deployer_partial ON deployments (deployer varchar_pattern_ops);
 create index IF NOT EXISTS idx_deployments_type ON deployments (deployment_type);
+create index IF NOT EXISTS idx_deployments_deployer_address ON deployments (deployer_address);
 
 -- Transfers table with extended address fields
 create TABLE IF NOT EXISTS transfers
 (
     id              BIGSERIAL PRIMARY KEY,
     deploy_id       VARCHAR(200)               NOT NULL REFERENCES deployments (deploy_id) ON delete CASCADE,
-    block_number    BIGINT                     NOT NULL REFERENCES blocks (block_number) ON delete CASCADE,
+    block_hash      VARCHAR(64)                NOT NULL REFERENCES blocks (block_hash) ON delete CASCADE,
+    block_number    BIGINT                     NOT NULL,
     from_address    VARCHAR(150)               NOT NULL,
     from_public_key VARCHAR(150) DEFAULT NULL,
     to_address      VARCHAR(150)               NOT NULL,
@@ -91,6 +106,7 @@ create TABLE IF NOT EXISTS transfers
 );
 
 create index idx_transfers_deploy_id on transfers (deploy_id);
+create index idx_transfers_block_hash on transfers (block_hash);
 create index idx_transfers_block_number on transfers (block_number desc);
 create index idx_transfers_from on transfers (from_address);
 create index idx_transfers_to on transfers (to_address);
@@ -122,7 +138,7 @@ create TABLE IF NOT EXISTS validator_bonds
 (
     id                   BIGSERIAL PRIMARY KEY,
     block_hash           VARCHAR(64)  NOT NULL REFERENCES blocks (block_hash) ON delete CASCADE,
-    block_number         BIGINT       NOT NULL REFERENCES blocks (block_number) ON delete CASCADE,
+    block_number         BIGINT       NOT NULL,
     validator_public_key VARCHAR(200) NOT NULL,
     stake                BIGINT       NOT NULL,
     UNIQUE (block_hash, validator_public_key)
@@ -148,7 +164,8 @@ create TABLE IF NOT EXISTS balance_states
 (
     id                    BIGSERIAL PRIMARY KEY,
     address               VARCHAR(150)   NOT NULL,
-    block_number          BIGINT         NOT NULL REFERENCES blocks (block_number) ON delete CASCADE,
+    block_hash            VARCHAR(64)    NOT NULL REFERENCES blocks (block_hash) ON delete CASCADE,
+    block_number          BIGINT         NOT NULL,
     unbonded_balance_dust BIGINT         NOT NULL DEFAULT 0,
     unbonded_balance_asi  NUMERIC(20, 8) NOT NULL DEFAULT 0,
     bonded_balance_dust   BIGINT         NOT NULL DEFAULT 0,
@@ -156,11 +173,12 @@ create TABLE IF NOT EXISTS balance_states
     total_balance_dust    BIGINT GENERATED ALWAYS AS (unbonded_balance_dust + bonded_balance_dust) STORED,
     total_balance_asi     NUMERIC(20, 8) GENERATED ALWAYS AS (unbonded_balance_asi + bonded_balance_asi) STORED,
     updated_at            TIMESTAMP               DEFAULT NOW() NOT NULL,
-    UNIQUE (address, block_number)
+    UNIQUE (address, block_hash)
 );
 
 create index idx_balance_states_address on balance_states (address);
 create index idx_balance_states_block on balance_states (block_number desc);
+create index idx_balance_states_block_hash on balance_states (block_hash);
 create index idx_balance_states_updated on balance_states (updated_at desc);
 
 -- =============================================
@@ -646,3 +664,82 @@ $$;
 
 COMMENT ON FUNCTION public.refresh_network_metrics_buckets IS
     'Incrementally fills/updates network_metrics_buckets for the last N hours with fixed bucket size.';
+
+-- DAG traversal functions
+
+CREATE VIEW public.block_ancestors_view AS
+SELECT ''::varchar(64) AS ancestor_hash, 0::bigint AS ancestor_number, 0::integer AS depth
+LIMIT 0;
+
+CREATE VIEW public.block_descendants_view AS
+SELECT ''::varchar(64) AS descendant_hash, 0::bigint AS descendant_number, 0::integer AS depth
+LIMIT 0;
+
+CREATE FUNCTION get_block_ancestors(p_block_hash VARCHAR(64))
+    RETURNS SETOF block_ancestors_view
+    LANGUAGE sql
+    STABLE
+AS
+$$
+WITH RECURSIVE ancestors AS (SELECT bp.parent_hash AS hash, 1 AS depth
+                              FROM block_parents bp
+                              WHERE bp.block_hash = p_block_hash
+
+                              UNION
+
+                              SELECT bp.parent_hash, a.depth + 1
+                              FROM block_parents bp
+                                       JOIN ancestors a ON bp.block_hash = a.hash)
+SELECT DISTINCT ON (a.hash) a.hash, b.block_number, a.depth
+FROM ancestors a
+         JOIN blocks b ON b.block_hash = a.hash
+ORDER BY a.hash, a.depth;
+$$;
+
+CREATE FUNCTION get_block_descendants(p_block_hash VARCHAR(64))
+    RETURNS SETOF block_descendants_view
+    LANGUAGE sql
+    STABLE
+AS
+$$
+WITH RECURSIVE descendants AS (SELECT bp.block_hash AS hash, 1 AS depth
+                                FROM block_parents bp
+                                WHERE bp.parent_hash = p_block_hash
+
+                                UNION
+
+                                SELECT bp.block_hash, d.depth + 1
+                                FROM block_parents bp
+                                         JOIN descendants d ON bp.parent_hash = d.hash)
+SELECT DISTINCT ON (d.hash) d.hash, b.block_number, d.depth
+FROM descendants d
+         JOIN blocks b ON b.block_hash = d.hash
+ORDER BY d.hash, d.depth;
+$$;
+
+COMMENT ON FUNCTION get_block_ancestors IS
+    'Recursively returns all ancestor blocks of the given block_hash by walking block_parents.';
+COMMENT ON FUNCTION get_block_descendants IS
+    'Recursively returns all descendant blocks of the given block_hash by walking block_parents.';
+
+-- Wallet transaction history (deployments + transfers, combined for one paginated GraphQL query)
+
+CREATE VIEW public.transaction_history_view AS
+SELECT
+    t.id AS transfer_id,
+    d.deploy_id,
+    d.block_hash,
+    d.block_number,
+    d.timestamp,
+    CASE WHEN t.deploy_id IS NOT NULL THEN 'transfer' ELSE 'not_transfer' END AS type,
+    d.deployer_address,
+    t.from_address,
+    t.to_address,
+    t.from_public_key,
+    t.amount_asi,
+    t.status
+FROM deployments d
+         LEFT JOIN transfers t ON t.deploy_id = d.deploy_id;
+
+COMMENT ON VIEW public.transaction_history_view IS
+    'Wallet transaction history: deployments left-joined with their transfers, one row per transfer (or per deployment if it produced none). Filtering, sorting and pagination are done via GraphQL where/order_by/offset/limit, not parameters.';

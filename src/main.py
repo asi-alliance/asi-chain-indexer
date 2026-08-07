@@ -66,8 +66,7 @@ class IndexerService:
                 db_url_masked = db_url_masked.replace(creds, f"{user}:***")
 
         logger.info(
-            "🚀 Starting ASI-Chain Enhanced Indexer (Rust CLI)",
-            rust_cli_path=settings.rust_cli_path,
+            "🚀 Starting ASI-Chain Enhanced Indexer",
             node_host=settings.node_host,
             grpc_port=settings.grpc_port,
             http_port=settings.http_port,
