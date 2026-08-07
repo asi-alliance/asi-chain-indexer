@@ -26,7 +26,7 @@ create TABLE IF NOT EXISTS blocks
     extra_bytes         TEXT,
     version             INTEGER,
     deployment_count    INTEGER     DEFAULT 0,
-    finalization_status VARCHAR(20) DEFAULT 'finalized',
+    finalization_status VARCHAR(20) NOT NULL,
     bonds_map           JSONB,
     justifications      JSONB,
     fault_tolerance     NUMERIC(5, 4),
@@ -685,16 +685,14 @@ WITH RECURSIVE ancestors AS (SELECT bp.parent_hash AS hash, 1 AS depth
                               FROM block_parents bp
                               WHERE bp.block_hash = p_block_hash
 
-                              UNION ALL
+                              UNION
 
                               SELECT bp.parent_hash, a.depth + 1
                               FROM block_parents bp
                                        JOIN ancestors a ON bp.block_hash = a.hash)
-    CYCLE hash SET is_cycle USING path
 SELECT DISTINCT ON (a.hash) a.hash, b.block_number, a.depth
 FROM ancestors a
          JOIN blocks b ON b.block_hash = a.hash
-WHERE NOT a.is_cycle
 ORDER BY a.hash, a.depth;
 $$;
 
@@ -708,16 +706,14 @@ WITH RECURSIVE descendants AS (SELECT bp.block_hash AS hash, 1 AS depth
                                 FROM block_parents bp
                                 WHERE bp.parent_hash = p_block_hash
 
-                                UNION ALL
+                                UNION
 
                                 SELECT bp.block_hash, d.depth + 1
                                 FROM block_parents bp
                                          JOIN descendants d ON bp.parent_hash = d.hash)
-    CYCLE hash SET is_cycle USING path
 SELECT DISTINCT ON (d.hash) d.hash, b.block_number, d.depth
 FROM descendants d
          JOIN blocks b ON b.block_hash = d.hash
-WHERE NOT d.is_cycle
 ORDER BY d.hash, d.depth;
 $$;
 

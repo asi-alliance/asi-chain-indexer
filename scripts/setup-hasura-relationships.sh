@@ -199,6 +199,36 @@ for table in "${TABLES[@]}"; do
         }
     }" > /dev/null 2>&1
 done
+
+hasura_metadata "{
+    \"type\": \"pg_track_table\",
+    \"args\": {
+        \"source\": \"default\",
+        \"table\": {\"schema\": \"public\", \"name\": \"transaction_history_view\"}
+    }
+}" > /dev/null 2>&1
+hasura_metadata "{
+    \"type\": \"pg_drop_select_permission\",
+    \"args\": {
+        \"source\": \"default\",
+        \"table\": {\"schema\": \"public\", \"name\": \"transaction_history_view\"},
+        \"role\": \"public\"
+    }
+}" > /dev/null 2>&1
+hasura_metadata "{
+    \"type\": \"pg_create_select_permission\",
+    \"args\": {
+        \"source\": \"default\",
+        \"table\": {\"schema\": \"public\", \"name\": \"transaction_history_view\"},
+        \"role\": \"public\",
+        \"permission\": {
+            \"columns\": \"*\",
+            \"filter\": {},
+            \"limit\": 5000,
+            \"allow_aggregations\": true
+        }
+    }
+}" > /dev/null 2>&1
 echo "  ✓ Public read permissions set"
 echo ""
 

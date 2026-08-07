@@ -297,6 +297,29 @@ for table in "${ALL_TABLES_AND_VIEWS[@]}"; do
     }
   }" >/dev/null
 done
+
+hasura_metadata "{
+  \"type\": \"pg_drop_select_permission\",
+  \"args\": {
+    \"source\": \"default\",
+    \"table\": {\"schema\": \"public\", \"name\": \"transaction_history_view\"},
+    \"role\": \"public\"
+  }
+}" >/dev/null
+hasura_metadata "{
+  \"type\": \"pg_create_select_permission\",
+  \"args\": {
+    \"source\": \"default\",
+    \"table\": {\"schema\": \"public\", \"name\": \"transaction_history_view\"},
+    \"role\": \"public\",
+    \"permission\": {
+      \"columns\": \"*\",
+      \"filter\": {},
+      \"limit\": 5000,
+      \"allow_aggregations\": true
+    }
+  }
+}" >/dev/null
 ok "Public SELECT permissions granted."
 
 log "Granting public EXECUTE permissions on SQL functions..."
@@ -375,6 +398,16 @@ else
   echo "Response:"
   echo "$public_agg"
   die "PUBLIC aggregate unexpectedly succeeded (allow_aggregations=false expected)."
+fi
+
+log "PUBLIC aggregate test on transaction_history_view (should SUCCEED)..."
+public_hist_agg="$(graphql_public '{"query":"{ transaction_history_view_aggregate { aggregate { count } } }"}')"
+if echo "$public_hist_agg" | grep -q '"errors"'; then
+  echo "Response:"
+  echo "$public_hist_agg"
+  die "PUBLIC aggregate on transaction_history_view failed (allow_aggregations=true expected)."
+else
+  ok "PUBLIC aggregate on transaction_history_view OK."
 fi
 
 echo

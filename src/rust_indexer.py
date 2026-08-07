@@ -261,7 +261,7 @@ class RustBlockIndexer:
                 proposer=block_info.get("sender", ""),
                 state_hash=state_root_hash,
                 state_root_hash=state_root_hash,
-                finalization_status="finalized",
+                finalization_status="finalized" if block_info.get("isFinalized") else "unfinalized",
                 bonds_map=bonds_map,
                 seq_num=block_info.get("seqNum"),
                 sig=block_info.get("sig"),

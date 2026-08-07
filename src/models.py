@@ -25,7 +25,7 @@ class Block(Base):
     state_hash = Column(String(64))
     state_root_hash = Column(String(64))  # New field
     pre_state_hash = Column(String(64))  # New field
-    finalization_status = Column(String(20), default="finalized")  # New field
+    finalization_status = Column(String(20), nullable=False)  # New field
     bonds_map = Column(JSONB)  # New field for storing bonds as JSON
     justifications = Column(JSONB)  # New field for storing justifications
     fault_tolerance = Column(Numeric(5, 4))  # New field
