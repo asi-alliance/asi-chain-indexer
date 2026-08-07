@@ -726,6 +726,7 @@ COMMENT ON FUNCTION get_block_descendants IS
 
 CREATE VIEW public.transaction_history_view AS
 SELECT
+    t.id AS transfer_id,
     d.deploy_id,
     d.block_hash,
     d.block_number,
