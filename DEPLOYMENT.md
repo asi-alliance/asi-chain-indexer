@@ -1,13 +1,13 @@
 # ASI-Chain Indexer Deployment Guide
 
-**Version**: 2.1.1 | **Updated**: January 2025
+**Version**: 2.1.1 | **Updated**: August 2026
 
 This guide covers various deployment scenarios for the ASI-Chain Indexer with network-agnostic genesis support and zero-touch deployment.
 
 ## ✨ v2.1.1 Features (Latest - Data Quality & Bond Detection)
 
 - **Zero-Touch Deployment**: One-command setup with automatic configuration
-- **Validator Bond Detection**: Fixed regex pattern for new CLI output format
+- **Validator Bond Detection**: Fixed regex pattern for new output format
 - **Data Quality**: Proper NULL handling for deployment error messages
 - **Network-Agnostic Genesis Processing**: Automatic validator bond and ASI allocation extraction
 - **Full Blockchain Sync**: Index from genesis (block 0) without limitations
@@ -30,7 +30,6 @@ This guide covers various deployment scenarios for the ASI-Chain Indexer with ne
 
 ## Table of Contents
 - [Quick Start](#quick-start)
-- [Rust CLI Setup](#rust-cli-setup)
 - [Development Deployment](#development-deployment)
 - [Production Deployment](#production-deployment)
 - [Migration from HTTP Indexer](#migration-from-http-indexer)

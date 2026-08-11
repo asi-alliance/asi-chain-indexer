@@ -22,22 +22,23 @@ Part of the [**Artificial Superintelligence Alliance**](https://superintelligenc
 ---
 
 
-A high-performance blockchain indexer for ASI-Chain that synchronizes data from ASI nodes using the Rust CLI client and stores it in PostgreSQL for efficient querying.
+A high-performance blockchain indexer for ASI-Chain that synchronizes data from ASI nodes using the node's native gRPC + HTTP API and stores it in PostgreSQL for efficient querying.
 
 ## Latest Version
 
 The indexer provides complete automation for blockchain data synchronization:
-- Full blockchain sync from genesis (block 0) using Rust CLI
+- Full blockchain sync from genesis (block 0) via the node gRPC/HTTP API
 - Automatic Hasura GraphQL relationships setup
 - Enhanced ASI transfer detection with Rholang pattern matching
 - Comprehensive database schema with single migration
 - Balance tracking with bonded/unbonded separation
+- DAG-aware block storage (multi-parent support via `block_parents`)
 
 ## Current Status
 
 ✅ **Working Features:**
 - **Genesis block processing** with automatic extraction of validator bonds and initial allocations
-- **Full blockchain synchronization from block 0** using Rust CLI
+- **Full blockchain synchronization from block 0** via the node gRPC/HTTP API
 - **Enhanced ASI transfer detection** - now supports match-based Rholang patterns
 - **Balance state tracking** - separate bonded and unbonded balances per address
 - **GraphQL API** via Hasura with automatic bash-based configuration
@@ -76,10 +77,9 @@ The indexer provides complete automation for blockchain data synchronization:
 - **732+ validator bond records maintained**
 
 🔧 **Technical Improvements:**
-- Uses native Rust CLI for blockchain interaction
-- Cross-compiled from macOS ARM64 to Linux x86_64 in Docker
+- Uses the node's native gRPC + HTTP API for blockchain interaction (no external CLI binary)
+- Vendor node protos under `protos/`, gRPC stubs generated at build time
 - Enhanced database schema for additional data types
-- Removed dependency on limited HTTP APIs
 - Proper NULL handling in error_message fields
 - Multi-stage Docker builds for optimized images
 
@@ -106,14 +106,14 @@ The indexer provides complete automation for blockchain data synchronization:
 │                  (RChain-based Network)                     │
 └─────────────────────┬───────────────────────────────────────┘
                       │
-                      │ gRPC/HTTP
+                      │ gRPC (40412) / HTTP (40413)
                       │
 ┌─────────────────────▼───────────────────────────────────────┐
-│                    Rust CLI Client                          │
-│         (Blockchain Data Extraction Interface)              │
+│                  gRPC Node Client                            │
+│         (Blockchain Data Extraction Interface)               │
 └─────────────────────┬───────────────────────────────────────┘
                       │
-                      │ Command Execution
+                      │ in-process calls
                       │
 ┌─────────────────────▼───────────────────────────────────────┐
 │                  Python Indexer Service                     │
@@ -128,8 +128,9 @@ The indexer provides complete automation for blockchain data synchronization:
                       │
 ┌─────────────────────▼───────────────────────────────────────┐
 │                   PostgreSQL Database                       │
-│  Tables: blocks, deployments, transfers, validators,        │
-│          validator_bonds, balance_states, network_stats     │
+│  Tables: blocks, block_parents, deployments, transfers,     │
+│         validators, validator_bonds, balance_states,        │
+│         network_stats, epoch_transitions, block_validators  │
 └─────────────────────┬───────────────────────────────────────┘
                       │
                       │ Database Connection
@@ -137,6 +138,8 @@ The indexer provides complete automation for blockchain data synchronization:
 ┌─────────────────────▼───────────────────────────────────────┐
 │                   Hasura GraphQL Engine                     │
 │  - Auto-generated GraphQL API                               │
+│  - Views: transaction_history, block_ancestors/descendants  │
+│  - SQL functions: get_block_ancestors/descendants, metrics  │
 │  - Real-time queries with polling                           │
 │  - Query optimization                                       │
 └─────────────────────┬───────────────────────────────────────┘
@@ -150,19 +153,17 @@ The indexer provides complete automation for blockchain data synchronization:
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Rust CLI Commands Used
+## Node gRPC/HTTP API Used
 
-The indexer leverages these Rust CLI commands for comprehensive data extraction:
+The indexer talks to the node directly via gRPC (primary) and HTTP (fallback for validator list), using vendored protos from `protos/`. Key RPCs:
 
-1. **last-finalized-block** - Get the latest finalized block information
-2. **get-blocks-by-height** - Fetch blocks within a height range (supports large batches)
-3. **blocks** - Get detailed block information including deployments
-4. **get-deploy** - Retrieve specific deployment details
-5. **bonds** - Get current validator bonds and stakes
-6. **active-validators** - List currently active validators
-7. **epoch-info** - Get epoch transitions and timing
-8. **network-consensus** - Monitor network health and participation
-9. **show-main-chain** - Verify main chain consistency
+1. **getBlocksByHeights** - Fetch blocks within a height range (supports large batches)
+2. **getBlock** - Get detailed block information including deployments
+3. **findDeploy** - Retrieve specific deployment details
+4. **getBonds** - Get current validator bonds and stakes
+5. **showMainChain** - Verify main chain consistency
+6. **status** - Node health check
+7. HTTP `/api/validators` - List currently active validators (no gRPC equivalent)
 
 ## ⚡ Quick Start
 ## Requirements
@@ -552,7 +553,6 @@ indexer/
 │   ├── DEPLOYMENT_DOCUMENTATION.md  # Comprehensive deployment
 │   ├── GRAPHQL_GUIDE.md             # GraphQL usage guide
 │   └── GRAPHQL_SCHEMA.md            # Database schema reference
-└── node_cli_linux                   # Pre-compiled Rust CLI (optional)
 ```
 
 ### Adding New CLI Commands
