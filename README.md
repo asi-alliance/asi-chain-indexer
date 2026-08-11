@@ -362,6 +362,26 @@ docker compose -f docker-compose.yml restart rust-indexer
   - Intended for key-value store for indexer state
   - Currently not created in schema
 
+### Views
+
+- **transaction_history_view**: Combined wallet transaction history
+  - Pre-joins `deployments` LEFT JOIN `transfers` into one row per transfer (or per deployment if it produced none)
+  - Fields: `transfer_id`, `deploy_id`, `block_hash`, `block_number`, `timestamp`, `type` (`'transfer'` | `'not_transfer'`), `deployer_address`, `from_address`, `to_address`, `from_public_key`, `amount_asi`, `status`
+  - All `transfers.*` fields are NULL when `type = 'not_transfer'` (deployment produced no transfer)
+  - Hasura public SELECT with `limit: 5000` and `allow_aggregations: true`
+  - Pagination via GraphQL `where` / `order_by` / `offset` / `limit` (no SQL parameters)
+
+- **block_ancestors_view / block_descendants_view**: DAG traversal result types
+  - `block_ancestors_view`: `ancestor_hash`, `ancestor_number`, `depth`
+  - `block_descendants_view`: `descendant_hash`, `descendant_number`, `depth`
+  - Used as the return type of `get_block_ancestors` / `get_block_descendants` SQL functions
+
+### SQL Functions
+
+- **get_block_ancestors(p_block_hash)**: Recursively returns all ancestor blocks of the given block by walking `block_parents` (DAG traversal)
+- **get_block_descendants(p_block_hash)**: Recursively returns all descendant blocks of the given block by walking `block_parents`
+- Both are `LANGUAGE sql STABLE` recursive CTEs using `UNION` (deduplicated) and are exposed via Hasura as callable GraphQL functions
+
 ## API Endpoints
 
 ### Status and Health

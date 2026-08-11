@@ -4,9 +4,10 @@ The Hasura GraphQL engine provides instant GraphQL APIs for the ASI-Chain indexe
 
 **GraphQL Playground**: http://localhost:8080/console
 **GraphQL Endpoint**: http://localhost:8080/v1/graphql
-**Admin Secret**: `myadminsecretkey`
+**Default Admin Secret**: `myadminsecretkey`
 
-## Features (v2.1)
+## Features
+
 - Enhanced ASI transfer detection (variable-based and match-based patterns)
 - Address validation supports 53-56 character ASI addresses and 130+ char validator keys
 - Automatic Hasura configuration with zero-touch deployment
@@ -19,21 +20,21 @@ The Hasura GraphQL engine provides instant GraphQL APIs for the ASI-Chain indexe
 
 ```graphql
 query LatestBlocks {
-  blocks(limit: 10, order_by: {block_number: desc}) {
-    block_number
-    block_hash
-    timestamp
-    proposer
-    deployment_count
-    deployments {
-      deploy_id
-      deployer
-      deployment_type
-      errored
-      error_message
-      phlo_cost
+    blocks(limit: 10, order_by: {block_number: desc}) {
+        block_number
+        block_hash
+        timestamp
+        proposer
+        deployment_count
+        deployments {
+            deploy_id
+            deployer
+            deployment_type
+            errored
+            error_message
+            phlo_cost
+        }
     }
-  }
 }
 ```
 
@@ -41,44 +42,44 @@ query LatestBlocks {
 
 ```graphql
 query BlockDetails($blockNumber: bigint!) {
-  blocks(where: {block_number: {_eq: $blockNumber}}) {
-    block_number
-    block_hash
-    parent_hash
-    timestamp
-    proposer
-    state_hash
-    state_root_hash
-    finalization_status
-    bonds_map
-    deployment_count
-    deployments {
-      deploy_id
-      deployer
-      term
-      deployment_type
-      timestamp
-      phlo_cost
-      phlo_price
-      phlo_limit
-      errored
-      error_message
-      sig
-      transfers {
-        from_address
-        to_address
-        amount_asi
-        status
-      }
+    blocks(where: {block_number: {_eq: $blockNumber}}) {
+        block_number
+        block_hash
+        parent_hash
+        timestamp
+        proposer
+        state_hash
+        state_root_hash
+        finalization_status
+        bonds_map
+        deployment_count
+        deployments {
+            deploy_id
+            deployer
+            term
+            deployment_type
+            timestamp
+            phlo_cost
+            phlo_price
+            phlo_limit
+            errored
+            error_message
+            sig
+            transfers {
+                from_address
+                to_address
+                amount_asi
+                status
+            }
+        }
+        validator_bonds {
+            validator {
+                public_key
+                name
+            }
+            stake
+        }
     }
-    validator_bonds {
-      validator {
-        public_key
-        name
-      }
-      stake
-    }
-  }
 }
 ```
 
@@ -86,13 +87,13 @@ query BlockDetails($blockNumber: bigint!) {
 
 ```graphql
 query SearchBlocks($hashPrefix: String!) {
-  blocks(where: {block_hash: {_like: $hashPrefix}}, limit: 10) {
-    block_number
-    block_hash
-    timestamp
-    proposer
-    deployment_count
-  }
+    blocks(where: {block_hash: {_like: $hashPrefix}}, limit: 10) {
+        block_number
+        block_hash
+        timestamp
+        proposer
+        deployment_count
+    }
 }
 ```
 
@@ -102,28 +103,28 @@ query SearchBlocks($hashPrefix: String!) {
 
 ```graphql
 query AllTransfers {
-  transfers(order_by: {block_number: asc}) {
-    id
-    block_number
-    from_address  # Supports 53-56 char addresses
-    to_address    # and 130+ char validator keys
-    amount_asi
-    amount_dust
-    status
-    deployment {
-      deploy_id
-      deployer
-      timestamp
-      errored
-      error_message
+    transfers(order_by: {block_number: asc}) {
+        id
+        block_number
+        from_address  # Supports 53-56 char addresses
+        to_address    # and 130+ char validator keys
+        amount_asi
+        amount_dust
+        status
+        deployment {
+            deploy_id
+            deployer
+            timestamp
+            errored
+            error_message
+        }
     }
-  }
-  transfers_aggregate {
-    aggregate {
-      count
-      sum { amount_asi }
+    transfers_aggregate {
+        aggregate {
+            count
+            sum { amount_asi }
+        }
     }
-  }
 }
 ```
 
@@ -131,31 +132,31 @@ query AllTransfers {
 
 ```graphql
 query TransferStats {
-  # Genesis transfers (validator bonds)
-  genesis: transfers(where: {block_number: {_eq: "0"}}) {
-    from_address
-    to_address
-    amount_asi
-  }
-  
-  # User transfers (non-genesis)
-  user_transfers: transfers(where: {block_number: {_neq: "0"}}) {
-    block_number
-    from_address
-    to_address
-    amount_asi
-  }
-  
-  # Aggregate stats
-  stats: transfers_aggregate {
-    aggregate {
-      count
-      sum { amount_asi }
-      avg { amount_asi }
-      max { amount_asi }
-      min { amount_asi }
+    # Genesis transfers (validator bonds)
+    genesis: transfers(where: {block_number: {_eq: "0"}}) {
+        from_address
+        to_address
+        amount_asi
     }
-  }
+
+    # User transfers (non-genesis)
+    user_transfers: transfers(where: {block_number: {_neq: "0"}}) {
+        block_number
+        from_address
+        to_address
+        amount_asi
+    }
+
+    # Aggregate stats
+    stats: transfers_aggregate {
+        aggregate {
+            count
+            sum { amount_asi }
+            avg { amount_asi }
+            max { amount_asi }
+            min { amount_asi }
+        }
+    }
 }
 ```
 
@@ -163,26 +164,26 @@ query TransferStats {
 
 ```graphql
 query AddressTransfers($address: String!) {
-  transfers(
-    where: {
-      _or: [
-        {from_address: {_eq: $address}}
-        {to_address: {_eq: $address}}
-      ]
+    transfers(
+        where: {
+            _or: [
+                {from_address: {_eq: $address}}
+                {to_address: {_eq: $address}}
+            ]
+        }
+        order_by: {created_at: desc}
+    ) {
+        id
+        from_address
+        to_address
+        amount_asi
+        status
+        deployment {
+            deploy_id
+            block_number
+            timestamp
+        }
     }
-    order_by: {created_at: desc}
-  ) {
-    id
-    from_address
-    to_address
-    amount_asi
-    status
-    deployment {
-      deploy_id
-      block_number
-      timestamp
-    }
-  }
 }
 ```
 
@@ -192,20 +193,20 @@ query AddressTransfers($address: String!) {
 
 ```graphql
 query ActiveValidators {
-  validators(order_by: {total_stake: desc}) {
-    public_key
-    name
-    total_stake
-    first_seen_block
-    last_seen_block
-    validator_bonds(limit: 1, order_by: {block_number: desc}) {
-      block_number
-      stake
-      block {
-        timestamp
-      }
+    validators(order_by: {total_stake: desc}) {
+        public_key
+        name
+        total_stake
+        first_seen_block
+        last_seen_block
+        validator_bonds(limit: 1, order_by: {block_number: desc}) {
+            block_number
+            stake
+            block {
+                timestamp
+            }
+        }
     }
-  }
 }
 ```
 
@@ -213,29 +214,29 @@ query ActiveValidators {
 
 ```graphql
 query ValidatorPerformance($validatorKey: String!) {
-  validators(where: {public_key: {_eq: $validatorKey}}) {
-    public_key
-    name
-    total_stake
-    validator_bonds_aggregate {
-      aggregate {
-        count
-        avg {
-          stake
+    validators(where: {public_key: {_eq: $validatorKey}}) {
+        public_key
+        name
+        total_stake
+        validator_bonds_aggregate {
+            aggregate {
+                count
+                avg {
+                    stake
+                }
+                max {
+                    stake
+                }
+            }
         }
-        max {
-          stake
+    }
+
+    # Count blocks proposed by this validator
+    blocks_aggregate(where: {proposer: {_eq: $validatorKey}}) {
+        aggregate {
+            count
         }
-      }
     }
-  }
-  
-  # Count blocks proposed by this validator
-  blocks_aggregate(where: {proposer: {_eq: $validatorKey}}) {
-    aggregate {
-      count
-    }
-  }
 }
 ```
 
@@ -245,46 +246,46 @@ query ValidatorPerformance($validatorKey: String!) {
 
 ```graphql
 query DeploymentsByType {
-  # Get unique deployment types and their counts
-  registry_lookup: deployments_aggregate(
-    where: {deployment_type: {_eq: "registry_lookup"}}
-  ) {
-    aggregate {
-      count
-      avg { phlo_cost }
-      sum { phlo_cost }
+    # Get unique deployment types and their counts
+    registry_lookup: deployments_aggregate(
+        where: {deployment_type: {_eq: "registry_lookup"}}
+    ) {
+        aggregate {
+            count
+            avg { phlo_cost }
+            sum { phlo_cost }
+        }
     }
-  }
-  
-  asi_transfer: deployments_aggregate(
-    where: {deployment_type: {_eq: "asi_transfer"}}
-  ) {
-    aggregate {
-      count
-      avg { phlo_cost }
-      sum { phlo_cost }
+
+    asi_transfer: deployments_aggregate(
+        where: {deployment_type: {_eq: "asi_transfer"}}
+    ) {
+        aggregate {
+            count
+            avg { phlo_cost }
+            sum { phlo_cost }
+        }
     }
-  }
-  
-  smart_contract: deployments_aggregate(
-    where: {deployment_type: {_eq: "smart_contract"}}
-  ) {
-    aggregate {
-      count
-      avg { phlo_cost }
-      sum { phlo_cost }
+
+    smart_contract: deployments_aggregate(
+        where: {deployment_type: {_eq: "smart_contract"}}
+    ) {
+        aggregate {
+            count
+            avg { phlo_cost }
+            sum { phlo_cost }
+        }
     }
-  }
-  
-  other: deployments_aggregate(
-    where: {deployment_type: {_eq: "other"}}
-  ) {
-    aggregate {
-      count
-      avg { phlo_cost }
-      sum { phlo_cost }
+
+    other: deployments_aggregate(
+        where: {deployment_type: {_eq: "other"}}
+    ) {
+        aggregate {
+            count
+            avg { phlo_cost }
+            sum { phlo_cost }
+        }
     }
-  }
 }
 ```
 
@@ -292,28 +293,28 @@ query DeploymentsByType {
 
 ```graphql
 query FailedDeployments {
-  deployments(
-    where: {
-      _or: [
-        {errored: {_eq: true}},
-        {error_message: {_is_null: false}}
-      ]
+    deployments(
+        where: {
+            _or: [
+                {errored: {_eq: true}},
+                {error_message: {_is_null: false}}
+            ]
+        }
+        order_by: {timestamp: desc}
+        limit: 20
+    ) {
+        deploy_id
+        deployer
+        deployment_type
+        errored
+        error_message
+        phlo_cost
+        timestamp
+        block {
+            block_number
+            timestamp
+        }
     }
-    order_by: {timestamp: desc}
-    limit: 20
-  ) {
-    deploy_id
-    deployer
-    deployment_type
-    errored
-    error_message
-    phlo_cost
-    timestamp
-    block {
-      block_number
-      timestamp
-    }
-  }
 }
 ```
 
@@ -321,24 +322,24 @@ query FailedDeployments {
 
 ```graphql
 query SearchDeployments($searchTerm: String!) {
-  deployments(
-    where: {
-      _or: [
-        {deploy_id: {_ilike: $searchTerm}},
-        {deployer: {_ilike: $searchTerm}}
-      ]
+    deployments(
+        where: {
+            _or: [
+                {deploy_id: {_ilike: $searchTerm}},
+                {deployer: {_ilike: $searchTerm}}
+            ]
+        }
+        limit: 20
+        order_by: {created_at: desc}
+    ) {
+        deploy_id
+        deployer
+        deployment_type
+        errored
+        error_message
+        block_number
+        timestamp
     }
-    limit: 20
-    order_by: {created_at: desc}
-  ) {
-    deploy_id
-    deployer
-    deployment_type
-    errored
-    error_message
-    block_number
-    timestamp
-  }
 }
 ```
 
@@ -348,22 +349,22 @@ query SearchDeployments($searchTerm: String!) {
 
 ```graphql
 subscription NewBlocks {
-  blocks(
-    order_by: {block_number: desc}
-    limit: 1
-  ) {
-    block_number
-    block_hash
-    timestamp
-    proposer
-    deployment_count
-    deployments {
-      deploy_id
-      deployment_type
-      errored
-      error_message
+    blocks(
+        order_by: {block_number: desc}
+        limit: 1
+    ) {
+        block_number
+        block_hash
+        timestamp
+        proposer
+        deployment_count
+        deployments {
+            deploy_id
+            deployment_type
+            errored
+            error_message
+        }
     }
-  }
 }
 ```
 
@@ -371,21 +372,21 @@ subscription NewBlocks {
 
 ```graphql
 subscription NewTransfers {
-  transfers(
-    order_by: {created_at: desc}
-    limit: 10
-  ) {
-    id
-    from_address
-    to_address
-    amount_asi
-    status
-    created_at
-    deployment {
-      deploy_id
-      block_number
+    transfers(
+        order_by: {created_at: desc}
+        limit: 10
+    ) {
+        id
+        from_address
+        to_address
+        amount_asi
+        status
+        created_at
+        deployment {
+            deploy_id
+            block_number
+        }
     }
-  }
 }
 ```
 
@@ -393,22 +394,22 @@ subscription NewTransfers {
 
 ```graphql
 subscription FailedDeployments {
-  deployments(
-    where: {
-      _or: [
-        {errored: {_eq: true}},
-        {error_message: {_is_null: false}}
-      ]
+    deployments(
+        where: {
+            _or: [
+                {errored: {_eq: true}},
+                {error_message: {_is_null: false}}
+            ]
+        }
+        order_by: {created_at: desc}
+        limit: 10
+    ) {
+        deploy_id
+        deployer
+        error_message
+        timestamp
+        block_number
     }
-    order_by: {created_at: desc}
-    limit: 10
-  ) {
-    deploy_id
-    deployer
-    error_message
-    timestamp
-    block_number
-  }
 }
 ```
 
@@ -418,67 +419,67 @@ subscription FailedDeployments {
 
 ```graphql
 query NetworkStats {
-  # Network consensus stats
-  network_stats(limit: 1, order_by: {timestamp: desc}) {
-    block_number
-    timestamp
-    active_validators
-    total_validators
-    validators_in_quarantine
-    consensus_participation
-    consensus_status
-  }
-  
-  # Block aggregates
-  blocks_aggregate {
-    aggregate {
-      count
-      max {
+    # Network consensus stats
+    network_stats(limit: 1, order_by: {timestamp: desc}) {
         block_number
-      }
+        timestamp
+        active_validators
+        total_validators
+        validators_in_quarantine
+        consensus_participation
+        consensus_status
     }
-  }
-  
-  # Deployment aggregates with error counts
-  deployments_aggregate {
-    aggregate {
-      count
-      avg {
-        phlo_cost
-      }
+
+    # Block aggregates
+    blocks_aggregate {
+        aggregate {
+            count
+            max {
+                block_number
+            }
+        }
     }
-  }
-  
-  # Failed deployments count
-  failed_deployments: deployments_aggregate(
-    where: {
-      _or: [
-        {errored: {_eq: true}},
-        {error_message: {_is_null: false}}
-      ]
+
+    # Deployment aggregates with error counts
+    deployments_aggregate {
+        aggregate {
+            count
+            avg {
+                phlo_cost
+            }
+        }
     }
-  ) {
-    aggregate {
-      count
+
+    # Failed deployments count
+    failed_deployments: deployments_aggregate(
+        where: {
+            _or: [
+                {errored: {_eq: true}},
+                {error_message: {_is_null: false}}
+            ]
+        }
+    ) {
+        aggregate {
+            count
+        }
     }
-  }
-  
-  # Transfer aggregates
-  transfers_aggregate {
-    aggregate {
-      count
-      sum {
-        amount_asi
-      }
+
+    # Transfer aggregates
+    transfers_aggregate {
+        aggregate {
+            count
+            sum {
+                amount_asi
+            }
+        }
     }
-  }
-  
-  # Validator count
-  validators_aggregate {
-    aggregate {
-      count
+
+    # Validator count
+    validators_aggregate {
+        aggregate {
+            count
+        }
     }
-  }
 }
 ```
 
@@ -486,43 +487,43 @@ query NetworkStats {
 
 ```graphql
 query DeploymentErrorAnalysis {
-  # Total deployments
-  total: deployments_aggregate {
-    aggregate {
-      count
+    # Total deployments
+    total: deployments_aggregate {
+        aggregate {
+            count
+        }
     }
-  }
-  
-  # Failed deployments
-  failed: deployments_aggregate(
-    where: {
-      _or: [
-        {errored: {_eq: true}},
-        {error_message: {_is_null: false}}
-      ]
+
+    # Failed deployments
+    failed: deployments_aggregate(
+        where: {
+            _or: [
+                {errored: {_eq: true}},
+                {error_message: {_is_null: false}}
+            ]
+        }
+    ) {
+        aggregate {
+            count
+        }
     }
-  ) {
-    aggregate {
-      count
+
+    # Recent errors with details
+    recent_errors: deployments(
+        where: {
+            _or: [
+                {errored: {_eq: true}},
+                {error_message: {_is_null: false}}
+            ]
+        }
+        limit: 10
+        order_by: {timestamp: desc}
+    ) {
+        deploy_id
+        deployment_type
+        error_message
+        timestamp
     }
-  }
-  
-  # Recent errors with details
-  recent_errors: deployments(
-    where: {
-      _or: [
-        {errored: {_eq: true}},
-        {error_message: {_is_null: false}}
-      ]
-    }
-    limit: 10
-    order_by: {timestamp: desc}
-  ) {
-    deploy_id
-    deployment_type
-    error_message
-    timestamp
-  }
 }
 ```
 
@@ -530,22 +531,22 @@ query DeploymentErrorAnalysis {
 
 ```graphql
 query ValidatorHistoryAtBlock($blockNumber: bigint!) {
-  validator_bonds(
-    where: {block_number: {_eq: $blockNumber}}
-    order_by: {stake: desc}
-  ) {
-    stake
-    validator {
-      public_key
-      name
+    validator_bonds(
+        where: {block_number: {_eq: $blockNumber}}
+        order_by: {stake: desc}
+    ) {
+        stake
+        validator {
+            public_key
+            name
+        }
     }
-  }
-  
-  block: blocks(where: {block_number: {_eq: $blockNumber}}) {
-    block_number
-    timestamp
-    proposer
-  }
+
+    block: blocks(where: {block_number: {_eq: $blockNumber}}) {
+        block_number
+        timestamp
+        proposer
+    }
 }
 ```
 
@@ -555,46 +556,46 @@ query ValidatorHistoryAtBlock($blockNumber: bigint!) {
 
 ```graphql
 query CompleteBlockHistory($limit: Int = 5) {
-  blocks(
-    limit: $limit
-    order_by: {block_number: desc}
-  ) {
-    block_number
-    block_hash
-    parent_hash
-    timestamp
-    proposer
-    state_root_hash
-    finalization_status
-    deployment_count
-    
-    # All deployments in this block
-    deployments {
-      deploy_id
-      deployer
-      deployment_type
-      phlo_cost
-      errored
-      error_message
-      
-      # All transfers from this deployment
-      transfers {
-        from_address
-        to_address
-        amount_asi
-        status
-      }
+    blocks(
+        limit: $limit
+        order_by: {block_number: desc}
+    ) {
+        block_number
+        block_hash
+        parent_hash
+        timestamp
+        proposer
+        state_root_hash
+        finalization_status
+        deployment_count
+
+        # All deployments in this block
+        deployments {
+            deploy_id
+            deployer
+            deployment_type
+            phlo_cost
+            errored
+            error_message
+
+            # All transfers from this deployment
+            transfers {
+                from_address
+                to_address
+                amount_asi
+                status
+            }
+        }
+
+        # Validator bonds at this block
+        validator_bonds {
+            stake
+            validator {
+                public_key
+                name
+            }
+        }
     }
-    
-    # Validator bonds at this block
-    validator_bonds {
-      stake
-      validator {
-        public_key
-        name
-      }
-    }
-  }
 }
 ```
 
@@ -602,28 +603,28 @@ query CompleteBlockHistory($limit: Int = 5) {
 
 ```graphql
 query IndexerStatus {
-  # Note: indexer_state table may not be populated
-  # Use blocks_aggregate for sync status instead
-  
-  blocks_aggregate {
-    aggregate {
-      max {
-        block_number
-      }
+    # Note: indexer_state table may not be populated
+    # Use blocks_aggregate for sync status instead
+
+    blocks_aggregate {
+        aggregate {
+            max {
+                block_number
+            }
+        }
     }
-  }
-  
-  # Check for deployment consistency
-  deployment_consistency: deployments_aggregate(
-    where: {
-      errored: {_eq: false},
-      error_message: {_is_null: false}
+
+    # Check for deployment consistency
+    deployment_consistency: deployments_aggregate(
+        where: {
+            errored: {_eq: false},
+            error_message: {_is_null: false}
+        }
+    ) {
+        aggregate {
+            count
+        }
     }
-  ) {
-    aggregate {
-      count
-    }
-  }
 }
 ```
 
@@ -644,9 +645,11 @@ For queries that use variables, here are some examples:
 
 ## Authentication
 
-For public queries (read-only), no authentication is required. The `public` role has been configured with read access to all tables.
+For public queries (read-only), no authentication is required. The `public` role has been configured with read access to
+all tables.
 
 For admin operations, use the admin secret in the header:
+
 ```
 X-Hasura-Admin-Secret: myadminsecretkey
 ```
@@ -670,12 +673,14 @@ GraphQL subscriptions work over WebSockets. Most GraphQL clients handle this aut
 ## v2.1 Updates
 
 ### Zero-Touch Deployment
+
 - Automatic Hasura relationship configuration
 - No manual GraphQL setup required
 - All nested queries work immediately after deployment
 - Single comprehensive database migration
 
 ### Enhanced Features
+
 - Genesis block processing with validator bonds
 - Full blockchain sync from block 0
 - Enhanced ASI transfer detection patterns
@@ -684,6 +689,7 @@ GraphQL subscriptions work over WebSockets. Most GraphQL clients handle this aut
 - Computed columns for balance tracking
 
 ### Known Limitations
+
 - Group by aggregations not directly supported in Hasura
 - Some network_stats fields may be unpopulated
 - Epoch transitions table exists but not actively populated
