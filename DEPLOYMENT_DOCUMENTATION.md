@@ -155,10 +155,9 @@ npm start  # Runs on port 3000 or 3001
 ## 🔧 **Configuration**
 
 ### Environment Variables:
-- `NODE_URL` - ASI testnet HTTP endpoint
-- `RUST_CLI_PATH` - Path to node CLI binary  
 - `NODE_HOST` - Testnet hostname
-- `GRPC_PORT`/`HTTP_PORT` - Testnet connection ports
+- `GRPC_PORT`/`HTTP_PORT` - Testnet connection ports (gRPC + HTTP)
+- `NODE_TIMEOUT` - HTTP/gRPC request timeout in seconds
 - `DATABASE_URL` - PostgreSQL connection string
 - `SYNC_INTERVAL` - Block sync frequency (seconds)
 - `BATCH_SIZE` - Blocks per batch

@@ -281,7 +281,54 @@ ok "Array relationships created."
 # ============================================================
 log "Granting public SELECT permissions..."
 ALL_TABLES_AND_VIEWS=( "${TABLES[@]}" "${VIEWS[@]}" )
-for table in "${ALL_TABLES_AND_VIEWS[@]}"; do
+# Tables that must expose aggregate queries (e.g. <table>_aggregate { aggregate { count } })
+# to the public role. Required by the explorer frontend (TransactionTrackerImproved)
+# for the /transactions page counters. Other tables keep allow_aggregations=false.
+AGGREGATE_ENABLED_TABLES=(
+  "deployments"
+  "transfers"
+  "transaction_history_view"
+)
+
+is_aggregate_enabled() {
+  local needle="$1"
+  for t in "${AGGREGATE_ENABLED_TABLES[@]}"; do
+    [ "$t" = "$needle" ] && return 0
+  done
+  return 1
+}
+
+# Issue a select permission for the public role with the given allow_aggregations flag.
+# Drops any existing permission first so the script is idempotent and can flip the flag.
+grant_public_select() {
+  local table="$1"
+  local allow_agg="$2"
+
+  # Drop existing permission, if any. We swallow errors here because on a fresh
+  # install there is nothing to drop yet ("not found" / "does not exist").
+  local drop_resp
+  drop_resp=$(curl -sS -X POST "$HASURA_ENDPOINT" \
+    -H "Content-Type: application/json" \
+    -H "x-hasura-admin-secret: $admin_secret" \
+    -d "{
+      \"type\": \"pg_drop_select_permission\",
+      \"args\": {
+        \"source\": \"default\",
+        \"table\": {\"schema\": \"public\", \"name\": \"$table\"},
+        \"role\": \"public\"
+      }
+    }") || true
+  # Only abort if the error is something other than "does not exist" / "not found".
+  if echo "$drop_resp" | grep -qE '"error"|"errors"'; then
+    if ! echo "$drop_resp" | grep -qiE 'does not exist|not found|no such'; then
+      echo "----- METADATA CALL FAILED -----" >&2
+      echo "Drop permission for $table failed:" >&2
+      echo "$drop_resp" >&2
+      echo "--------------------------------" >&2
+      exit 1
+    fi
+  fi
+
   hasura_metadata "{
     \"type\": \"pg_create_select_permission\",
     \"args\": {
@@ -292,34 +339,20 @@ for table in "${ALL_TABLES_AND_VIEWS[@]}"; do
         \"columns\": \"*\",
         \"filter\": {},
         \"limit\": 5000,
-        \"allow_aggregations\": false
+        \"allow_aggregations\": $allow_agg
       }
     }
   }" >/dev/null
+}
+
+for table in "${ALL_TABLES_AND_VIEWS[@]}"; do
+  if is_aggregate_enabled "$table"; then
+    grant_public_select "$table" "true"
+  else
+    grant_public_select "$table" "false"
+  fi
 done
 
-hasura_metadata "{
-  \"type\": \"pg_drop_select_permission\",
-  \"args\": {
-    \"source\": \"default\",
-    \"table\": {\"schema\": \"public\", \"name\": \"transaction_history_view\"},
-    \"role\": \"public\"
-  }
-}" >/dev/null
-hasura_metadata "{
-  \"type\": \"pg_create_select_permission\",
-  \"args\": {
-    \"source\": \"default\",
-    \"table\": {\"schema\": \"public\", \"name\": \"transaction_history_view\"},
-    \"role\": \"public\",
-    \"permission\": {
-      \"columns\": \"*\",
-      \"filter\": {},
-      \"limit\": 5000,
-      \"allow_aggregations\": true
-    }
-  }
-}" >/dev/null
 ok "Public SELECT permissions granted."
 
 log "Granting public EXECUTE permissions on SQL functions..."
@@ -390,14 +423,24 @@ if echo "$public_select" | grep -q '"errors"'; then
 fi
 ok "PUBLIC select OK."
 
-log "PUBLIC aggregate test (should FAIL because allow_aggregations=false)..."
+log "PUBLIC aggregate test on blocks (should FAIL: allow_aggregations=false)..."
 public_agg="$(graphql_public '{"query":"{ blocks_aggregate { aggregate { count } } }"}')"
 if echo "$public_agg" | grep -q '"errors"'; then
-  ok "PUBLIC aggregate correctly rejected."
+  ok "PUBLIC aggregate on blocks correctly rejected."
 else
   echo "Response:"
   echo "$public_agg"
-  die "PUBLIC aggregate unexpectedly succeeded (allow_aggregations=false expected)."
+  die "PUBLIC aggregate on blocks unexpectedly succeeded (allow_aggregations=false expected)."
+fi
+
+log "PUBLIC aggregate test on deployments + transfers (should SUCCEED: allow_aggregations=true)..."
+public_tx_agg="$(graphql_public '{"query":"{ deployments_aggregate { aggregate { count } } transfers_aggregate { aggregate { count } } }"}')"
+if echo "$public_tx_agg" | grep -q '"errors"'; then
+  echo "Response:"
+  echo "$public_tx_agg"
+  die "PUBLIC aggregate on deployments/transfers failed (allow_aggregations=true expected). Check AGGREGATE_ENABLED_TABLES in this script."
+else
+  ok "PUBLIC aggregate on deployments + transfers OK."
 fi
 
 log "PUBLIC aggregate test on transaction_history_view (should SUCCEED)..."

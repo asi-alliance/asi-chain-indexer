@@ -10,16 +10,9 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     # Node Configuration
-    # Client for interacting with node HTTP API.
-    # Maybe deprecated param
-    node_url: str = Field(
-        default="http://localhost:40453",
-        description="RChain node HTTP API endpoint"
-    )
-
     node_timeout: int = Field(
         default=30,
-        description="HTTP request timeout in seconds"
+        description="HTTP/gRPC request timeout in seconds"
     )
 
     http_port: int = Field(

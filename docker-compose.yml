@@ -1,4 +1,4 @@
-# Docker Compose configuration for ASI-Chain Indexer with Rust CLI
+# Docker Compose configuration for ASI-Chain Indexer
 
 services:
   postgres:
@@ -28,14 +28,11 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      # ASI Node
-      NODE_URL: ${NODE_URL}
-      NODE_TIMEOUT: ${NODE_TIMEOUT:-30}
-      
-      # Rust CLI Configuration
+      # Node connectivity (gRPC + HTTP)
       NODE_HOST: ${NODE_HOST}
       GRPC_PORT: ${GRPC_PORT}
       HTTP_PORT: ${HTTP_PORT}
+      NODE_TIMEOUT: ${NODE_TIMEOUT:-30}
 
       # Database
       DATABASE_URL: ${DATABASE_URL}
