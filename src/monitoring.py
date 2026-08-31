@@ -221,8 +221,13 @@ class MonitoringServer:
                     (SELECT COUNT(*) FROM deployments) as total_deployments,
                     (SELECT COUNT(*) FROM transfers) as total_transfers,
                     (SELECT COUNT(*) FROM validators) as total_validators,
-                    (SELECT MAX(block_number) FROM blocks) as last_indexed_block,
-                    (SELECT MAX(created_at) FROM blocks) as last_sync_time
+                    (SELECT value
+                     FROM indexer_state
+                     WHERE key = 'last_indexed_block') as last_indexed_block,
+                    (SELECT updated_at
+                     FROM indexer_state
+                     WHERE key = 'last_indexed_block') as last_sync_time,
+                    (SELECT MAX(block_number) FROM blocks) as highest_stored_block
             """)
 
             stats = dict(db_stats[0]) if db_stats else {}
@@ -243,7 +248,7 @@ class MonitoringServer:
                 node_status = {"connected": False}
 
             # Calculate sync status
-            last_indexed = int(stats.get("last_indexed_block") or 0)
+            last_indexed = int(stats.get("last_indexed_block") or -1)
             latest_block = node_status.get("latest_block", 0)
 
             return {
