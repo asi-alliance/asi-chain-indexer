@@ -33,6 +33,7 @@ The indexer provides complete automation for blockchain data synchronization:
 - Comprehensive database schema with single migration
 - Balance tracking with bonded/unbonded separation
 - DAG-aware block storage (multi-parent support via `block_parents`)
+- Pending deploys snapshot from the node's deploy buffers (via `getPendingDeploys` RPC)
 
 ## Current Status
 
@@ -56,6 +57,7 @@ The indexer provides complete automation for blockchain data synchronization:
 - Health and readiness checks
 - **Zero-touch deployment** - complete automation with automatic Hasura relationships
 - **Complete REST API and GraphQL interface** with working nested queries
+- **Pending deploys tracking** - live snapshot of the node's deploy buffers via the `getPendingDeploys` RPC, refreshed every sync cycle
 
 ⚠️ **Known Limitations:**
 - **Epoch transitions tracking** - Table exists but data not populated (epoch rewards not tracked)
@@ -129,8 +131,9 @@ The indexer provides complete automation for blockchain data synchronization:
 ┌─────────────────────▼───────────────────────────────────────┐
 │                   PostgreSQL Database                       │
 │  Tables: blocks, block_parents, deployments, transfers,     │
-│         validators, validator_bonds, balance_states,        │
-│         network_stats, epoch_transitions, block_validators  │
+│         pending_deploys, validators, validator_bonds,       │
+│         balance_states, network_stats, epoch_transitions,    │
+│         block_validators, indexer_state                     │
 └─────────────────────┬───────────────────────────────────────┘
                       │
                       │ Database Connection
@@ -160,10 +163,11 @@ The indexer talks to the node directly via gRPC (primary) and HTTP (fallback for
 1. **getBlocksByHeights** - Fetch blocks within a height range (supports large batches)
 2. **getBlock** - Get detailed block information including deployments
 3. **findDeploy** - Retrieve specific deployment details
-4. **getBonds** - Get current validator bonds and stakes
-5. **showMainChain** - Verify main chain consistency
-6. **status** - Node health check
-7. HTTP `/api/validators` - List currently active validators (no gRPC equivalent)
+4. **getPendingDeploys** - List deploys waiting in the node's buffers (deploy_storage + rejected-recovery), optionally filtered by deployer; snapshot refreshed every sync cycle
+5. **getBonds** - Get current validator bonds and stakes
+6. **showMainChain** - Verify main chain consistency
+7. **status** - Node health check
+8. HTTP `/api/validators` - List currently active validators (no gRPC equivalent)
 
 ## ⚡ Quick Start
 ## Requirements
@@ -294,6 +298,7 @@ docker compose -f docker-compose.yml build
 | `LOG_LEVEL` | Logging level (DEBUG/INFO/WARNING/ERROR)  | `INFO` |
 | `LOG_FORMAT` | Log format (json/text)                    | `json` |
 | `ENABLE_ASI_TRANSFER_EXTRACTION` | Extract ASI transfers from deployments    | `true` |
+| `ENABLE_PENDING_DEPLOYS_SYNC` | Poll node pending deploys every sync cycle | `true` |
 | `ENABLE_METRICS` | Enable Prometheus metrics                 | `true` |
 | `ENABLE_HEALTH_CHECK` | Enable health check endpoint              | `true` |
 | `HASURA_ADMIN_SECRET` | Hasura admin secret (used by setup scripts) | Empty |
@@ -311,6 +316,13 @@ docker compose -f docker-compose.yml build
   - Full Rholang term storage
   - Automatic type classification
   - Error tracking and status management
+
+- **pending_deploys**: Ephemeral snapshot of the node's deploy buffers
+  - Deploys not yet included in any block (no block_hash / FK by design)
+  - Fully refreshed (DELETE + INSERT) every sync cycle (`SYNC_INTERVAL`, default 5s)
+  - `is_rejected` provenance: fresh (deploy_storage) vs recovering after merge conflict
+  - `sig` matches `deployments.deploy_id` once the deploy is included in a block
+  - Pre-cap total count in `indexer_state` key `pending_deploys_total_available` (node caps the response at 1000 entries)
 
 - **transfers**: ASI token transfers
   - Supports both ASI addresses (52-57 chars) and validator public keys (130+ chars)
@@ -343,9 +355,8 @@ docker compose -f docker-compose.yml build
   - Start/end blocks per epoch
   - Active validator counts
 
-- **indexer_state**: Indexer metadata (⚠️ Not implemented)
-  - Intended for key-value store for indexer state
-  - Currently not created in schema
+- **indexer_state**: Indexer metadata (key-value store)
+  - Sync/runtime state: e.g. `pending_deploys_total_available` (pre-cap pending deploy count, updated every sync cycle)
 
 ### Views
 

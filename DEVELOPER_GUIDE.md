@@ -182,6 +182,11 @@ query GetEntityCounts {
       count
     }
   }
+  pending_deploys_aggregate {
+    aggregate {
+      count
+    }
+  }
 }
 ```
 
@@ -241,6 +246,22 @@ query GetFailedDeployments {
     deployer
     error_message
     block_number
+  }
+}
+```
+
+Pending deploys (node buffers, refreshed every sync cycle):
+
+```graphql
+query GetPendingDeploys {
+  pending_deploys(
+    order_by: { timestamp: desc }
+    limit: 20
+  ) {
+    sig
+    deployer_address
+    timestamp
+    is_rejected
   }
 }
 ```

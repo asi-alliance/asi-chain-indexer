@@ -72,6 +72,10 @@ service DeployService {
   rpc getEventByHash(ReportQuery) returns (EventInfoResponse){}
   // Get node status
   rpc status(google.protobuf.Empty) returns (StatusResponse){}
+  // Bulk list of pending deploys (deploy_storage + rejected-recovery buffer),
+  // optionally filtered by deployer public key. Empty response on read-only
+  // nodes (Casper not initialised).
+  rpc getPendingDeploys(PendingDeploysQuery) returns (PendingDeploysResponse){}
 }
 
 message EventInfoResponse{
@@ -212,5 +216,13 @@ message StatusResponse {
   oneof message {
     servicemodelapi.ServiceError error  = 1;
     Status status = 2;
+  }
+}
+
+// getPendingDeploys
+message PendingDeploysResponse {
+  oneof message {
+    servicemodelapi.ServiceError error        = 1;
+    PendingDeploysResponsePayload payload     = 2;
   }
 }

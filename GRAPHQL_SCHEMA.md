@@ -1,10 +1,10 @@
 # GraphQL Schema Documentation
 
-**Version**: 2.2.0 (dag_support) | **Updated**: August 2026
+**Version**: 2.3.0 (pending_deploys) | **Updated**: September 2026
 
 ## Overview
 
-The ASI-Chain indexer provides a GraphQL API through Hasura with automatic relationship configuration, exposing comprehensive blockchain data for querying. This document describes the current schema with 12 tables, 5 views, and 6 SQL functions, available queries, and relationships.
+The ASI-Chain indexer provides a GraphQL API through Hasura with automatic relationship configuration, exposing comprehensive blockchain data for querying. This document describes the current schema with 13 tables, 5 views, and 6 SQL functions, available queries, and relationships.
 
 ## Available Tables
 
@@ -58,6 +58,27 @@ Stores smart contract deployments.
 - `shard_id` (varchar(20)): Shard ID
 - `status` (varchar(20), default `'included'`): Deploy lifecycle status — **currently always `"included"`** in production (no `status` field in node's block-stream `DeployInfo`; the gRPC client hardcodes `"included"`)
 - `created_at` (timestamp, NOT NULL, default NOW()): When indexed
+
+### pending_deploys
+Ephemeral snapshot of the node's deploy buffers — deploys signed and accepted by the node but **not yet included in any block**. Fully refreshed (DELETE + INSERT) by the indexer every sync cycle (`SYNC_INTERVAL`, default 5s); rows appear/disappear as the node's buffer changes. No `block_hash`/FK by design.
+
+**Fields:**
+- `sig` (varchar(160), **PRIMARY KEY**): Hex deploy signature — equals `deployments.deploy_id` once the deploy is included in a block
+- `deployer` (varchar(200), NOT NULL): Deployer public key (hex)
+- `deployer_address` (varchar(150), NOT NULL): ASI address derived from the deployer public key
+- `term` (text, NOT NULL): Rholang source code
+- `timestamp` (bigint, NOT NULL): Deploy creation time (epoch ms)
+- `phlo_price` (bigint, default 1): Phlo price
+- `phlo_limit` (bigint, default 1000000): Phlo limit
+- `valid_after_block_number` (bigint): Deploy not valid before this height
+- `shard_id` (varchar(20)): Shard ID
+- `sig_algorithm` (varchar(20), default `'secp256k1'`): Signature algorithm
+- `language` (varchar(20)): Source language (`rholang` / `metta`)
+- `expiration_timestamp` (bigint, NULL): Expiry (NULL = no expiration; proto 0)
+- `is_rejected` (boolean, default false): `false` = fresh in deploy_storage; `true` = recovering in the rejected-recovery buffer after a merge conflict
+- `fetched_at` (timestamp, NOT NULL, default NOW()): When this snapshot row was written
+
+> The node caps the response at 1000 entries. The pre-cap total is stored in `indexer_state` under key `pending_deploys_total_available` — compare with `pending_deploys_aggregate { aggregate { count } }` to detect truncation.
 
 ### transfers
 Stores ASI token transfers.
@@ -149,7 +170,7 @@ Many-to-many relationship between blocks and validators (justifications).
 > Note: this table has **no `id`, `block_number`, or `role` columns** — only the two composite-PK columns.
 
 ### indexer_state
-Stores indexer sync metadata. Populated on migration with initial rows: `last_indexed_block='0'`, `indexer_version='1.0.0'`, `schema_version='000'`.
+Stores indexer sync metadata. Populated on migration with initial rows: `last_indexed_block='0'`, `indexer_version='1.0.0'`, `schema_version='000'`. Updated at runtime: `pending_deploys_total_available` (pre-cap pending deploy count, upserted every sync cycle).
 
 **Fields:**
 - `key` (varchar(50), **PRIMARY KEY**): State key
@@ -283,6 +304,54 @@ query GetTransfers {
 }
 ```
 
+### Get Pending Deploys (node buffers)
+```graphql
+query GetPendingDeploys {
+  pending_deploys(
+    order_by: { timestamp: desc }
+    limit: 50
+  ) {
+    sig
+    deployer
+    deployer_address
+    timestamp
+    phlo_limit
+    is_rejected
+    valid_after_block_number
+    # null until the deploy is included in a block:
+    included_deployment {
+      deploy_id
+      block_number
+    }
+  }
+  pending_deploys_aggregate {
+    aggregate {
+      count
+    }
+  }
+  indexer_state(
+    where: { key: { _eq: "pending_deploys_total_available" } }
+  ) {
+    value
+  }
+}
+```
+
+### Get Pending Deploys for a Deployer
+```graphql
+query GetDeployerPendingDeploys($deployer: String!) {
+  pending_deploys(
+    where: { deployer: { _eq: $deployer } }
+    order_by: { timestamp: desc }
+  ) {
+    sig
+    term
+    timestamp
+    is_rejected
+  }
+}
+```
+
 ### Get Validators
 ```graphql
 query GetValidators {
@@ -354,7 +423,7 @@ query GetStats {
 
 1. **Epoch Data Not Populated**: The `epoch_transitions` table exists but the current indexer never writes rows to it. Epoch rewards and validator reward distribution are not tracked.
 
-2. **`deployments.status` is always `"included"`**: the node's block-stream `DeployInfo` proto has no `status` field, so the gRPC client hardcodes `"included"` and the indexer stores that. Real deploy lifecycle states (`pending` / `finalized` / `failed` / `expired`) would require calling the separate `deployFinalizationStatus` RPC, which the indexer does not currently do. Use `deployments.errored` + `deployments.error_message` to detect failed deploys.
+2. **`deployments.status` is always `"included"`**: the node's block-stream `DeployInfo` proto has no `status` field, so the gRPC client hardcodes `"included"` and the indexer stores that. Real post-inclusion lifecycle states (`finalized` / `failed` / `expired`) would require calling the separate `deployFinalizationStatus` RPC, which the indexer does not currently do. Use `deployments.errored` + `deployments.error_message` to detect failed deploys. The **pre-inclusion** (pending) state IS tracked — see the `pending_deploys` table, refreshed from the node's buffers every sync cycle.
 
 3. **Network metrics need manual refresh**: `get_network_metrics` reads from `network_metrics_buckets`, which is populated by `refresh_network_metrics_buckets()`. That function must be called on a cron schedule (e.g. every 10 min) — otherwise `get_network_metrics` falls back to the slow raw-aggregation path.
 

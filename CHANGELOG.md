@@ -2,6 +2,27 @@
 
 All notable changes to the ASI-Chain Indexer project will be documented in this file.
 
+## [2.3.0] - 2026-09-08
+
+### 🚀 Pending Deploys Tracking
+
+This release integrates the node's new `getPendingDeploys` gRPC RPC, giving the explorer visibility into deploys sitting in the node's deploy buffers before they are included in a block.
+
+### Added
+- ✅ **`pending_deploys` table** — ephemeral snapshot of the node's deploy buffers (`deploy_storage` + rejected-recovery buffer), fully refreshed (DELETE + INSERT) every sync cycle (`SYNC_INTERVAL`, default 5s). Intentionally no `block_hash`/FK — these deploys are not yet in any block; once included, they appear in `deployments` with the same `sig`/`deploy_id`.
+- ✅ **`getPendingDeploys` RPC** vendored into `protos/` (`PendingDeploysQuery`, `PendingDeployInfo`, `PendingDeploysResponsePayload`, `PendingDeploysResponse`) and exposed via `GrpcNodeClient.get_pending_deploys()` with optional deployer filter. Raw bytes fields (`deployer`, `sig`) are hex-encoded for consistency with the `deployments` table.
+- ✅ **`is_rejected` provenance flag** — distinguishes fresh deploys (`deploy_storage`) from those recovering after a merge conflict (rejected-recovery buffer).
+- ✅ **Truncation detection** — the node caps the response at 1000 entries; the pre-cap `totalAvailable` count is persisted in `indexer_state` under key `pending_deploys_total_available`.
+- ✅ **Hasura exposure** — `pending_deploys` tracked with public SELECT (`limit: 5000`), aggregations enabled (count badge), plus manual relationships `deployer_validator` (→ validators) and `included_deployment` (→ deployments, non-null once included).
+- ✅ **`ENABLE_PENDING_DEPLOYS_SYNC` feature flag** (default `true`) — controls the polling task; on node failure the last snapshot is preserved instead of wiped.
+
+### Changed
+- 🔄 **`indexer_state`** is now actively used at runtime (previously only initial migration rows) — holds `pending_deploys_total_available` per sync cycle.
+
+### Technical Details
+- **Graceful degradation**: if the node does not implement `getPendingDeploys` yet (older node version), the sync task logs the RPC error and keeps the last snapshot — no crash, no wipe.
+- **Migration**: schema lives in the single comprehensive migration (`000_comprehensive_initial_schema.sql`); existing databases get the new table automatically via SQLAlchemy `create_all` at indexer startup.
+
 ### [2.1.2]  Changed - 2025-10-27
 - 🔄 **ASI address validation** updated from `range(53, 57)` to `range(52, 57)`
 - Rename REV to ASI

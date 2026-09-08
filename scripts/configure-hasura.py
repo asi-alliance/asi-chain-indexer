@@ -281,6 +281,7 @@ def main():
         "blocks",
         "block_parents",
         "deployments",
+        "pending_deploys",
         "transfers",
         "validators",
         "validator_bonds",
@@ -363,6 +364,12 @@ def main():
     
     # Epoch Transitions relationships (no foreign keys, so no relationships needed)
     # Network Stats relationships (no foreign keys, so no relationships needed)
+
+    # Pending Deploys -> Validators (manual object relationship - no FK constraint)
+    create_manual_relationship("pending_deploys", "deployer_validator", {"deployer": "public_key"}, "validators")
+
+    # Pending Deploys -> Deployments (manual: sig matches deploy_id once included)
+    create_manual_relationship("pending_deploys", "included_deployment", {"sig": "deploy_id"}, "deployments")
     
     # Step 4: Set permissions
     print("\n🔒 Step 4: Setting Permissions")

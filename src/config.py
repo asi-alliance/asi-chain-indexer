@@ -94,6 +94,10 @@ class Settings(BaseSettings):
         default=True,
         description="Enable ASI transfer extraction from deployments"
     )
+    enable_pending_deploys_sync: bool = Field(
+        default=True,
+        description="Enable pending deploys polling from the node's getPendingDeploys RPC"
+    )
     enable_metrics: bool = Field(
         default=True,
         description="Enable Prometheus metrics"

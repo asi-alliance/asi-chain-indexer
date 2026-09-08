@@ -114,6 +114,35 @@ create index idx_transfers_created_at on transfers (created_at desc);
 create index IF NOT EXISTS idx_transfers_from_address ON transfers (from_address);
 create index IF NOT EXISTS idx_transfers_to_address ON transfers (to_address);
 
+-- Pending deploys snapshot (node deploy buffers, not yet in any block)
+-- Ephemeral: fully refreshed (DELETE + INSERT) by the indexer every sync
+-- cycle; intentionally no block_hash / FK to blocks. `sig` is the hex deploy
+-- signature and matches deployments.deploy_id once the deploy is included.
+create TABLE IF NOT EXISTS pending_deploys
+(
+    sig                      VARCHAR(160) PRIMARY KEY,
+    deployer                 VARCHAR(200)              NOT NULL,
+    deployer_address         VARCHAR(150)              NOT NULL,
+    term                     TEXT                      NOT NULL,
+    timestamp                BIGINT                    NOT NULL,
+    phlo_price               BIGINT      DEFAULT 1,
+    phlo_limit               BIGINT      DEFAULT 1000000,
+    valid_after_block_number BIGINT,
+    shard_id                 VARCHAR(20),
+    sig_algorithm            VARCHAR(20) DEFAULT 'secp256k1',
+    language                 VARCHAR(20),
+    -- NULL = no expiration (proto 0)
+    expiration_timestamp     BIGINT,
+    -- true = from rejected_deploy_buffer (recovering after merge conflict)
+    is_rejected              BOOLEAN     DEFAULT FALSE,
+    fetched_at               TIMESTAMP   DEFAULT NOW() NOT NULL
+);
+
+create index IF NOT EXISTS idx_pending_deploys_deployer ON pending_deploys (deployer);
+create index IF NOT EXISTS idx_pending_deploys_timestamp ON pending_deploys (timestamp desc);
+create index IF NOT EXISTS idx_pending_deploys_is_rejected ON pending_deploys (is_rejected);
+create index IF NOT EXISTS idx_pending_deploys_deployer_address ON pending_deploys (deployer_address);
+
 -- =============================================
 -- VALIDATOR AND STAKING TABLES
 -- =============================================
@@ -357,6 +386,7 @@ COMMENT ON TABLE balance_states IS 'Address balance tracking with bonded/unbonde
 COMMENT ON TABLE epoch_transitions IS 'Network epoch transitions and validator set changes';
 COMMENT ON TABLE network_stats IS 'Network statistics captured at specific blocks';
 COMMENT ON TABLE indexer_state IS 'Indexer operational state and configuration';
+COMMENT ON TABLE pending_deploys IS 'Ephemeral pending deploy snapshot from the node deploy buffers; fully refreshed every sync cycle, not part of the confirmed ledger';
 
 COMMENT ON COLUMN blocks.pre_state_hash IS 'Pre-state hash from enhanced block data';
 COMMENT ON COLUMN blocks.justifications IS 'Full justifications data as JSONB';

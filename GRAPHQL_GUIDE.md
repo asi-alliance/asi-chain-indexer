@@ -1,6 +1,6 @@
 # ASI-Chain GraphQL API Guide
 
-**Version**: 2.2.0 (dag_support) | **Updated**: August 2026
+**Version**: 2.3.0 (pending_deploys) | **Updated**: September 2026
 
 This guide provides comprehensive documentation for accessing ASI-Chain blockchain data through the Hasura GraphQL endpoint with automatic relationship configuration.
 
@@ -26,6 +26,7 @@ The ASI-Chain indexer provides a powerful GraphQL API powered by Hasura, offerin
 - **Enhanced Transfer Detection**: Supports both variable-based and match-based Rholang patterns
 - **Data Quality**: Proper NULL handling for deployment error messages
 - **Validator Bond Detection**: Full support for new CLI output format
+- **Pending Deploys**: Live snapshot of the node's deploy buffers (deploys not yet in a block), refreshed every sync cycle
 
 ## Access Details
 
@@ -98,7 +99,31 @@ Smart contract deployments and transactions.
 | status | String | Deploy lifecycle status — currently always `"included"` (no status field in node's block-stream) |
 | created_at | Timestamp | When indexed |
 
-### 3. **transfers**
+### 3. **pending_deploys**
+Ephemeral snapshot of the node's deploy buffers — deploys signed and accepted but **not yet included in any block**. Fully refreshed (DELETE + INSERT) every sync cycle; no `block_hash`/FK by design. `sig` equals `deployments.deploy_id` once the deploy is included.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| sig | String (PK) | Hex deploy signature (varchar(160)) — matches `deployments.deploy_id` when included |
+| deployer | String | Deployer public key (hex, varchar(200)) |
+| deployer_address | String | ASI address derived from deployer public key (NOT NULL) |
+| term | Text | Rholang source code |
+| timestamp | BigInt | Deploy creation time (epoch ms) |
+| phlo_price | BigInt | Phlo price (default 1) |
+| phlo_limit | BigInt | Phlo limit (default 1000000) |
+| valid_after_block_number | BigInt | Deploy not valid before this height |
+| shard_id | String | Shard ID |
+| sig_algorithm | String | Signature algorithm (default `secp256k1`) |
+| language | String | Source language (`rholang` / `metta`) |
+| expiration_timestamp | BigInt | Expiry (NULL = no expiration) |
+| is_rejected | Boolean | `false` = fresh in deploy_storage; `true` = recovering after a merge conflict (rejected-recovery buffer) |
+| fetched_at | Timestamp | When this snapshot row was written |
+
+Hasura permissions: public SELECT, `limit: 5000`, `allow_aggregations: true`.
+
+> The node caps the response at 1000 entries — the pre-cap total is in `indexer_state` key `pending_deploys_total_available`. Compare with `pending_deploys_aggregate { aggregate { count } }` to detect truncation.
+
+### 4. **transfers**
 ASI token transfers extracted from deployments.
 
 | Field | Type | Description                                             |
@@ -116,7 +141,7 @@ ASI token transfers extracted from deployments.
 | timestamp | BigInt | Transfer timestamp (epoch ms) |
 | created_at | Timestamp | When indexed |
 
-### 4. **validator_bonds**
+### 5. **validator_bonds**
 Historical validator stake records per block (including genesis bonds).
 
 | Field | Type | Description |
@@ -128,7 +153,7 @@ Historical validator stake records per block (including genesis bonds).
 | stake | BigInt | Staked amount in dust |
 | | | UNIQUE (block_hash, validator_public_key) |
 
-### 5. **network_stats**
+### 6. **network_stats**
 Network health metrics over time.
 
 | Field | Type | Description |
@@ -142,7 +167,7 @@ Network health metrics over time.
 | consensus_status | String | Network health status (NOT NULL) |
 | timestamp | Timestamp | When captured (SQL timestamp, NOT bigint) |
 
-### 6. **balance_states**
+### 7. **balance_states**
 Address balance tracking with bonded/unbonded separation.
 
 | Field | Type | Description |
@@ -160,7 +185,7 @@ Address balance tracking with bonded/unbonded separation.
 | updated_at | Timestamp | Last update time |
 | | | UNIQUE (address, block_hash) |
 
-### 7. **epoch_transitions**
+### 8. **epoch_transitions**
 Epoch boundary tracking (⚠️ not populated by current indexer).
 
 | Field | Type | Description |
@@ -173,7 +198,7 @@ Epoch boundary tracking (⚠️ not populated by current indexer).
 | quarantine_length | Int | Quarantine period length (NOT NULL) |
 | timestamp | Timestamp | When recorded (SQL `timestamp`, NOT `created_at`) |
 
-### 8. **block_validators**
+### 9. **block_validators**
 Block-validator relationships for justifications. **Composite PK** — no `id` / `block_number` / `role` columns.
 
 | Field | Type | Description |
@@ -181,7 +206,7 @@ Block-validator relationships for justifications. **Composite PK** — no `id` /
 | block_hash | String | Block hash (composite PK, FK → blocks) |
 | validator_public_key | String | Validator who signed/justified (composite PK) |
 
-### 9. **validators**
+### 10. **validators**
 Validator registry.
 
 | Field | Type | Description |
@@ -195,7 +220,7 @@ Validator registry.
 | created_at | Timestamp | When first indexed |
 | updated_at | Timestamp | Last update |
 
-### 10. **indexer_state**
+### 11. **indexer_state**
 Indexer metadata and sync status. Populated on migration with `last_indexed_block='0'`, `indexer_version='1.0.0'`, `schema_version='000'`.
 
 | Field | Type | Description |
@@ -204,7 +229,7 @@ Indexer metadata and sync status. Populated on migration with `last_indexed_bloc
 | value | Text | State value (NOT NULL) |
 | updated_at | Timestamp | Last update |
 
-### 11. **block_parents**
+### 12. **block_parents**
 DAG junction table tracking all parents of a block (a block may have multiple parents).
 
 | Field | Type | Description |
@@ -214,7 +239,7 @@ DAG junction table tracking all parents of a block (a block may have multiple pa
 | parent_index | Int | Order of this parent among the block's parents (default 0) |
 | created_at | Timestamp | When the link was indexed |
 
-### 12. **transaction_history_view**
+### 13. **transaction_history_view**
 Combined wallet transaction history (deployments ⨝ transfers via LEFT JOIN). One row per transfer, or one row per deployment that produced no transfer.
 
 | Field | Type | Nullable | Description |
@@ -234,7 +259,7 @@ Combined wallet transaction history (deployments ⨝ transfers via LEFT JOIN). O
 
 Hasura permissions: public SELECT, `limit: 5000`, `allow_aggregations: true`.
 
-### 13. **block_ancestors_view / block_descendants_view**
+### 14. **block_ancestors_view / block_descendants_view**
 Read-only views that type the returns of `get_block_ancestors` / `get_block_descendants` SQL functions.
 
 | Field | Type | Description |
@@ -243,10 +268,10 @@ Read-only views that type the returns of `get_block_ancestors` / `get_block_desc
 | ancestor_number / descendant_number | BigInt | Reachable block number |
 | depth | Int | Distance from the queried block |
 
-### 14. **network_stats_view**
+### 15. **network_stats_view**
 Analytics view over recent blocks (last 100 non-genesis blocks): `total_blocks`, `avg_block_time_seconds`, `earliest_block_time`, `latest_block_time`. Hasura-tracked.
 
-### 15. **network_metrics_view** + **network_metrics_buckets** (table)
+### 16. **network_metrics_view** + **network_metrics_buckets** (table)
 `network_metrics_view` is a schema-holder view (0 rows) for Hasura that types the return of `get_network_metrics`.
 `network_metrics_buckets` is the underlying pre-aggregated table (columns: `bucket_start` timestamptz PK, `bucket_end` timestamptz, `avg_block_time_sec` numeric, `deployments_count` bigint, `transfers_count` bigint), populated by `refresh_network_metrics_buckets()`.
 
@@ -277,6 +302,8 @@ The following relationships are configured for nested queries:
 - `transfers` → `block`: Block containing transfer
 - `validator_bonds` → `block`: Block reference
 - `balance_states` → `block`: Block reference
+- `pending_deploys` → `deployer_validator` (manual, → validators): Validator record for the deployer public key (nullable — deployer may not be a validator)
+- `pending_deploys` → `included_deployment` (manual, → deployments): The confirmed deployment once the pending deploy is included in a block (null while still pending; joins on `sig = deploy_id`)
 
 ### DAG Relationships (block_parents)
 - `blocks` → `parent_links` (array): This block's own parent links in `block_parents`
@@ -313,6 +340,34 @@ query SearchDeployments($deployer: String!) {
   }
 }
 ```
+
+#### Get Pending Deploys (node buffers)
+```graphql
+query GetPendingDeploys {
+  pending_deploys(order_by: {timestamp: desc}, limit: 50) {
+    sig
+    deployer
+    deployer_address
+    timestamp
+    phlo_limit
+    is_rejected
+    included_deployment {
+      deploy_id
+      block_number
+    }
+  }
+  pending_deploys_aggregate {
+    aggregate {
+      count
+    }
+  }
+  indexer_state(where: {key: {_eq: "pending_deploys_total_available"}}) {
+    value
+  }
+}
+```
+
+> `included_deployment` is null while the deploy is still pending — it resolves to the `deployments` row (joined on `sig = deploy_id`) once the deploy is included in a block. Use `pending_deploys_aggregate` for count badges and the `indexer_state` value to detect truncation (node caps the response at 1000 entries).
 
 ### Nested Queries
 

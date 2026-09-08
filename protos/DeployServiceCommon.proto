@@ -103,6 +103,28 @@ message DeployFinalizationStatusInfo {
   optional bytes latestBlockHash     = 3;
 }
 
+message PendingDeploysQuery {
+  // Empty bytes = return all pending deploys regardless of deployer.
+  // Non-empty = return only deploys signed by this public key.
+  bytes deployerPubkey = 1;
+}
+
+message PendingDeployInfo {
+  DeployDataProto deploy = 1 [(scalapb.field).no_box = true];
+  // true  = from rejected_deploy_buffer (recovering after merge conflict)
+  // false = from deploy_storage (fresh, not yet proposed)
+  bool   isRejected = 2;
+}
+
+message PendingDeploysResponsePayload {
+  repeated PendingDeployInfo deploys = 1;
+  // Total count of pending deploys that matched the query before cap
+  // truncation was applied. Compare with `deploys.size()` to detect
+  // truncation: when `deploys.size() < totalAvailable`, more pending
+  // deploys exist than were returned.
+  uint32 totalAvailable = 2;
+}
+
 message BondStatusQuery {
   bytes publicKey = 1;
 }

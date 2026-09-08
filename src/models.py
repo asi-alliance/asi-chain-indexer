@@ -136,6 +136,42 @@ class Transfer(Base):
     )
 
 
+class PendingDeploy(Base):
+    """Ephemeral pending deploy snapshot from the node's deploy buffers.
+
+    Distinct from the deployments table (confirmed on-chain ledger): these
+    deploys are not yet included in any block, so there is no block_hash/FK.
+    The table is fully refreshed (DELETE + INSERT) every sync cycle and only
+    mirrors what the node currently holds in deploy_storage plus the
+    rejected-recovery buffer.
+    """
+
+    __tablename__ = "pending_deploys"
+
+    sig = Column(String(160), primary_key=True)  # hex deploy signature, matches deployments.deploy_id
+    deployer = Column(String(200), nullable=False, index=True)  # hex public key
+    deployer_address = Column(String(150), nullable=False, index=True)
+    term = Column(Text, nullable=False)
+    timestamp = Column(BigInteger, nullable=False, index=True)
+    phlo_price = Column(BigInteger, default=1)
+    phlo_limit = Column(BigInteger, default=1000000)
+    valid_after_block_number = Column(BigInteger)
+    shard_id = Column(String(20))
+    sig_algorithm = Column(String(20), default="secp256k1")
+    language = Column(String(20))  # rholang or metta
+    # 0 in proto = no expiration, stored as NULL
+    expiration_timestamp = Column(BigInteger)
+    # true = from rejected_deploy_buffer (recovering after merge conflict)
+    is_rejected = Column(Boolean, default=False, index=True)
+    fetched_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("idx_pending_deploys_deployer", "deployer"),
+        Index("idx_pending_deploys_timestamp", "timestamp"),
+        Index("idx_pending_deploys_is_rejected", "is_rejected"),
+    )
+
+
 class Validator(Base):
     """Validator model for network validators."""
 

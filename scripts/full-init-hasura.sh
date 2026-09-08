@@ -113,6 +113,7 @@ TABLES=(
   "blocks"
   "block_parents"
   "deployments"
+  "pending_deploys"
   "transfers"
   "validators"
   "validator_bonds"
@@ -214,6 +215,9 @@ declare -A OBJECT_RELATIONS=(
 
   ["block_parents.child_block"]="blocks:block_hash:block_hash"
   ["block_parents.parent_block"]="blocks:parent_hash:block_hash"
+
+  ["pending_deploys.deployer_validator"]="validators:deployer:public_key"
+  ["pending_deploys.included_deployment"]="deployments:sig:deploy_id"
 )
 
 log "Creating object relationships..."
@@ -288,6 +292,7 @@ AGGREGATE_ENABLED_TABLES=(
   "deployments"
   "transfers"
   "transaction_history_view"
+  "pending_deploys"
 )
 
 is_aggregate_enabled() {

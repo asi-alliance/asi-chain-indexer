@@ -343,6 +343,84 @@ query SearchDeployments($searchTerm: String!) {
 }
 ```
 
+## Pending Deploy Queries
+
+The `pending_deploys` table mirrors the node's deploy buffers — deploys signed and accepted but not yet included in any block. It is fully refreshed by the indexer every sync cycle (default 5s).
+
+### Get Pending Deploys with Count
+
+```graphql
+query GetPendingDeploys {
+    pending_deploys(
+        order_by: {timestamp: desc}
+        limit: 50
+    ) {
+        sig
+        deployer
+        deployer_address
+        term
+        timestamp
+        phlo_price
+        phlo_limit
+        valid_after_block_number
+        is_rejected
+        # Resolves once the deploy is included in a block (null while pending):
+        included_deployment {
+            deploy_id
+            block_number
+        }
+    }
+    pending_deploys_aggregate {
+        aggregate {
+            count
+        }
+    }
+    # Pre-cap total from the node (response is capped at 1000 entries):
+    indexer_state(where: {key: {_eq: "pending_deploys_total_available"}}) {
+        value
+    }
+}
+```
+
+### Get Pending Deploys for a Deployer
+
+```graphql
+query GetDeployerPendingDeploys($deployer: String!) {
+    pending_deploys(
+        where: {deployer: {_eq: $deployer}}
+        order_by: {timestamp: desc}
+    ) {
+        sig
+        term
+        timestamp
+        is_rejected
+        expiration_timestamp
+    }
+}
+```
+
+### Watch Pending Deploys (Live Polling)
+
+```graphql
+query WatchPendingDeploys {
+    pending_deploys(order_by: {timestamp: desc}, limit: 20) {
+        sig
+        deployer_address
+        timestamp
+        is_rejected
+    }
+    pending_deploys_aggregate {
+        aggregate {
+            count
+        }
+    }
+}
+```
+
+> Poll this query every few seconds: rows disappear when deploys get included
+> in a block (they then appear in `deployments` with the same `sig` as
+> `deploy_id`) or expire/rejected on the node.
+
 ## Real-time Subscriptions
 
 ### Subscribe to New Blocks

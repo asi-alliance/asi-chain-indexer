@@ -14,7 +14,7 @@ from src.addr import convert_to_asi_address, public_key_to_asi_address
 from src.config import settings
 from src.database import db
 from src.models import (
-    Block, BlockParent, Deployment, Transfer, Validator, ValidatorBond,
+    Block, BlockParent, Deployment, PendingDeploy, Transfer, Validator, ValidatorBond,
     EpochTransition, NetworkStats, BalanceState
 )
 from src.grpc_node_client import GrpcNodeClient
@@ -111,6 +111,7 @@ class RustBlockIndexer:
         while self.running:
             try:
                 await self._sync_blocks()
+                await self._sync_pending_deploys()
                 await self._update_validator_states()
                 await self._check_epoch_transitions()
                 await self._update_network_stats()
@@ -224,6 +225,84 @@ class RustBlockIndexer:
 
         except Exception as e:
             logger.error(f"Sync blocks error: {e}", exc_info=True)
+
+    async def _sync_pending_deploys(self):
+        """Refresh the pending_deploys snapshot from the node's deploy buffers.
+
+        The node's getPendingDeploys returns the current buffer contents
+        (deploy_storage + rejected-recovery buffer), so the table is fully
+        refreshed (DELETE + INSERT) each cycle to stay consistent. Deploys
+        that get included in a block disappear here and show up in the
+        deployments table with the same sig/deploy_id.
+        """
+        if not settings.enable_pending_deploys_sync:
+            return
+
+        try:
+            data = await self.client.get_pending_deploys()
+            if data is None:
+                # Node unreachable or RPC unavailable (e.g. old node version);
+                # keep the last snapshot rather than wiping it.
+                return
+
+            deploys = data.get("deploys", [])
+            total_available = data.get("totalAvailable", len(deploys))
+
+            async with db.session() as session:
+                await session.execute(text("DELETE FROM pending_deploys"))
+
+                for d in deploys:
+                    sig = d.get("sig", "")
+                    if not sig:
+                        logger.warning("Skipping pending deploy without sig", deployer=d.get("deployer", "")[:20])
+                        continue
+
+                    deployer = d.get("deployer", "")
+                    session.add(PendingDeploy(
+                        sig=sig,
+                        deployer=deployer,
+                        deployer_address=convert_to_asi_address(deployer, d),
+                        term=d.get("term", ""),
+                        timestamp=d.get("timestamp", 0),
+                        phlo_price=d.get("phloPrice", 1),
+                        phlo_limit=d.get("phloLimit", 1000000),
+                        valid_after_block_number=d.get("validAfterBlockNumber"),
+                        shard_id=d.get("shardId"),
+                        sig_algorithm=d.get("sigAlgorithm", "secp256k1"),
+                        language=d.get("language"),
+                        # proto 0 = no expiration
+                        expiration_timestamp=d.get("expirationTimestamp") or None,
+                        is_rejected=d.get("isRejected", False),
+                    ))
+
+                # Persist the pre-cap total so the explorer can detect
+                # truncation (node caps the response at 1000 entries).
+                await session.execute(
+                    text("""
+                         INSERT INTO indexer_state (key, value, updated_at)
+                         VALUES ('pending_deploys_total_available', :value, NOW())
+                         ON CONFLICT (key) DO UPDATE SET value = :value, updated_at = NOW()
+                         """),
+                    {"value": str(total_available)},
+                )
+                await session.commit()
+
+            if len(deploys) < total_available:
+                logger.warning(
+                    "Pending deploys truncated by node cap",
+                    returned=len(deploys),
+                    total_available=total_available,
+                )
+
+            logger.info(
+                "Refreshed pending deploys",
+                count=len(deploys),
+                total_available=total_available,
+                rejected=sum(1 for d in deploys if d.get("isRejected")),
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to sync pending deploys: {e}", exc_info=True)
 
     async def _process_block(self, block_data: Dict):
         """Process a single block with full details."""

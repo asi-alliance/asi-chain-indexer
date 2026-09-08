@@ -128,6 +128,47 @@ class GrpcNodeClient:
             logger.error(f"Failed to get block details for {block_hash}: {e}")
             return None
 
+    async def get_pending_deploys(self, deployer_pubkey: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Fetch the node's pending deploy snapshot via the getPendingDeploys RPC.
+
+        Returns {"deploys": [...], "totalAvailable": N}. Each deploy dict holds
+        the DeployDataProto fields plus an "isRejected" provenance flag; the raw
+        bytes fields (deployer, sig) are hex-encoded to match the deployments
+        table, where sig/deploy_id are hex strings.
+        """
+        try:
+            deployer_bytes = (
+                bytes.fromhex(deployer_pubkey.lower().removeprefix("0x"))
+                if deployer_pubkey else b""
+            )
+        except ValueError:
+            logger.error(f"Invalid deployer pubkey (not hex): {deployer_pubkey[:20]}...")
+            return None
+
+        try:
+            query = common.PendingDeploysQuery(deployerPubkey=deployer_bytes)
+            response = await self.stub.getPendingDeploys(query, timeout=self.timeout)
+            payload = _unwrap(response, "payload")
+
+            deploys = []
+            for info in payload.deploys:
+                d = _to_dict(info.deploy)
+                # DeployDataProto.deployer/sig are raw bytes, which _to_dict
+                # base64-encodes; re-encode as hex for consistency with the
+                # deployments table (DeployInfo.sig is a hex string there).
+                d["deployer"] = bytes(info.deploy.deployer).hex()
+                d["sig"] = bytes(info.deploy.sig).hex()
+                deploys.append({**d, "isRejected": info.isRejected})
+
+            return {
+                "deploys": deploys,
+                "totalAvailable": payload.totalAvailable,
+            }
+
+        except grpc.RpcError as e:
+            logger.error(f"Failed to get pending deploys: {e}")
+            return None
+
     async def get_deploy_info(self, deploy_id: str) -> Optional[Dict[str, Any]]:
         try:
             query = common.FindDeployQuery(deployId=bytes.fromhex(deploy_id))  # raises ValueError on a non-hex id
