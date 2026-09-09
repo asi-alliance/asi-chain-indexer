@@ -23,7 +23,7 @@ The indexer service is the core backend component responsible for blockchain dat
    - Handles block synchronization, deployment processing, and validator tracking
    - Implements continuous sync loop with configurable interval
    - Processes blocks in batches for optimal performance
-   - Methods: `start()`, `stop()`, `_sync_blocks()`, `_process_block()`, `_process_deployment_enhanced()`, `_extract_transfers()`, `_process_validators()`, `_update_validator_states()`, `_check_epoch_transitions()`, `_update_network_stats()`, `_verify_main_chain()`
+   - Methods: `start()`, `stop()`, `_sync_blocks()`, `_sync_pending_deploys()`, `_process_block()`, `_process_deployment_enhanced()`, `_extract_transfers()`, `_process_validators()`, `_update_validator_states()`, `_check_epoch_transitions()`, `_update_network_stats()`, `_verify_main_chain()`
 
 2. **RustCLIClient** (`rust_cli_client.py`)
    - Wrapper around Rust CLI executable for blockchain operations
@@ -39,7 +39,7 @@ The indexer service is the core backend component responsible for blockchain dat
    - Includes methods for state tracking: `get_last_indexed_block()`, `set_last_indexed_block()`
 
 4. **Models** (`models.py`)
-   - SQLAlchemy ORM models: Block, Deployment, Transfer, Validator, ValidatorBond, BalanceState, EpochTransition, NetworkStats, IndexerState, BlockValidator
+   - SQLAlchemy ORM models: Block, Deployment, PendingDeploy, Transfer, Validator, ValidatorBond, BalanceState, EpochTransition, NetworkStats, IndexerState, BlockValidator
    - Includes relationships between entities
    - Defines indices for query optimization
    - Contains computed properties for derived values
@@ -145,6 +145,25 @@ Key fields:
 - `seq_num` (INTEGER): Sequence number
 - `shard_id` (VARCHAR(20)): Shard identifier
 
+**pending_deploys**
+
+Ephemeral snapshot of the node's deploy buffers — deploys not yet included in any block. Fully refreshed (DELETE + INSERT) every sync cycle; intentionally no `block_hash`/FK (see Key Design Decisions).
+
+Key fields:
+- `sig` (VARCHAR(160), PK): Hex deploy signature — matches `deployments.deploy_id` once the deploy is included in a block
+- `deployer` (VARCHAR(200)): Hex public key of the deployer
+- `deployer_address` (VARCHAR(150)): ASI address derived from the deployer public key
+- `term` (TEXT): Rholang source code
+- `timestamp` (BIGINT): Deploy creation time (epoch ms)
+- `phlo_price` / `phlo_limit` (BIGINT): Gas pricing parameters
+- `valid_after_block_number` (BIGINT): Deploy is not valid before this height
+- `shard_id` (VARCHAR(20)): Shard identifier
+- `sig_algorithm` (VARCHAR(20)): Signature algorithm
+- `language` (VARCHAR(20)): Source language (`rholang` / `metta`)
+- `expiration_timestamp` (BIGINT, NULL = no expiration)
+- `is_rejected` (BOOLEAN): `false` = fresh in deploy_storage; `true` = recovering in rejected-recovery buffer after a merge conflict
+- `fetched_at` (TIMESTAMP): When this snapshot row was written
+
 **transfers**
 
 Extracted ASI token transfers from deployments.
@@ -231,7 +250,7 @@ Key fields:
 - `value` (TEXT): State value
 - `updated_at` (TIMESTAMP): Last update time
 
-Common keys: `last_indexed_block`, `indexer_version`, `schema_version`
+Common keys: `last_indexed_block`, `indexer_version`, `schema_version`, `pending_deploys_total_available` (pre-cap pending deploy count, upserted every sync cycle)
 
 #### Normalization and Relationships
 
@@ -261,6 +280,8 @@ validators (1) ←→ (N) validator_bonds
    - Hash fields with varchar_pattern_ops for prefix searches
    - Status and type fields for filtering
    - Address fields for transfer lookups
+
+6. **Separate Pending Deploys Table**: Deploys waiting in the node's buffers are kept in a dedicated `pending_deploys` table instead of reusing `deployments` with a `status='pending'` value. Pending deploys are ephemeral (they vanish from the node buffer once proposed, rejected, or expired), have no containing block, and would require a nullable FK + upsert race handling if merged into the confirmed-ledger table. The tables interlock via `pending_deploys.sig = deployments.deploy_id`.
 
 #### Transaction Guarantees
 
@@ -488,8 +509,9 @@ Health check includes:
    - Extract and store transfers
    - Update validator information
 6. Update last_indexed_block in database
-7. Sleep for SYNC_INTERVAL seconds
-8. Repeat
+7. Refresh the `pending_deploys` snapshot: call `getPendingDeploys`, then DELETE + INSERT the table contents in one transaction and upsert `pending_deploys_total_available` into `indexer_state` (node failure keeps the last snapshot)
+8. Sleep for SYNC_INTERVAL seconds
+9. Repeat
 
 #### Additional Background Tasks
 

@@ -10,22 +10,9 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     # Node Configuration
-    # Client for interacting with node HTTP API.
-    # Maybe deprecated param
-    node_url: str = Field(
-        default="http://localhost:40453",
-        description="RChain node HTTP API endpoint"
-    )
-
     node_timeout: int = Field(
         default=30,
-        description="HTTP request timeout in seconds"
-    )
-
-    # Rust CLI Configuration
-    rust_cli_path: Optional[str] = Field(
-        default=None,
-        description="Path to Rust CLI executable (node_cli)"
+        description="HTTP/gRPC request timeout in seconds"
     )
 
     http_port: int = Field(
@@ -41,6 +28,13 @@ class Settings(BaseSettings):
     node_host: str = Field(
         default="localhost",
         description="host port for status queries"
+    )
+
+    fault_tolerance_threshold: float = Field(
+        default=0.67,
+        description="BFT safety threshold for consensus status, mirrors the node's own "
+                     "casper.fault-tolerance-threshold (defaults.conf); not exposed via any API, "
+                     "so it must be kept in sync with the shard's actual config by hand"
     )
 
     # Database Configuration
@@ -99,6 +93,10 @@ class Settings(BaseSettings):
     enable_asi_transfer_extraction: bool = Field(
         default=True,
         description="Enable ASI transfer extraction from deployments"
+    )
+    enable_pending_deploys_sync: bool = Field(
+        default=True,
+        description="Enable pending deploys polling from the node's getPendingDeploys RPC"
     )
     enable_metrics: bool = Field(
         default=True,

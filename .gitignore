@@ -1,3 +1,6 @@
+# generated from protos/
+src/grpc_stubs/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -32,6 +35,8 @@ debug_*.py
 test_*.py
 *_test.py
 deploy_test.*
+!tests/
+!tests/test_*.py
 
 # Logs
 *.log

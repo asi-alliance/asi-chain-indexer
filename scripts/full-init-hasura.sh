@@ -111,7 +111,9 @@ ok "Hasura is ready."
 # ============================================================
 TABLES=(
   "blocks"
+  "block_parents"
   "deployments"
+  "pending_deploys"
   "transfers"
   "validators"
   "validator_bonds"
@@ -125,10 +127,15 @@ TABLES=(
 VIEWS=(
   "network_metrics_view"
   "network_stats_view"
+  "block_ancestors_view"
+  "block_descendants_view"
+  "transaction_history_view"
 )
 
 FUNCTIONS=(
   "get_network_metrics"
+  "get_block_ancestors"
+  "get_block_descendants"
 )
 
 log "Sanity-checking tables exist in Postgres (information_schema)..."
@@ -191,11 +198,11 @@ ok "Functions tracked (or already tracked)."
 #  - Since you want "full init" and likely run once, we keep fail-fast.
 # ============================================================
 declare -A OBJECT_RELATIONS=(
-  ["deployments.block"]="blocks:block_number:block_number"
-  ["transfers.block"]="blocks:block_number:block_number"
+  ["deployments.block"]="blocks:block_hash:block_hash"
+  ["transfers.block"]="blocks:block_hash:block_hash"
   ["transfers.deployment"]="deployments:deploy_id:deploy_id"
 
-  ["validator_bonds.block"]="blocks:block_number:block_number"
+  ["validator_bonds.block"]="blocks:block_hash:block_hash"
   ["validator_bonds.validator"]="validators:validator_public_key:public_key"
 
   ["block_validators.block"]="blocks:block_hash:block_hash"
@@ -203,8 +210,14 @@ declare -A OBJECT_RELATIONS=(
 
   ["transfers.sender_validator"]="validators:from_public_key:public_key"
 
-  ["balance_states.block"]="blocks:block_number:block_number"
+  ["balance_states.block"]="blocks:block_hash:block_hash"
   ["network_stats.block"]="blocks:block_number:block_number"
+
+  ["block_parents.child_block"]="blocks:block_hash:block_hash"
+  ["block_parents.parent_block"]="blocks:parent_hash:block_hash"
+
+  ["pending_deploys.deployer_validator"]="validators:deployer:public_key"
+  ["pending_deploys.included_deployment"]="deployments:sig:deploy_id"
 )
 
 log "Creating object relationships..."
@@ -229,10 +242,10 @@ done
 ok "Object relationships created."
 
 declare -A ARRAY_RELATIONS=(
-  ["blocks.deployments"]="deployments:block_number:block_number"
-  ["blocks.transfers"]="transfers:block_number:block_number"
-  ["blocks.validator_bonds"]="validator_bonds:block_number:block_number"
-  ["blocks.balance_states"]="balance_states:block_number:block_number"
+  ["blocks.deployments"]="deployments:block_hash:block_hash"
+  ["blocks.transfers"]="transfers:block_hash:block_hash"
+  ["blocks.validator_bonds"]="validator_bonds:block_hash:block_hash"
+  ["blocks.balance_states"]="balance_states:block_hash:block_hash"
   ["blocks.block_validators"]="block_validators:block_hash:block_hash"
   ["blocks.network_stats"]="network_stats:block_number:block_number"
 
@@ -241,6 +254,9 @@ declare -A ARRAY_RELATIONS=(
   ["validators.validator_bonds"]="validator_bonds:public_key:validator_public_key"
   ["validators.block_validators"]="block_validators:public_key:validator_public_key"
   ["validators.transfers_sent"]="transfers:public_key:from_public_key"
+
+  ["blocks.parent_links"]="block_parents:block_hash:block_hash"
+  ["blocks.child_links"]="block_parents:block_hash:parent_hash"
 )
 
 log "Creating array relationships..."
@@ -269,7 +285,55 @@ ok "Array relationships created."
 # ============================================================
 log "Granting public SELECT permissions..."
 ALL_TABLES_AND_VIEWS=( "${TABLES[@]}" "${VIEWS[@]}" )
-for table in "${ALL_TABLES_AND_VIEWS[@]}"; do
+# Tables that must expose aggregate queries (e.g. <table>_aggregate { aggregate { count } })
+# to the public role. Required by the explorer frontend (TransactionTrackerImproved)
+# for the /transactions page counters. Other tables keep allow_aggregations=false.
+AGGREGATE_ENABLED_TABLES=(
+  "deployments"
+  "transfers"
+  "transaction_history_view"
+  "pending_deploys"
+)
+
+is_aggregate_enabled() {
+  local needle="$1"
+  for t in "${AGGREGATE_ENABLED_TABLES[@]}"; do
+    [ "$t" = "$needle" ] && return 0
+  done
+  return 1
+}
+
+# Issue a select permission for the public role with the given allow_aggregations flag.
+# Drops any existing permission first so the script is idempotent and can flip the flag.
+grant_public_select() {
+  local table="$1"
+  local allow_agg="$2"
+
+  # Drop existing permission, if any. We swallow errors here because on a fresh
+  # install there is nothing to drop yet ("not found" / "does not exist").
+  local drop_resp
+  drop_resp=$(curl -sS -X POST "$HASURA_ENDPOINT" \
+    -H "Content-Type: application/json" \
+    -H "x-hasura-admin-secret: $admin_secret" \
+    -d "{
+      \"type\": \"pg_drop_select_permission\",
+      \"args\": {
+        \"source\": \"default\",
+        \"table\": {\"schema\": \"public\", \"name\": \"$table\"},
+        \"role\": \"public\"
+      }
+    }") || true
+  # Only abort if the error is something other than "does not exist" / "not found".
+  if echo "$drop_resp" | grep -qE '"error"|"errors"'; then
+    if ! echo "$drop_resp" | grep -qiE 'does not exist|not found|no such'; then
+      echo "----- METADATA CALL FAILED -----" >&2
+      echo "Drop permission for $table failed:" >&2
+      echo "$drop_resp" >&2
+      echo "--------------------------------" >&2
+      exit 1
+    fi
+  fi
+
   hasura_metadata "{
     \"type\": \"pg_create_select_permission\",
     \"args\": {
@@ -280,11 +344,20 @@ for table in "${ALL_TABLES_AND_VIEWS[@]}"; do
         \"columns\": \"*\",
         \"filter\": {},
         \"limit\": 5000,
-        \"allow_aggregations\": false
+        \"allow_aggregations\": $allow_agg
       }
     }
   }" >/dev/null
+}
+
+for table in "${ALL_TABLES_AND_VIEWS[@]}"; do
+  if is_aggregate_enabled "$table"; then
+    grant_public_select "$table" "true"
+  else
+    grant_public_select "$table" "false"
+  fi
 done
+
 ok "Public SELECT permissions granted."
 
 log "Granting public EXECUTE permissions on SQL functions..."
@@ -355,14 +428,34 @@ if echo "$public_select" | grep -q '"errors"'; then
 fi
 ok "PUBLIC select OK."
 
-log "PUBLIC aggregate test (should FAIL because allow_aggregations=false)..."
+log "PUBLIC aggregate test on blocks (should FAIL: allow_aggregations=false)..."
 public_agg="$(graphql_public '{"query":"{ blocks_aggregate { aggregate { count } } }"}')"
 if echo "$public_agg" | grep -q '"errors"'; then
-  ok "PUBLIC aggregate correctly rejected."
+  ok "PUBLIC aggregate on blocks correctly rejected."
 else
   echo "Response:"
   echo "$public_agg"
-  die "PUBLIC aggregate unexpectedly succeeded (allow_aggregations=false expected)."
+  die "PUBLIC aggregate on blocks unexpectedly succeeded (allow_aggregations=false expected)."
+fi
+
+log "PUBLIC aggregate test on deployments + transfers (should SUCCEED: allow_aggregations=true)..."
+public_tx_agg="$(graphql_public '{"query":"{ deployments_aggregate { aggregate { count } } transfers_aggregate { aggregate { count } } }"}')"
+if echo "$public_tx_agg" | grep -q '"errors"'; then
+  echo "Response:"
+  echo "$public_tx_agg"
+  die "PUBLIC aggregate on deployments/transfers failed (allow_aggregations=true expected). Check AGGREGATE_ENABLED_TABLES in this script."
+else
+  ok "PUBLIC aggregate on deployments + transfers OK."
+fi
+
+log "PUBLIC aggregate test on transaction_history_view (should SUCCEED)..."
+public_hist_agg="$(graphql_public '{"query":"{ transaction_history_view_aggregate { aggregate { count } } }"}')"
+if echo "$public_hist_agg" | grep -q '"errors"'; then
+  echo "Response:"
+  echo "$public_hist_agg"
+  die "PUBLIC aggregate on transaction_history_view failed (allow_aggregations=true expected)."
+else
+  ok "PUBLIC aggregate on transaction_history_view OK."
 fi
 
 echo

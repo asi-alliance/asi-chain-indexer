@@ -144,23 +144,44 @@ echo "✅ PUBLIC SELECT passed."
 command -v jq >/dev/null 2>&1 && echo "$select_resp" | jq . || echo "$select_resp"
 
 # ------------------------------------------------------------
-# PUBLIC aggregate should FAIL (because allow_aggregations=false)
+# PUBLIC aggregate tests
+#   * blocks_aggregate       -> should FAIL (allow_aggregations=false)
+#   * deployments_aggregate  -> should SUCCEED (allow_aggregations=true, used by explorer frontend)
+#   * transfers_aggregate    -> should SUCCEED (allow_aggregations=true, used by explorer frontend)
 # ------------------------------------------------------------
-PUBLIC_AGG_QUERY='{"query":"{ blocks_aggregate { aggregate { count } } }"}'
+PUBLIC_AGG_BLOCKS_QUERY='{"query":"{ blocks_aggregate { aggregate { count } } }"}'
 
-echo "▶ PUBLIC AGGREGATE test (should FAIL, allow_aggregations=false)..."
+echo "▶ PUBLIC AGGREGATE test on blocks (should FAIL, allow_aggregations=false)..."
 agg_resp=$(curl -s -X POST "$HASURA_URL" \
   -H "Content-Type: application/json" \
-  -d "$PUBLIC_AGG_QUERY")
+  -d "$PUBLIC_AGG_BLOCKS_QUERY")
 
 # We EXPECT errors here. If no errors -> fail the deploy check.
 if echo "$agg_resp" | grep -q '"errors"'; then
-  echo "✅ PUBLIC AGGREGATE correctly rejected."
+  echo "✅ PUBLIC AGGREGATE on blocks correctly rejected."
   command -v jq >/dev/null 2>&1 && echo "$agg_resp" | jq . || echo "$agg_resp"
 else
-  echo "❌ PUBLIC AGGREGATE unexpectedly succeeded (expected errors). Response:"
+  echo "❌ PUBLIC AGGREGATE on blocks unexpectedly succeeded (expected errors). Response:"
   echo "$agg_resp"
   exit 1
+fi
+
+PUBLIC_AGG_TX_QUERY='{"query":"{ deployments_aggregate { aggregate { count } } transfers_aggregate { aggregate { count } } }"}'
+
+echo "▶ PUBLIC AGGREGATE test on deployments + transfers (should SUCCEED, allow_aggregations=true)..."
+tx_agg_resp=$(curl -s -X POST "$HASURA_URL" \
+  -H "Content-Type: application/json" \
+  -d "$PUBLIC_AGG_TX_QUERY")
+
+# We EXPECT success here (these two tables have allow_aggregations=true so the
+# explorer's /transactions counters work).
+if echo "$tx_agg_resp" | grep -q '"errors"'; then
+  echo "❌ PUBLIC AGGREGATE on deployments/transfers failed (expected success). Response:"
+  echo "$tx_agg_resp"
+  exit 1
+else
+  echo "✅ PUBLIC AGGREGATE on deployments + transfers passed."
+  command -v jq >/dev/null 2>&1 && echo "$tx_agg_resp" | jq . || echo "$tx_agg_resp"
 fi
 
 echo "--- Done! ---"
