@@ -259,7 +259,7 @@ create TABLE IF NOT EXISTS indexer_state
 
 -- Insert initial state
 insert into indexer_state (key, value)
-values ('last_indexed_block', '0'),
+values ('last_indexed_block', '-1'),
        ('indexer_version', '1.0.0'),
        ('schema_version', '000')
 ON CONFLICT (key) DO NOTHING;

@@ -18,6 +18,7 @@ from src.models import (
     EpochTransition, NetworkStats, BalanceState
 )
 from src.grpc_node_client import GrpcNodeClient
+from src.sync_progress import BlockBatchProgress
 
 logger = structlog.get_logger(__name__)
 
@@ -150,7 +151,7 @@ class RustBlockIndexer:
                 return
 
             latest_block_number = last_finalized_data.get("blockNumber")
-            if not latest_block_number:
+            if latest_block_number is None:
                 logger.warning("No block number in finalized block data")
                 return
 
@@ -158,21 +159,19 @@ class RustBlockIndexer:
                 logger.debug("Already up to date", last_indexed=last_indexed, latest=latest_block_number)
                 return
 
-            # Calculate batch range - can handle larger batches with CLI
-            # Check if we need to start from genesis
+            # Check whether the database is fresh. A fresh database starts at
+            # the configured height; otherwise continue from the last height
+            # whose complete sibling set was indexed.
             async with db.session() as session:
-                # Check if ANY blocks exist
                 block_count = await session.scalar(
                     text("SELECT COUNT(*) FROM blocks")
                 )
 
-            if block_count == 0 and settings.start_from_block == 0:
-                # No blocks indexed yet, start from genesis
-                start = 0
+            if block_count == 0:
+                start = settings.start_from_block
             else:
-                # Continue from last indexed
-                start = last_indexed + 1
-            batch_size = settings.batch_size  # Use configured batch size
+                start = max(settings.start_from_block, last_indexed + 1)
+            batch_size = settings.batch_size
             end = min(start + batch_size - 1, latest_block_number)
 
             logger.info(
@@ -183,7 +182,6 @@ class RustBlockIndexer:
                 latest_block=latest_block_number
             )
 
-            # Fetch blocks using CLI
             block_summaries = await self.client.get_blocks_by_height(start, end)
 
             if not block_summaries:
@@ -192,19 +190,25 @@ class RustBlockIndexer:
 
             logger.info(f"Retrieved {len(block_summaries)} blocks, fetching details...")
 
-            # Process each block
+            # Only advance through heights for which every returned sibling
+            # succeeded. A failed sibling is retried on the next sync cycle.
+            progress = BlockBatchProgress(start, end)
             processed_count = 0
             for block_summary in block_summaries:
+                block_number = block_summary.get("blockNumber")
+                progress.mark_seen(block_number)
                 try:
                     # Get full block details
                     block_hash = block_summary.get("blockHash")
                     if not block_hash:
                         logger.warning("Block summary missing hash", block=block_summary)
+                        progress.mark_failed(block_number)
                         continue
 
                     full_block = await self.client.get_block_details(block_hash)
                     if not full_block:
                         logger.warning(f"Could not get details for block {block_hash}")
+                        progress.mark_failed(block_number)
                         continue
 
                     await self._process_block(full_block)
@@ -214,14 +218,26 @@ class RustBlockIndexer:
                     await asyncio.sleep(settings.delay_before_node)
 
                 except Exception as e:
+                    progress.mark_failed(block_number)
                     logger.error(f"Failed to process block", error=str(e), block=block_summary)
 
+            completed_height = progress.last_completed_height
+            if completed_height >= start:
+                await db.set_last_indexed_block(completed_height)
+
+            if completed_height < end:
+                logger.warning(
+                    "Batch incomplete; failed or missing height will be retried",
+                    first_uncompleted_height=completed_height + 1,
+                    failed_heights=sorted(progress.failed_heights),
+                    has_unmapped_failure=progress.has_unmapped_failure,
+                )
+
             if processed_count > 0:
-                new_last_indexed = await db.get_last_indexed_block()
                 logger.info("✅ Sync cycle complete",
-                            last_indexed_block=new_last_indexed,
+                            last_indexed_block=completed_height,
                             blocks_processed=processed_count,
-                            remaining_blocks=latest_block_number - new_last_indexed)
+                            remaining_blocks=latest_block_number - completed_height)
 
         except Exception as e:
             logger.error(f"Sync blocks error: {e}", exc_info=True)
@@ -313,8 +329,7 @@ class RustBlockIndexer:
         block_number = block_info.get("blockNumber")
 
         if not block_hash or block_number is None:
-            logger.error("Block missing required fields", block_data=block_data)
-            return
+            raise ValueError("Block missing required blockHash or blockNumber")
 
         # Check if already processed
         async with db.session() as session:

@@ -87,11 +87,26 @@ class Database:
             return await conn.fetch(query, *args)
     
     async def get_last_indexed_block(self) -> int:
-        """Get the last indexed block number."""
-        query = "SELECT MAX(block_number) as block_number FROM blocks"
+        """Get the last block height whose complete sibling set was indexed."""
+        query = """
+            SELECT value::bigint AS block_number
+            FROM indexer_state
+            WHERE key = 'last_indexed_block'
+        """
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow(query)
-            return row["block_number"] if row and row["block_number"] is not None else 0
+            return row["block_number"] if row else -1
+
+    async def set_last_indexed_block(self, block_number: int) -> None:
+        """Record the last height whose complete sibling set was indexed."""
+        query = """
+            INSERT INTO indexer_state (key, value, updated_at)
+            VALUES ('last_indexed_block', $1, NOW())
+            ON CONFLICT (key) DO UPDATE
+            SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at
+        """
+        async with self.pool.acquire() as conn:
+            await conn.execute(query, str(block_number))
 
 
 # Global database instance
