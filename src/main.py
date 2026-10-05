@@ -2,15 +2,18 @@
 
 import asyncio
 import signal
+import sys
 from typing import Optional
 
 import click
 import structlog
 from dotenv import load_dotenv
 
+from src.alerts import AlertedError, AlertEvent, AlertKind, AlertService, describe_error
 from src.config import settings
 from src.monitoring import MonitoringServer
-from src.rust_indexer import RustBlockIndexer
+from src.block_indexer import BlockIndexer
+from src.database import AlertThrottleStore, db
 
 # Load environment variables
 load_dotenv()
@@ -49,9 +52,11 @@ class IndexerService:
     """Main service orchestrator."""
 
     def __init__(self):
-        self.indexer: Optional[RustBlockIndexer] = None
+        self.indexer: Optional[BlockIndexer] = None
         self.monitoring: Optional[MonitoringServer] = None
+        self.alerts: Optional[AlertService] = None
         self.shutdown_event = asyncio.Event()
+        self._indexer_died = False
 
     async def start(self):
         """Start all services."""
@@ -66,8 +71,7 @@ class IndexerService:
                 db_url_masked = db_url_masked.replace(creds, f"{user}:***")
 
         logger.info(
-            "🚀 Starting ASI-Chain Enhanced Indexer (Rust CLI)",
-            rust_cli_path=settings.rust_cli_path,
+            "🚀 Starting ASI-Chain Enhanced Indexer",
             node_host=settings.node_host,
             grpc_port=settings.grpc_port,
             http_port=settings.http_port,
@@ -83,8 +87,11 @@ class IndexerService:
             console="http://localhost:8080/console"
         )
 
-        # Create enhanced rust indexer
-        self.indexer = RustBlockIndexer()
+        # the throttle state is kept in the database, so a restart loop does not
+        # re-alert on every start
+        self.alerts = AlertService(settings, store=AlertThrottleStore())
+
+        self.indexer = BlockIndexer(alerts=self.alerts)
 
         # Create monitoring server
         if settings.enable_health_check or settings.enable_metrics:
@@ -93,9 +100,12 @@ class IndexerService:
 
         # Start indexer
         indexer_task = asyncio.create_task(self.indexer.start())
+        indexer_task.add_done_callback(self._on_indexer_task_done)
 
         # Wait for shutdown signal
         await self.shutdown_event.wait()
+
+        await self._alert_if_indexer_died(indexer_task)
 
         # Stop services
         await self.stop()
@@ -106,6 +116,52 @@ class IndexerService:
             await indexer_task
         except asyncio.CancelledError:
             pass
+        except Exception:
+            pass  # already reported by _alert_if_indexer_died
+
+        if self._indexer_died:
+            # non-zero exit, so the container's restart policy treats it as a crash;
+            # AlertedError keeps main() from sending INDEXER_STOPPED a second time
+            error = self._task_error(indexer_task)
+            raise AlertedError(
+                describe_error(error) if error else "sync loop exited"
+            ) from error
+
+    def _on_indexer_task_done(self, task: asyncio.Task):
+        """Notice a sync loop that ended on its own.
+
+        Nothing else observes this task, so without it a crashed loop leaves the
+        process up and the health endpoint still reporting healthy.
+        """
+        if self.shutdown_event.is_set():
+            return
+
+        self._indexer_died = True
+        self.shutdown_event.set()
+
+    async def _alert_if_indexer_died(self, task: asyncio.Task):
+        """Report an unrequested exit, then let the process go so the container's
+        restart policy can bring it back."""
+        if not self._indexer_died:
+            return
+
+        error = self._task_error(task)
+        logger.error("Indexer stopped unexpectedly", error=str(error) if error else None)
+        if isinstance(error, AlertedError):
+            return  # the cause has been alerted on already
+
+        await self.alerts.notify_and_wait(
+            AlertEvent(
+                AlertKind.INDEXER_STOPPED,
+                describe_error(error) if error else "sync loop exited"
+            )
+        )
+
+    @staticmethod
+    def _task_error(task: asyncio.Task) -> Optional[BaseException]:
+        if not task.done() or task.cancelled():
+            return None
+        return task.exception()
 
     async def stop(self):
         """Stop all services."""
@@ -158,8 +214,16 @@ def main(reset: bool, start_from: Optional[int]):
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
         sys.exit(0)
+    except AlertedError as e:
+        logger.error(f"Fatal error: {e}")
+        sys.exit(1)
     except Exception as e:
         logger.error(f"Fatal error: {e}")
+        asyncio.run(
+            AlertService(settings, store=AlertThrottleStore()).notify_and_wait(
+                AlertEvent(AlertKind.INDEXER_STOPPED, describe_error(e))
+            )
+        )
         sys.exit(1)
 
 

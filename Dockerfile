@@ -1,21 +1,5 @@
 # ==============================
-# Stage 1: Fetch Rust CLI binary from GitHub Releases
-# ==============================
-FROM debian:bookworm-slim AS rust-cli
-
-ARG RUST_CLIENT_VERSION=v0.1
-
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
-  && rm -rf /var/lib/apt/lists/*
-
-RUN mkdir -p /out \
-  && curl -fsSL -o /out/snetrc \
-    "https://github.com/singnet/rust-client/releases/download/${RUST_CLIENT_VERSION}/snetrc-linux-amd64-${RUST_CLIENT_VERSION}" \
-  && chmod +x /out/snetrc
-
-
-# ==============================
-# Stage 2: Build Python dependencies
+# Stage 1: Build Python dependencies
 # ==============================
 FROM python:3.11-slim AS python-builder
 
@@ -28,6 +12,19 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
+
+# regenerates the gRPC client from protos/; installed without --user so it never reaches runtime
+RUN pip install --no-cache-dir grpcio-tools==1.83.0
+COPY protos/ /protos/
+RUN mkdir -p /stubs/scalapb && python -m grpc_tools.protoc \
+    -I /protos \
+    --python_out=/stubs --grpc_python_out=/stubs \
+    /protos/DeployServiceV1.proto \
+    /protos/DeployServiceCommon.proto \
+    /protos/CasperMessage.proto \
+    /protos/RhoTypes.proto \
+    /protos/ServiceError.proto \
+    /protos/scalapb/scalapb.proto
 
 
 # ==============================
@@ -46,11 +43,8 @@ WORKDIR /app
 
 COPY --from=python-builder /root/.local /home/indexer/.local
 
-# Copy Rust CLI binary
-COPY --from=rust-cli /out/snetrc /usr/local/bin/snetrc
-RUN chmod +x /usr/local/bin/snetrc
-
 COPY . .
+COPY --from=python-builder /stubs/. src/grpc_stubs/
 
 RUN chown -R indexer:indexer /app /home/indexer/.local
 
@@ -58,7 +52,6 @@ USER indexer
 
 ENV PYTHONPATH=/app
 ENV PATH="/home/indexer/.local/bin:${PATH}"
-ENV RUST_CLI_PATH=/usr/local/bin/snetrc
 ENV PYTHONUNBUFFERED=1
 
 EXPOSE 9090

@@ -7,7 +7,7 @@ env:
   ECR_REPOSITORY_INDEXER: asi-chain-indexer-dev
   AWS_REGION: us-east-1
   EC2_INSTANCE_ID: ${{ secrets.AWS_INSTANCE_ID_INTERNALDEV }}
-  APP_PATH: /home/ubuntu/indexer 
+  APP_PATH: /home/ubuntu/indexer
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
@@ -24,7 +24,7 @@ jobs:
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
       with:
-        role-to-assume: arn:aws:iam::533793137436:role/asi-chain-indexer-internaldev-github-actions-ecr-push-role 
+        role-to-assume: arn:aws:iam::533793137436:role/asi-chain-indexer-internaldev-github-actions-ecr-push-role
         aws-region: ${{ env.AWS_REGION }}
 
     - name: Deploy on EC2 and Get Logs

@@ -1,4 +1,4 @@
-.PHONY: help install dev-install test lint format run docker-build docker-up docker-down clean
+.PHONY: help install dev-install test lint format run docker-build docker-up docker-down clean protos
 
 # Default target
 .DEFAULT_GOAL := help
@@ -29,6 +29,17 @@ lint: ## Run linters
 
 format: ## Format code with black
 	black src/ tests/
+
+protos: ## Regenerate the gRPC client from protos/ (needs: pip install grpcio-tools)
+	$(PYTHON) -m grpc_tools.protoc \
+		-I protos \
+		--python_out=src/grpc_stubs --grpc_python_out=src/grpc_stubs \
+		protos/DeployServiceV1.proto \
+		protos/DeployServiceCommon.proto \
+		protos/CasperMessage.proto \
+		protos/RhoTypes.proto \
+		protos/ServiceError.proto \
+		protos/scalapb/scalapb.proto
 
 run: ## Run the indexer locally
 	$(PYTHON) -m src.main

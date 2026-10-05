@@ -9,9 +9,9 @@ This guide documents the successful deployment of the ASI-Chain Indexer and Expl
 ## 🏗️ **Architecture**
 
 ```
-Remote ASI Network (13.251.66.61:40453)
+Remote ASI Network (13.251.66.61:40452 gRPC / 40453 HTTP)
               ↓
-     Rust CLI Client (inside Docker)
+      gRPC node client (DeployServiceV1)
               ↓
     Python Indexer with asyncio (localhost:9090)
               ↓
@@ -30,9 +30,9 @@ Remote ASI Network (13.251.66.61:40453)
 4. **✅ Explorer Frontend** - `localhost:3000` (deployed separately)
 
 ### **Working Features:**
-- ✅ Rust CLI built from source inside Docker (cross-platform)
+- ✅ gRPC stubs generated from `protos/` at Docker build time (no external binary)
 - ✅ Full blockchain sync from genesis (block 0)
-- ✅ Validator bond detection with new CLI format support
+- ✅ Validator bond detection
 - ✅ Enhanced data quality with NULL handling
 - ✅ Health monitoring endpoints
 - ✅ GraphQL API with nested relationships
@@ -155,10 +155,9 @@ npm start  # Runs on port 3000 or 3001
 ## 🔧 **Configuration**
 
 ### Environment Variables:
-- `NODE_URL` - ASI testnet HTTP endpoint
-- `RUST_CLI_PATH` - Path to node CLI binary  
 - `NODE_HOST` - Testnet hostname
-- `GRPC_PORT`/`HTTP_PORT` - Testnet connection ports
+- `GRPC_PORT`/`HTTP_PORT` - Testnet connection ports (gRPC + HTTP)
+- `NODE_TIMEOUT` - HTTP/gRPC request timeout in seconds
 - `DATABASE_URL` - PostgreSQL connection string
 - `SYNC_INTERVAL` - Block sync frequency (seconds)
 - `BATCH_SIZE` - Blocks per batch
@@ -238,7 +237,6 @@ docker ps | grep asi-
 - **GraphQL Response Time**: <100ms for simple queries
 - **Database Performance**: 50,000+ reads/second
 - **Indexer Sync Rate**: 50 blocks per batch, 5 second intervals
-- **CLI Command Latency**: 10-50ms per command
 - **Memory Usage**: ~80MB (indexer) + ~50MB (database)
 - **Full Chain Sync**: 100 blocks in ~2 seconds
 - **Frontend Load Time**: <3 seconds initial load

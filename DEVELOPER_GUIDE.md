@@ -62,17 +62,16 @@ npm run build
 ```
 indexer/src/
 ├── main.py              # Application entry point and IndexerService orchestrator
-├── rust_indexer.py      # RustBlockIndexer - primary indexer implementation
-├── rust_cli_client.py   # RustCLIClient - Rust CLI wrapper for blockchain operations
+├── block_indexer.py     # BlockIndexer - primary indexer implementation
+├── grpc_node_client.py  # GrpcNodeClient - node DeployServiceV1 gRPC + HTTP client
 ├── database.py          # Database - connection and session management
 ├── models.py            # SQLAlchemy ORM models (Block, Deployment, Transfer, etc.)
 ├── config.py            # Settings - Pydantic configuration model
 ├── monitoring.py        # MonitoringServer - Prometheus metrics and health checks
-├── reorg_handler.py     # ReorgHandler - chain reorganization handling
+├── alerts.py            # AlertService - Mattermost alerts for critical failures
+├── sync_progress.py     # BlockBatchProgress - per-batch sync cursor tracking
+├── addr.py              # ASI address conversion helpers
 ├── resilience.py        # Error recovery mechanisms
-├── rchain_client.py     # Legacy RChain client
-├── indexer.py           # Legacy indexer implementation
-├── event_system.py      # Event processing system
 └── cache.py             # Caching utilities
 ```
 
@@ -182,6 +181,11 @@ query GetEntityCounts {
       count
     }
   }
+  pending_deploys_aggregate {
+    aggregate {
+      count
+    }
+  }
 }
 ```
 
@@ -241,6 +245,22 @@ query GetFailedDeployments {
     deployer
     error_message
     block_number
+  }
+}
+```
+
+Pending deploys (node buffers, refreshed every sync cycle):
+
+```graphql
+query GetPendingDeploys {
+  pending_deploys(
+    order_by: { timestamp: desc }
+    limit: 20
+  ) {
+    sig
+    deployer_address
+    timestamp
+    is_rejected
   }
 }
 ```

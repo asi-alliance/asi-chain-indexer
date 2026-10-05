@@ -1,29 +1,70 @@
-"""Enhanced indexer using Rust CLI for comprehensive blockchain synchronization."""
+"""Enhanced indexer using the node gRPC/HTTP API for comprehensive blockchain synchronization."""
 
 import asyncio
 import re
+import statistics
 from datetime import datetime
 from decimal import Decimal
 from typing import Dict, List, Optional
 
+import aiohttp
+import asyncpg
+import grpc
 import structlog
-from sqlalchemy import select, text, and_
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import InterfaceError, OperationalError
 
 from src.addr import convert_to_asi_address, public_key_to_asi_address
+from src.alerts import AlertedError, AlertEvent, AlertKind, AlertService, describe_error
 from src.config import settings
 from src.database import db
 from src.models import (
-    Block, Deployment, Transfer, Validator, ValidatorBond,
+    Block, BlockParent, Deployment, PendingDeploy, Transfer, Validator, ValidatorBond,
     EpochTransition, NetworkStats, BalanceState
 )
-from src.rust_cli_client import RustCLIClient
+from src.grpc_node_client import GrpcNodeClient
+from src.sync_progress import BlockBatchProgress
 
 logger = structlog.get_logger(__name__)
 
 
-class RustBlockIndexer:
-    """Enhanced indexer using Rust CLI for full blockchain data extraction."""
+def classify_failure(error: Exception) -> Optional[AlertKind]:
+    """Map a sync-cycle exception onto the alert kind that names it.
+
+    Returns None when the failure is not a recognisable dependency outage, leaving
+    it to the consecutive-failure counter.
+    """
+    if isinstance(error, (grpc.RpcError, aiohttp.ClientError)):
+        return AlertKind.NODE_UNREACHABLE
+    # asyncpg.PostgresError already covers PostgresConnectionError and
+    # ConnectionDoesNotExistError
+    if isinstance(error, (asyncpg.PostgresError, asyncpg.InterfaceError,
+                          OperationalError, InterfaceError)):
+        return AlertKind.DATABASE_UNREACHABLE
+    # Failing to reach Postgres at all (refused, DNS, connect timeout, or "Multiple
+    # exceptions" when every address fails) surfaces as a plain OSError that neither
+    # asyncpg nor SQLAlchemy wraps. Only those raised inside the driver count: a bare
+    # OSError could be anything, and asyncio.TimeoutError is one too.
+    if isinstance(error, OSError) and _raised_in_database_driver(error):
+        return AlertKind.DATABASE_UNREACHABLE
+    return None
+
+
+def _raised_in_database_driver(error: BaseException) -> bool:
+    tb = error.__traceback__
+    while tb is not None:
+        if tb.tb_frame.f_globals.get("__name__", "").startswith("asyncpg"):
+            return True
+        tb = tb.tb_next
+    return False
+
+
+class BlockIndexer:
+    """Enhanced indexer using the node gRPC/HTTP API for full blockchain data extraction."""
+
+    # Indexed blocks between main-chain (reorg) verifications
+    MAIN_CHAIN_CHECK_INTERVAL = 500
 
     # Pattern for extracting ASI transfers from Rholang terms
     TRANSFER_PATTERNS = [
@@ -67,18 +108,28 @@ class RustBlockIndexer:
         else:
             return 'smart_contract'
 
-    def __init__(self):
+    def __init__(self, alerts: Optional[AlertService] = None):
         self.client = None
         self.running = False
         self.last_epoch_check_block = 0
         self.last_consensus_check_block = 0
+        # None until the first verification, so a restart verifies straight away
+        self._last_verified_block: Optional[int] = None
         self._genesis_data_cache = None  # Cache genesis data to avoid multiple extractions
+        self.alerts = alerts if alerts is not None else AlertService.disabled()
+        self._consecutive_failures = 0
+        self._cycle_error: Optional[Exception] = None
+        self._cycle_kind: Optional[AlertKind] = None
+        self._node_unavailable_cycles = 0
+        self._lag_history: List[int] = []
+        self._stuck_height: Optional[int] = None
+        self._stuck_cycles = 0
 
     async def start(self):
         """Start the enhanced indexer."""
         self.running = True
-        print("🚀 Starting enhanced Rust CLI blockchain indexer", flush=True)
-        logger.info("🚀 Starting enhanced Rust CLI blockchain indexer")
+        print("🚀 Starting enhanced blockchain indexer", flush=True)
+        logger.info("🚀 Starting enhanced blockchain indexer")
 
         # Initialize database
         logger.info("📊 Connecting to database...")
@@ -86,10 +137,10 @@ class RustBlockIndexer:
         await db.create_tables()
         logger.info("✅ Database connected and tables ready")
 
-        # Initialize Rust CLI client
-        logger.info("🔧 Initializing Rust CLI client...")
+        # Initialize gRPC node client
+        logger.info("🔧 Initializing gRPC node client...")
         try:
-            self.client = RustCLIClient()
+            self.client = GrpcNodeClient()
         except Exception as e:
             logger.error(str(e), exc_info=True)
 
@@ -97,7 +148,12 @@ class RustBlockIndexer:
         logger.info("🔍 Checking ASI-Chain node health...")
         if not await self.client.health_check():
             logger.error("❌ Node is not healthy - cannot connect to ASI-Chain node")
-            raise RuntimeError("Cannot connect to node via Rust CLI")
+            # awaited, not fire-and-forget: the process exits right after this raises
+            await self.alerts.notify_and_wait(
+                AlertEvent(AlertKind.NODE_UNREACHABLE, "health check failed at startup")
+                .with_context("node", f"{settings.node_host}:{settings.grpc_port}")
+            )
+            raise AlertedError("Cannot connect to node")
 
         logger.info("✅ ASI-Chain node connection established")
 
@@ -109,8 +165,11 @@ class RustBlockIndexer:
         logger.info("🔄 Starting continuous sync loop...")
         sync_cycles = 0
         while self.running:
+            self._cycle_error = None
+            self._cycle_kind = None
             try:
                 await self._sync_blocks()
+                await self._sync_pending_deploys()
                 await self._update_validator_states()
                 await self._check_epoch_transitions()
                 await self._update_network_stats()
@@ -127,8 +186,133 @@ class RustBlockIndexer:
 
             except Exception as e:
                 logger.error("❌ Sync cycle failed", error=str(e), exc_info=True)
+                self._record_cycle_failure(e)
+
+            self._close_cycle()
 
             await asyncio.sleep(settings.sync_interval)
+
+    def _record_cycle_failure(self, error: Exception):
+        """Note a failed step of the current sync cycle.
+
+        Called from each step's own `except` rather than from the sync loop: every
+        step swallows its exceptions, so nothing reaches the loop's handler.
+        """
+        kind = classify_failure(error)
+        if kind is None and self._cycle_kind is not None:
+            return
+        self._cycle_error = error
+        self._cycle_kind = kind
+
+    def _close_cycle(self):
+        """Count the cycle against the stall threshold and alert once it is reached.
+
+        A single failed cycle, even a dependency error, is often a blip that the
+        next cycle recovers from, so every kind waits for the same run of
+        consecutive failures. The alert is named after the outage behind the
+        latest cycle when there is one, and is a plain stall otherwise.
+
+        Runs outside the loop's `try`, so it must never raise: an escaped exception
+        here would kill the sync task.
+        """
+        try:
+            if self._cycle_error is None:
+                self._consecutive_failures = 0
+                return
+
+            self._consecutive_failures += 1
+            if self._consecutive_failures < settings.sync_stall_threshold:
+                return
+
+            kind = self._cycle_kind or AlertKind.SYNC_STALLED
+            event = AlertEvent(kind, describe_error(self._cycle_error))
+            if kind is AlertKind.NODE_UNREACHABLE:
+                event.with_context("node", f"{settings.node_host}:{settings.grpc_port}")
+            self.alerts.notify(
+                event.with_context("consecutive_failures", self._consecutive_failures)
+            )
+        except Exception as e:
+            logger.error("Failed to close sync cycle", error=str(e), exc_info=True)
+
+    def _track_node_availability(self, available: bool, error: str = ""):
+        """Alert when the node keeps coming back empty at runtime.
+
+        The node client swallows RPC errors and returns None / [] instead, so an
+        outage after startup never reaches `classify_failure`. Counting empty
+        results over consecutive cycles is what surfaces it.
+        """
+        if available:
+            self._node_unavailable_cycles = 0
+            return
+
+        self._node_unavailable_cycles += 1
+        if self._node_unavailable_cycles < settings.node_unreachable_cycles:
+            return
+
+        self.alerts.notify(
+            AlertEvent(AlertKind.NODE_UNREACHABLE, error)
+            .with_context("node", f"{settings.node_host}:{settings.grpc_port}")
+            .with_context("cycles", self._node_unavailable_cycles)
+        )
+
+    def _track_cursor(self, completed_height: int, end: int, failures: int,
+                      error: Optional[str]):
+        """Alert when the sync cursor stops advancing.
+
+        A failed block is not lost — the cursor halts below it and the batch is
+        retried next cycle. So a single failure is normal and self-healing; the
+        thing worth waking someone for is the same block failing over and over,
+        which pins the cursor and stops indexing entirely.
+        """
+        if not failures and completed_height >= end:
+            self._stuck_height = None
+            self._stuck_cycles = 0
+            return
+
+        if completed_height == self._stuck_height:
+            self._stuck_cycles += 1
+        else:
+            self._stuck_height = completed_height
+            self._stuck_cycles = 1
+
+        if self._stuck_cycles < settings.cursor_stuck_cycles:
+            return
+
+        self.alerts.notify(
+            AlertEvent(AlertKind.BLOCKS_STUCK, error or "block processing failed")
+            .with_context("stuck_after_block", completed_height)
+            .with_context("cycles", self._stuck_cycles)
+        )
+
+    def _track_lag(self, lag: int):
+        """Alert when lag is deep and has stopped shrinking.
+
+        Depth alone is not enough: a genesis backfill sits legitimately far behind
+        while still catching up every cycle.
+
+        Recovery is judged on the medians of the window's two halves rather than
+        its endpoints, so neither a single spike nor a one-block drift decides it.
+        """
+        self._lag_history.append(lag)
+        if len(self._lag_history) > settings.lag_alert_cycles:
+            self._lag_history.pop(0)
+
+        if len(self._lag_history) < settings.lag_alert_cycles:
+            return
+        if min(self._lag_history) <= settings.lag_alert_blocks:
+            return
+
+        half = len(self._lag_history) // 2
+        older = statistics.median(self._lag_history[:half])
+        recent = statistics.median(self._lag_history[half:])
+        if recent <= older * settings.lag_recovery_ratio:
+            return
+
+        self.alerts.notify(
+            AlertEvent(AlertKind.SYNC_FALLING_BEHIND, "lag is not recovering")
+            .with_context("lag_blocks", lag)
+            .with_context("cycles", settings.lag_alert_cycles)
+        )
 
     async def stop(self):
         """Stop the indexer."""
@@ -137,7 +321,7 @@ class RustBlockIndexer:
         await db.disconnect()
 
     async def _sync_blocks(self):
-        """Sync blocks using Rust CLI get-blocks-by-height command."""
+        """Sync blocks using the node's getBlocksByHeights RPC."""
         try:
             # Get last indexed block
             last_indexed = await db.get_last_indexed_block()
@@ -146,86 +330,200 @@ class RustBlockIndexer:
             last_finalized_data = await self.client.get_last_finalized_block()
             if not last_finalized_data:
                 logger.warning("Could not get last finalized block")
+                self._track_node_availability(False, "could not get last finalized block")
                 return
 
             latest_block_number = last_finalized_data.get("blockNumber")
-            if not latest_block_number:
+            if latest_block_number is None:
                 logger.warning("No block number in finalized block data")
+                self._track_node_availability(False, "could not get latest block number")
                 return
+
+            self._track_lag(max(0, latest_block_number - last_indexed))
 
             if last_indexed >= latest_block_number:
                 logger.debug("Already up to date", last_indexed=last_indexed, latest=latest_block_number)
+                self._track_node_availability(True)
                 return
 
-            # Calculate batch range - can handle larger batches with CLI
-            # Check if we need to start from genesis
+            # Check whether the database is fresh. A fresh database starts at
+            # the configured height; otherwise continue from the last height
+            # whose complete sibling set was indexed.
             async with db.session() as session:
-                # Check if ANY blocks exist
                 block_count = await session.scalar(
                     text("SELECT COUNT(*) FROM blocks")
                 )
 
-            if block_count == 0 and settings.start_from_block == 0:
-                # No blocks indexed yet, start from genesis
-                start = 0
+            if block_count == 0:
+                start = settings.start_from_block
             else:
-                # Continue from last indexed
-                start = last_indexed + 1
-            batch_size = settings.batch_size  # Use configured batch size
+                start = max(settings.start_from_block, last_indexed + 1)
+            batch_size = settings.batch_size
             end = min(start + batch_size - 1, latest_block_number)
 
             logger.info(
-                "🔄 Syncing blocks via Rust CLI",
+                "🔄 Syncing blocks",
                 start_block=start,
                 end_block=end,
                 blocks_behind=latest_block_number - last_indexed,
                 latest_block=latest_block_number
             )
 
-            # Fetch blocks using CLI
             block_summaries = await self.client.get_blocks_by_height(start, end)
 
             if not block_summaries:
                 logger.warning("No blocks returned for range", start=start, end=end)
+                # an empty range (start_from_block above the finalized tip) is not an outage
+                self._track_node_availability(
+                    end < start, f"no blocks returned for heights {start}-{end}"
+                )
                 return
+
+            self._track_node_availability(True)
 
             logger.info(f"Retrieved {len(block_summaries)} blocks, fetching details...")
 
-            # Process each block
+            # Only advance through heights for which every returned sibling
+            # succeeded. A failed sibling is retried on the next sync cycle.
+            progress = BlockBatchProgress(start, end)
             processed_count = 0
+            skipped = []
+            last_skip_error = None
             for block_summary in block_summaries:
+                block_number = block_summary.get("blockNumber")
+                progress.mark_seen(block_number)
                 try:
                     # Get full block details
                     block_hash = block_summary.get("blockHash")
                     if not block_hash:
                         logger.warning("Block summary missing hash", block=block_summary)
+                        progress.mark_failed(block_number)
+                        skipped.append(block_number)
+                        last_skip_error = "block summary missing hash"
                         continue
 
                     full_block = await self.client.get_block_details(block_hash)
                     if not full_block:
                         logger.warning(f"Could not get details for block {block_hash}")
+                        progress.mark_failed(block_number)
+                        skipped.append(block_number)
+                        last_skip_error = "could not get block details"
                         continue
 
                     await self._process_block(full_block)
                     processed_count += 1
 
                     # Small delay to avoid overwhelming the node
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(settings.delay_before_node)
 
                 except Exception as e:
+                    progress.mark_failed(block_number)
                     logger.error(f"Failed to process block", error=str(e), block=block_summary)
+                    skipped.append(block_number)
+                    last_skip_error = describe_error(e)
 
-            # Update last indexed block
+            completed_height = progress.last_completed_height
+            if completed_height >= start:
+                await db.set_last_indexed_block(completed_height)
+
+            self._track_cursor(completed_height, end, len(skipped), last_skip_error)
+
+            if completed_height < end:
+                logger.warning(
+                    "Batch incomplete; failed or missing height will be retried",
+                    first_uncompleted_height=completed_height + 1,
+                    failed_heights=sorted(progress.failed_heights),
+                    has_unmapped_failure=progress.has_unmapped_failure,
+                )
+
             if processed_count > 0:
-                last_block_num = start + processed_count - 1
-                await db.set_last_indexed_block(last_block_num)
                 logger.info("✅ Sync cycle complete",
-                            last_indexed_block=last_block_num,
+                            last_indexed_block=completed_height,
                             blocks_processed=processed_count,
-                            remaining_blocks=latest_block_number - last_block_num)
+                            remaining_blocks=latest_block_number - completed_height)
 
         except Exception as e:
             logger.error(f"Sync blocks error: {e}", exc_info=True)
+            self._record_cycle_failure(e)
+
+    async def _sync_pending_deploys(self):
+        """Refresh the pending_deploys snapshot from the node's deploy buffers.
+
+        The node's getPendingDeploys returns the current buffer contents
+        (deploy_storage + rejected-recovery buffer), so the table is fully
+        refreshed (DELETE + INSERT) each cycle to stay consistent. Deploys
+        that get included in a block disappear here and show up in the
+        deployments table with the same sig/deploy_id.
+        """
+        if not settings.enable_pending_deploys_sync:
+            return
+
+        try:
+            data = await self.client.get_pending_deploys()
+            if data is None:
+                # Node unreachable or RPC unavailable (e.g. old node version);
+                # keep the last snapshot rather than wiping it.
+                return
+
+            deploys = data.get("deploys", [])
+            total_available = data.get("totalAvailable", len(deploys))
+
+            async with db.session() as session:
+                await session.execute(text("DELETE FROM pending_deploys"))
+
+                for d in deploys:
+                    sig = d.get("sig", "")
+                    if not sig:
+                        logger.warning("Skipping pending deploy without sig", deployer=d.get("deployer", "")[:20])
+                        continue
+
+                    deployer = d.get("deployer", "")
+                    session.add(PendingDeploy(
+                        sig=sig,
+                        deployer=deployer,
+                        deployer_address=convert_to_asi_address(deployer, d),
+                        term=d.get("term", ""),
+                        timestamp=d.get("timestamp", 0),
+                        phlo_price=d.get("phloPrice", 1),
+                        phlo_limit=d.get("phloLimit", 1000000),
+                        valid_after_block_number=d.get("validAfterBlockNumber"),
+                        shard_id=d.get("shardId"),
+                        sig_algorithm=d.get("sigAlgorithm", "secp256k1"),
+                        language=d.get("language"),
+                        # proto 0 = no expiration
+                        expiration_timestamp=d.get("expirationTimestamp") or None,
+                        is_rejected=d.get("isRejected", False),
+                    ))
+
+                # Persist the pre-cap total so the explorer can detect
+                # truncation (node caps the response at 1000 entries).
+                await session.execute(
+                    text("""
+                         INSERT INTO indexer_state (key, value, updated_at)
+                         VALUES ('pending_deploys_total_available', :value, NOW())
+                         ON CONFLICT (key) DO UPDATE SET value = :value, updated_at = NOW()
+                         """),
+                    {"value": str(total_available)},
+                )
+                await session.commit()
+
+            if len(deploys) < total_available:
+                logger.warning(
+                    "Pending deploys truncated by node cap",
+                    returned=len(deploys),
+                    total_available=total_available,
+                )
+
+            logger.info(
+                "Refreshed pending deploys",
+                count=len(deploys),
+                total_available=total_available,
+                rejected=sum(1 for d in deploys if d.get("isRejected")),
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to sync pending deploys: {e}", exc_info=True)
+            self._record_cycle_failure(e)
 
     async def _process_block(self, block_data: Dict):
         """Process a single block with full details."""
@@ -236,8 +534,7 @@ class RustBlockIndexer:
         block_number = block_info.get("blockNumber")
 
         if not block_hash or block_number is None:
-            logger.error("Block missing required fields", block_data=block_data)
-            return
+            raise ValueError("Block missing required blockHash or blockNumber")
 
         # Check if already processed
         async with db.session() as session:
@@ -251,21 +548,19 @@ class RustBlockIndexer:
         # Process block in transaction
         async with db.session() as session:
             # Extract block data
-            parent_hash = block_info.get("parentsHashList", [""])[0] if block_info.get("parentsHashList") else ""
+            parent_hashes = block_info.get("parentsHashList") or []
             state_root_hash = block_info.get("postStateHash", "")
             bonds_map = block_info.get("bonds", [])
             justifications = block_info.get("justifications", [])
 
-            # Insert block
-            block = Block(
+            block_insert = insert(Block).values(
                 block_number=block_number,
                 block_hash=block_hash,
-                parent_hash=parent_hash,
                 timestamp=block_info.get("timestamp", 0),
                 proposer=block_info.get("sender", ""),
                 state_hash=state_root_hash,
                 state_root_hash=state_root_hash,
-                finalization_status="finalized",
+                finalization_status="finalized" if block_info.get("isFinalized") else "unfinalized",
                 bonds_map=bonds_map,
                 seq_num=block_info.get("seqNum"),
                 sig=block_info.get("sig"),
@@ -273,12 +568,21 @@ class RustBlockIndexer:
                 shard_id=block_info.get("shardId"),
                 extra_bytes=block_info.get("extraBytes"),
                 version=block_info.get("version"),
-                deployment_count=len(deployments),
                 fault_tolerance=block_info.get("faultTolerance", 0.0),
                 pre_state_hash=block_info.get("preStateHash"),
-                justifications=justifications  # Store full justifications
-            )
-            session.add(block)
+                justifications=justifications
+            ).on_conflict_do_nothing(index_elements=["block_hash"])
+            await session.execute(block_insert)
+
+            if parent_hashes:
+                parent_rows = [
+                    {"block_hash": block_hash, "parent_hash": p, "parent_index": idx}
+                    for idx, p in enumerate(parent_hashes)
+                ]
+                parents_insert = insert(BlockParent).values(parent_rows).on_conflict_do_nothing(
+                    index_elements=["block_hash", "parent_hash"]
+                )
+                await session.execute(parents_insert)
 
             # Process validators from bonds
             await self._process_validators(session, block_info)
@@ -332,35 +636,10 @@ class RustBlockIndexer:
             )
 
     async def _process_deployment_enhanced(self, session, block_data: Dict, deploy_data: Dict):
-        """Process deployment with enhanced data from get-deploy command (idempotent, no migrations)."""
+        """Process a deployment; deploy_data already has everything from the block response."""
         deploy_id = deploy_data.get("sig")
         if not deploy_id:
             return
-
-        # Try to fetch enhanced deployment info
-        enhanced_info = None
-        try:
-            enhanced_info = await self.client.get_deploy_info(deploy_id)
-            await asyncio.sleep(0.05)  # small delay to avoid overwhelming the node
-        except Exception as e:
-            logger.debug(f"Could not get enhanced deploy info for {deploy_id}: {e}")
-
-        # Merge enhanced info if available
-        if enhanced_info and isinstance(enhanced_info, dict):
-            deploy_info = enhanced_info.get("deployInfo", {})
-            if deploy_info:
-                # Update deploy_data with enhanced info
-                deploy_data.update({
-                    "blockHash": deploy_info.get("blockHash", deploy_data.get("blockHash")),
-                    "sender": deploy_info.get("sender", deploy_data.get("deployer")),
-                    "seqNum": deploy_info.get("seqNum"),
-                    "sig": deploy_info.get("sig", deploy_data.get("sig")),
-                    "sigAlgorithm": deploy_info.get("sigAlgorithm", deploy_data.get("sigAlgorithm")),
-                    "shardId": deploy_info.get("shardId"),
-                    "version": deploy_info.get("version"),
-                    "timestamp": deploy_info.get("timestamp", deploy_data.get("timestamp")),
-                    "status": enhanced_info.get("status", "included")
-                })
 
         # Classify deployment and normalize error flags
         term = deploy_data.get("term", "")
@@ -380,6 +659,9 @@ class RustBlockIndexer:
             block_hash=block_data.get("blockHash"),
             block_number=block_data.get("blockNumber"),
             deployer=deploy_data.get("deployer", deploy_data.get("sender", "")),
+            deployer_address=convert_to_asi_address(
+                deploy_data.get("deployer", deploy_data.get("sender", "")), deploy_data
+            ),
             term=term,
             timestamp=deploy_data.get("timestamp", block_data.get("timestamp")),
             sig=deploy_data.get("sig"),
@@ -410,6 +692,7 @@ class RustBlockIndexer:
                 "seq_num": dep_insert.excluded.seq_num,
                 "shard_id": dep_insert.excluded.shard_id,
                 "deployer": dep_insert.excluded.deployer,
+                "deployer_address": dep_insert.excluded.deployer_address,
                 "term": dep_insert.excluded.term,
                 "phlo_price": dep_insert.excluded.phlo_price,
                 "phlo_limit": dep_insert.excluded.phlo_limit,
@@ -451,6 +734,7 @@ class RustBlockIndexer:
                 # ORM insert is fine here (PK is auto-generated 'id')
                 session.add(Transfer(
                     deploy_id=t.deploy_id,
+                    block_hash=block_data.get("blockHash"),
                     block_number=t.block_number,
                     from_address=t.from_address,
                     from_public_key=t.from_public_key,
@@ -473,7 +757,7 @@ class RustBlockIndexer:
                 )
 
     async def _update_validator_states(self):
-        """Update validator states using bonds and active-validators commands."""
+        """Update validator states from the node's bonds (gRPC) and active validators (HTTP)."""
         try:
             # Get current bonds
             bonds_data = await self.client.get_bonds()
@@ -527,6 +811,7 @@ class RustBlockIndexer:
 
         except Exception as e:
             logger.error(f"Failed to update validator states: {e}")
+            self._record_cycle_failure(e)
 
     async def _check_epoch_transitions(self):
         """Check and record epoch transitions."""
@@ -534,7 +819,7 @@ class RustBlockIndexer:
             # Get current block
             current_block = await db.get_last_indexed_block()
 
-            # Only check every 100 blocks to avoid too many CLI calls
+            # Only check every 100 blocks to avoid too many node requests
             if current_block - self.last_epoch_check_block < 100:
                 return
 
@@ -592,9 +877,10 @@ class RustBlockIndexer:
 
         except Exception as e:
             logger.error(f"Failed to check epoch transitions: {e}")
+            self._record_cycle_failure(e)
 
     async def _update_network_stats(self):
-        """Update network statistics using network-consensus command."""
+        """Update network statistics from the node's consensus data (finalized block, bonds, active validators)."""
         try:
             # Only update every 50 blocks
             current_block = await db.get_last_indexed_block()
@@ -630,52 +916,78 @@ class RustBlockIndexer:
 
         except Exception as e:
             logger.error(f"Failed to update network stats: {e}")
+            self._record_cycle_failure(e)
 
     async def _verify_main_chain(self):
-        """Periodically verify main chain integrity."""
-        try:
-            # Only verify every 500 blocks
-            current_block = await db.get_last_indexed_block()
-            if current_block % 500 != 0:
-                return
+        """Periodically verify main chain integrity.
 
-            # Get recent main chain blocks
+        The node's main chain runs past what is indexed (unfinalized tip, sync lag),
+        so only heights at or below the cursor are compared. A height can hold
+        several DAG siblings: a reorg is a stored height whose canonical hash is not
+        among the hashes stored there. A height with no rows is not indexed yet.
+        """
+        try:
+            # A distance, not a multiple: the cursor advances in BATCH_SIZE steps
+            # and can jump over any given multiple
+            current_block = await db.get_last_indexed_block()
+            if (self._last_verified_block is not None
+                    and current_block - self._last_verified_block
+                    < self.MAIN_CHAIN_CHECK_INTERVAL):
+                return
 
             main_chain = await self.client.show_main_chain(depth=20)
             if not main_chain:
                 return
 
-            # Verify we have these blocks and they match
+            canonical = []
+            for block_info in main_chain:
+                block_num = block_info.get("blockNumber")
+                block_hash = block_info.get("blockHash")
+                if block_num is not None and block_hash and block_num <= current_block:
+                    canonical.append((block_num, block_hash))
+            if not canonical:
+                logger.debug("Main chain verification skipped, nothing indexed in range")
+                return
+
             async with db.session() as session:
-                for block_info in main_chain:
-                    block_num = block_info.get("blockNumber")
-                    block_hash = block_info.get("blockHash")
-
-                    if block_num is None or not block_hash:
-                        continue
-
-                    # Check if we have this block with matching hash
-                    stored_block = await session.scalar(
-                        select(Block).where(
-                            and_(
-                                Block.block_number == block_num,
-                                Block.block_hash == block_hash
-                            )
-                        ).limit(1)
+                rows = await session.execute(
+                    select(Block.block_number, Block.block_hash).where(
+                        Block.block_number.in_({block_num for block_num, _ in canonical})
                     )
+                )
+                stored: Dict[int, set] = {}
+                for block_num, block_hash in rows:
+                    stored.setdefault(block_num, set()).add(block_hash)
 
-                    if not stored_block:
-                        logger.warning(
-                            "Main chain mismatch detected",
-                            block_number=block_num,
-                            expected_hash=block_hash
-                        )
-                        # Could trigger a re-sync here if needed
+            mismatches = sorted(
+                (block_num, block_hash) for block_num, block_hash in canonical
+                if block_num in stored and block_hash not in stored[block_num]
+            )
 
-            logger.info("Main chain verification complete", blocks_checked=len(main_chain))
+            if mismatches:
+                logger.warning(
+                    "Main chain mismatch detected",
+                    heights=[block_num for block_num, _ in mismatches],
+                    expected_hashes=[block_hash for _, block_hash in mismatches],
+                )
+                shown = [block_hash for _, block_hash in mismatches[:3]]
+                if len(mismatches) > len(shown):
+                    shown.append(f"+{len(mismatches) - len(shown)} more")
+                self.alerts.notify(
+                    AlertEvent(
+                        AlertKind.CHAIN_REORG_DETECTED,
+                        "stored blocks do not include the canonical hash at their height"
+                    )
+                    .with_context("heights", ", ".join(str(n) for n, _ in mismatches))
+                    .with_context("expected_hashes", ", ".join(shown))
+                )
+
+            self._last_verified_block = current_block
+            logger.info("Main chain verification complete", blocks_checked=len(canonical))
 
         except Exception as e:
             logger.error(f"Failed to verify main chain: {e}")
+            self._record_cycle_failure(e)
 
     async def _process_validators(self, session, block_data: Dict):
         """Process validator bonds for a block."""
@@ -1012,63 +1324,18 @@ class RustBlockIndexer:
                 except Exception as e:
                     logger.warning(f"Could not get bonds from genesis block: {e}")
 
-            # Step 2: If no bonds in genesis block, try to get from active validators
+            # Step 2: If no bonds in genesis block, ask the node directly
             if not bonds:
-                # Get initial validator bonds from read-only node
-                # Temporarily switch to read-only port
-                # original_port = self.client.http_port
-                # self.client.http_port = 40453  # TODO Read-only node port, old: 40453
-
                 try:
-                    # First try to get the first few blocks to extract full validator keys from proposers
-                    validator_full_keys = {}
-                    for block_num in range(1, min(20, 100)):  # Check first 20 blocks
-                        blocks = await self.client.get_blocks_by_height(block_num, block_num)
-                        if blocks and len(blocks) > 0:
-                            block_info = blocks[0]
-                            if 'proposer' in block_info:
-                                proposer = block_info['proposer']
-                                if proposer and len(proposer) > 100:  # Full key
-                                    # Store mapping of abbreviated to full key
-                                    abbreviated = proposer[:8] + "..." + proposer[-8:]
-                                    validator_full_keys[abbreviated] = proposer
-
-                    # Get bonds (which shows abbreviated keys with stakes)
-                    stdout, _ = await self.client._run_command([
-                        "bonds",
-                        "-H", self.client.node_host,
-                        "--http-port", str(self.client.http_port)
-                    ])
-
-                    # Restore original port
-                    # self.client.http_port = original_port
-
-                    # Parse bonds output to get stakes
-                    if stdout:
-                        lines = stdout.strip().split('\n')
-                        for line in lines:
-                            # Match lines like: 1. 04837a4c...b2df065f (stake: 50000000000000)
-                            match = re.search(r'([0-9a-fA-F]{8}\.\.\.?[0-9a-fA-F]{8})\s*\(stake:\s*(\d+)\)', line)
-                            if match:
-                                abbreviated = match.group(1)
-                                stake = int(match.group(2))
-
-                                # Find the full key from our validator_full_keys mapping
-                                full_key = validator_full_keys.get(abbreviated)
-                                if full_key:
-                                    bonds.append((full_key, stake, stake / 100000000))
-                                    logger.info(f"Found validator bond: {full_key[:20]}... -> {stake / 100000000} ASI")
-                                else:
-                                    # If we couldn't find full key, use abbreviated for now
-                                    # The full key will be discovered when processing blocks
-                                    logger.warning(
-                                        f"Could not find full key for validator: {abbreviated}, will discover from blocks")
-                                    bonds.append((abbreviated, stake, stake / 100000000))
+                    bonds_data = await self.client.get_bonds()
+                    for bond in (bonds_data or {}).get("bonds", []):
+                        validator_key = bond.get("validator")
+                        stake = bond.get("stake", 0)
+                        if validator_key and stake > 0:
+                            bonds.append((validator_key, stake, stake / 100000000))
+                            logger.info(f"Found validator bond: {validator_key[:20]}... -> {stake / 100000000} ASI")
                 except Exception as e:
                     logger.error(f"Error getting validator bonds: {e}")
-                # finally:
-                # Restore original port
-                # self.client.http_port = original_port
 
             # For a network-agnostic approach, we can try to detect initial allocations
             # by looking at the first few blocks for large transfers from genesis
@@ -1109,6 +1376,8 @@ class RustBlockIndexer:
                 block_number=0,
                 block_hash=block_info.get("blockHash"),
                 deployer="0000000000000000000000000000000000000000000000000000000000000000",
+                deployer_address=public_key_to_asi_address(
+                    "0000000000000000000000000000000000000000000000000000000000000000"),
                 term=f"Genesis ASI allocation to {address}: {amount_asi:,.0f} ASI",
                 timestamp=block_info.get("timestamp"),
                 sig=deploy_id,
@@ -1122,6 +1391,7 @@ class RustBlockIndexer:
             transfer = Transfer(
                 timestamp=block_info.get("timestamp", 0),
                 deploy_id=deploy_id,
+                block_hash=block_info.get("blockHash"),
                 block_number=0,
                 # Genesis mint
                 from_address=public_key_to_asi_address(
@@ -1147,6 +1417,7 @@ class RustBlockIndexer:
                 block_number=0,
                 block_hash=block_info.get("blockHash"),
                 deployer=validator_pubkey,
+                deployer_address=public_key_to_asi_address(validator_pubkey),
                 term=f"Genesis validator bond: {amount_asi:,.0f} ASI staked",
                 timestamp=block_info.get("timestamp"),
                 sig=deploy_id,
@@ -1160,6 +1431,7 @@ class RustBlockIndexer:
             transfer = Transfer(
                 timestamp=block_info.get("timestamp", 0),
                 deploy_id=deploy_id,
+                block_hash=block_info.get("blockHash"),
                 block_number=0,
                 from_address=public_key_to_asi_address(validator_pubkey),
                 from_public_key=validator_pubkey,
@@ -1193,6 +1465,7 @@ class RustBlockIndexer:
         for address, amount_dust, amount_asi in genesis_allocations:
             balance_state = BalanceState(
                 address=address,
+                block_hash=block_info.get("blockHash"),
                 block_number=0,
                 unbonded_balance_dust=amount_dust,
                 unbonded_balance_asi=amount_asi,
@@ -1208,6 +1481,7 @@ class RustBlockIndexer:
         for validator_pubkey, amount_dust, amount_asi in validator_bonds:
             balance_state = BalanceState(
                 address=validator_pubkey,
+                block_hash=block_info.get("blockHash"),
                 block_number=0,
                 unbonded_balance_dust=0,
                 unbonded_balance_asi=0,
@@ -1222,6 +1496,7 @@ class RustBlockIndexer:
 
         pos_balance_state = BalanceState(
             address="1111gW5kkGxHg7xDg6dRkZx2f7qxTizJzaCH9VEM1oJKWRvSX9Sk5",
+            block_hash=block_info.get("blockHash"),
             block_number=0,
             unbonded_balance_dust=0,
             unbonded_balance_asi=0,

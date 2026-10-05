@@ -18,15 +18,14 @@ class Block(Base):
 
     __tablename__ = "blocks"
 
-    block_number = Column(BigInteger, primary_key=True, index=True)
-    block_hash = Column(String(64), unique=True, nullable=False, index=True)
-    parent_hash = Column(String(64), nullable=False)
+    block_hash = Column(String(64), primary_key=True)
+    block_number = Column(BigInteger, nullable=False, index=True)
     timestamp = Column(BigInteger, nullable=False, index=True)
     proposer = Column(String(160), nullable=False, index=True)  # Increased size
     state_hash = Column(String(64))
     state_root_hash = Column(String(64))  # New field
     pre_state_hash = Column(String(64))  # New field
-    finalization_status = Column(String(20), default="finalized")  # New field
+    finalization_status = Column(String(20), nullable=False)  # New field
     bonds_map = Column(JSONB)  # New field for storing bonds as JSON
     justifications = Column(JSONB)  # New field for storing justifications
     fault_tolerance = Column(Numeric(5, 4))  # New field
@@ -44,10 +43,30 @@ class Block(Base):
                                foreign_keys="[Deployment.block_hash]")
     validator_bonds = relationship("ValidatorBond", back_populates="block", cascade="all, delete-orphan",
                                    foreign_keys="[ValidatorBond.block_hash]")
+    parents = relationship("BlockParent", back_populates="block", cascade="all, delete-orphan",
+                           foreign_keys="[BlockParent.block_hash]")
 
     __table_args__ = (
         Index("idx_blocks_timestamp", "timestamp"),
         Index("idx_blocks_proposer", "proposer"),
+    )
+
+
+class BlockParent(Base):
+    """Junction table tracking all parents of a block (DAG support)."""
+
+    __tablename__ = "block_parents"
+
+    block_hash = Column(String(64), ForeignKey("blocks.block_hash", ondelete="CASCADE"), primary_key=True)
+    parent_hash = Column(String(64), primary_key=True)
+    parent_index = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # Relationships
+    block = relationship("Block", back_populates="parents", foreign_keys=[block_hash])
+
+    __table_args__ = (
+        Index("idx_block_parents_parent_hash", "parent_hash"),
     )
 
 
@@ -58,8 +77,9 @@ class Deployment(Base):
 
     deploy_id = Column(String(160), primary_key=True)  # Increased size
     block_hash = Column(String(64), ForeignKey("blocks.block_hash"), nullable=False, index=True)
-    block_number = Column(BigInteger, ForeignKey("blocks.block_number"), nullable=False, index=True)
+    block_number = Column(BigInteger, nullable=False, index=True)
     deployer = Column(String(160), nullable=False, index=True)  # Increased size
+    deployer_address = Column(String(150), nullable=False, index=True)
     term = Column(Text, nullable=False)  # Full Rholang code
     timestamp = Column(BigInteger, nullable=False, index=True)
     sig = Column(String(160), nullable=False)  # Increased size
@@ -94,7 +114,8 @@ class Transfer(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     deploy_id = Column(String(140), ForeignKey("deployments.deploy_id"), nullable=False, index=True)
-    block_number = Column(BigInteger, ForeignKey("blocks.block_number"), nullable=False, index=True)
+    block_hash = Column(String(64), ForeignKey("blocks.block_hash"), nullable=False, index=True)
+    block_number = Column(BigInteger, nullable=False, index=True)
     from_address = Column(String(150), nullable=False, index=True)
     from_public_key = Column(String(150), nullable=True, index=True)  # Support validator public keys
     to_address = Column(String(150), nullable=False, index=True)  # Support validator public keys
@@ -112,6 +133,42 @@ class Transfer(Base):
         Index("idx_transfers_to", "to_address"),
         Index("idx_transfers_block", "block_number"),
         Index("idx_transfers_created", "created_at"),
+    )
+
+
+class PendingDeploy(Base):
+    """Ephemeral pending deploy snapshot from the node's deploy buffers.
+
+    Distinct from the deployments table (confirmed on-chain ledger): these
+    deploys are not yet included in any block, so there is no block_hash/FK.
+    The table is fully refreshed (DELETE + INSERT) every sync cycle and only
+    mirrors what the node currently holds in deploy_storage plus the
+    rejected-recovery buffer.
+    """
+
+    __tablename__ = "pending_deploys"
+
+    sig = Column(String(160), primary_key=True)  # hex deploy signature, matches deployments.deploy_id
+    deployer = Column(String(200), nullable=False, index=True)  # hex public key
+    deployer_address = Column(String(150), nullable=False, index=True)
+    term = Column(Text, nullable=False)
+    timestamp = Column(BigInteger, nullable=False, index=True)
+    phlo_price = Column(BigInteger, default=1)
+    phlo_limit = Column(BigInteger, default=1000000)
+    valid_after_block_number = Column(BigInteger)
+    shard_id = Column(String(20))
+    sig_algorithm = Column(String(20), default="secp256k1")
+    language = Column(String(20))  # rholang or metta
+    # 0 in proto = no expiration, stored as NULL
+    expiration_timestamp = Column(BigInteger)
+    # true = from rejected_deploy_buffer (recovering after merge conflict)
+    is_rejected = Column(Boolean, default=False, index=True)
+    fetched_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("idx_pending_deploys_deployer", "deployer"),
+        Index("idx_pending_deploys_timestamp", "timestamp"),
+        Index("idx_pending_deploys_is_rejected", "is_rejected"),
     )
 
 
@@ -140,7 +197,7 @@ class ValidatorBond(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     block_hash = Column(String(64), ForeignKey("blocks.block_hash"), nullable=False)
-    block_number = Column(BigInteger, ForeignKey("blocks.block_number"), nullable=False)
+    block_number = Column(BigInteger, nullable=False)
     validator_public_key = Column(String(130), ForeignKey("validators.public_key"), nullable=False)
     stake = Column(BigInteger, nullable=False)
 
@@ -190,7 +247,8 @@ class BalanceState(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     address = Column(String(150), nullable=False)  # Support both ASI addresses and validator public keys
-    block_number = Column(BigInteger, ForeignKey("blocks.block_number", ondelete="CASCADE"), nullable=False)
+    block_hash = Column(String(64), ForeignKey("blocks.block_hash", ondelete="CASCADE"), nullable=False)
+    block_number = Column(BigInteger, nullable=False)
     unbonded_balance_dust = Column(BigInteger, nullable=False, default=0)
     unbonded_balance_asi = Column(Numeric(20, 8), nullable=False, default=0)
     bonded_balance_dust = Column(BigInteger, nullable=False, default=0)
@@ -201,9 +259,10 @@ class BalanceState(Base):
     block = relationship("Block", backref="balance_states")
 
     __table_args__ = (
-        UniqueConstraint("address", "block_number", name="uq_balance_address_block"),
+        UniqueConstraint("address", "block_hash", name="uq_balance_address_block"),
         Index("idx_balance_states_address", "address"),
         Index("idx_balance_states_block", "block_number", postgresql_using="btree"),
+        Index("idx_balance_states_block_hash", "block_hash", postgresql_using="btree"),
         Index("idx_balance_states_updated", "updated_at", postgresql_using="btree"),
     )
 

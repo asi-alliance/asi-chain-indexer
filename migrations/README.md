@@ -7,7 +7,7 @@ This directory contains a **single comprehensive initial migration** that includ
 ### Active Migration
 
 - **`000_comprehensive_initial_schema.sql`** - Complete database schema including:
-  - Core blockchain tables (blocks, deployments, transfers)
+  - Core blockchain tables (blocks, deployments, pending_deploys, transfers)
   - Validator and staking tables with extended name fields (VARCHAR(160))
   - Balance tracking with bonded/unbonded separation
   - Network statistics and epoch transition tracking
@@ -40,6 +40,7 @@ psql -U indexer -d asichain -f 000_comprehensive_initial_schema.sql
 - **Extended validator names**: VARCHAR(160) to accommodate full public keys
 - **JSONB fields**: bonds_map, justifications for rich data storage
 - **Balance tracking**: Separate bonded/unbonded balance states
+- **Pending deploys**: Ephemeral snapshot of the node's deploy buffers (`pending_deploys`), fully refreshed every sync cycle — no block_hash/FK by design, `sig` matches `deployments.deploy_id` once included
 - **Network statistics**: Real-time consensus and validator metrics
 - **Computed columns**: Auto-calculated total balances
 

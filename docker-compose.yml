@@ -1,4 +1,4 @@
-# Docker Compose configuration for ASI-Chain Indexer with Rust CLI
+# Docker Compose configuration for ASI-Chain Indexer
 
 services:
   postgres:
@@ -28,15 +28,11 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      # ASI Node
-      NODE_URL: ${NODE_URL}
-      NODE_TIMEOUT: ${NODE_TIMEOUT:-30}
-      
-      # Rust CLI Configuration
-      RUST_CLI_PATH: ${RUST_CLI_PATH:-/app/node_cli_linux}
+      # Node connectivity (gRPC + HTTP)
       NODE_HOST: ${NODE_HOST}
       GRPC_PORT: ${GRPC_PORT}
       HTTP_PORT: ${HTTP_PORT}
+      NODE_TIMEOUT: ${NODE_TIMEOUT:-30}
 
       # Database
       DATABASE_URL: ${DATABASE_URL}
@@ -56,8 +52,26 @@ services:
       
       # Features
       ENABLE_ASI_TRANSFER_EXTRACTION: ${ENABLE_ASI_TRANSFER_EXTRACTION:-true}
+      ENABLE_PENDING_DEPLOYS_SYNC: ${ENABLE_PENDING_DEPLOYS_SYNC:-true}
       ENABLE_METRICS: ${ENABLE_METRICS:-true}
       ENABLE_HEALTH_CHECK: ${ENABLE_HEALTH_CHECK:-true}
+
+      # Alerts (Mattermost incoming webhook)
+      ALERTS_ENABLED: ${ALERTS_ENABLED:-false}
+      MATTERMOST_WEBHOOK_URL: ${MATTERMOST_WEBHOOK_URL:-}
+      MATTERMOST_CHANNEL: ${MATTERMOST_CHANNEL:-}
+      MATTERMOST_USERNAME: ${MATTERMOST_USERNAME:-asi-indexer}
+      ALERT_THROTTLE_SEC: ${ALERT_THROTTLE_SEC:-3600}
+      ALERT_TIMEOUT_SEC: ${ALERT_TIMEOUT_SEC:-5}
+      ALERT_MAX_TEXT_LEN: ${ALERT_MAX_TEXT_LEN:-300}
+      ALERT_STORE_TIMEOUT_SEC: ${ALERT_STORE_TIMEOUT_SEC:-1.0}
+      ALERT_ENVIRONMENT: ${ALERT_ENVIRONMENT:-unknown}
+      SYNC_STALL_THRESHOLD: ${SYNC_STALL_THRESHOLD:-3}
+      NODE_UNREACHABLE_CYCLES: ${NODE_UNREACHABLE_CYCLES:-3}
+      LAG_ALERT_BLOCKS: ${LAG_ALERT_BLOCKS:-500}
+      LAG_ALERT_CYCLES: ${LAG_ALERT_CYCLES:-60}
+      LAG_RECOVERY_RATIO: ${LAG_RECOVERY_RATIO:-0.9}
+      CURSOR_STUCK_CYCLES: ${CURSOR_STUCK_CYCLES:-3}
     ports:
       - "9090:9090"  # Monitoring endpoints
     extra_hosts:
