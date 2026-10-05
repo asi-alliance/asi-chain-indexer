@@ -576,4 +576,4 @@ If you need to call a new node RPC, add a method to `GrpcNodeClient` in
 
 ## License
 
-MIT
+This project is licensed under the Apache License 2.0. See LICENSE file for details.
