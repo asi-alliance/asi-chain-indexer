@@ -2,15 +2,21 @@
 
 import asyncio
 import re
+import statistics
 from datetime import datetime
 from decimal import Decimal
 from typing import Dict, List, Optional
 
+import aiohttp
+import asyncpg
+import grpc
 import structlog
-from sqlalchemy import select, text, and_
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import InterfaceError, OperationalError
 
 from src.addr import convert_to_asi_address, public_key_to_asi_address
+from src.alerts import AlertedError, AlertEvent, AlertKind, AlertService, describe_error
 from src.config import settings
 from src.database import db
 from src.models import (
@@ -23,8 +29,42 @@ from src.sync_progress import BlockBatchProgress
 logger = structlog.get_logger(__name__)
 
 
-class RustBlockIndexer:
+def classify_failure(error: Exception) -> Optional[AlertKind]:
+    """Map a sync-cycle exception onto the alert kind that names it.
+
+    Returns None when the failure is not a recognisable dependency outage, leaving
+    it to the consecutive-failure counter.
+    """
+    if isinstance(error, (grpc.RpcError, aiohttp.ClientError)):
+        return AlertKind.NODE_UNREACHABLE
+    # asyncpg.PostgresError already covers PostgresConnectionError and
+    # ConnectionDoesNotExistError
+    if isinstance(error, (asyncpg.PostgresError, asyncpg.InterfaceError,
+                          OperationalError, InterfaceError)):
+        return AlertKind.DATABASE_UNREACHABLE
+    # Failing to reach Postgres at all (refused, DNS, connect timeout, or "Multiple
+    # exceptions" when every address fails) surfaces as a plain OSError that neither
+    # asyncpg nor SQLAlchemy wraps. Only those raised inside the driver count: a bare
+    # OSError could be anything, and asyncio.TimeoutError is one too.
+    if isinstance(error, OSError) and _raised_in_database_driver(error):
+        return AlertKind.DATABASE_UNREACHABLE
+    return None
+
+
+def _raised_in_database_driver(error: BaseException) -> bool:
+    tb = error.__traceback__
+    while tb is not None:
+        if tb.tb_frame.f_globals.get("__name__", "").startswith("asyncpg"):
+            return True
+        tb = tb.tb_next
+    return False
+
+
+class BlockIndexer:
     """Enhanced indexer using the node gRPC/HTTP API for full blockchain data extraction."""
+
+    # Indexed blocks between main-chain (reorg) verifications
+    MAIN_CHAIN_CHECK_INTERVAL = 500
 
     # Pattern for extracting ASI transfers from Rholang terms
     TRANSFER_PATTERNS = [
@@ -68,12 +108,22 @@ class RustBlockIndexer:
         else:
             return 'smart_contract'
 
-    def __init__(self):
+    def __init__(self, alerts: Optional[AlertService] = None):
         self.client = None
         self.running = False
         self.last_epoch_check_block = 0
         self.last_consensus_check_block = 0
+        # None until the first verification, so a restart verifies straight away
+        self._last_verified_block: Optional[int] = None
         self._genesis_data_cache = None  # Cache genesis data to avoid multiple extractions
+        self.alerts = alerts if alerts is not None else AlertService.disabled()
+        self._consecutive_failures = 0
+        self._cycle_error: Optional[Exception] = None
+        self._cycle_kind: Optional[AlertKind] = None
+        self._node_unavailable_cycles = 0
+        self._lag_history: List[int] = []
+        self._stuck_height: Optional[int] = None
+        self._stuck_cycles = 0
 
     async def start(self):
         """Start the enhanced indexer."""
@@ -98,7 +148,12 @@ class RustBlockIndexer:
         logger.info("🔍 Checking ASI-Chain node health...")
         if not await self.client.health_check():
             logger.error("❌ Node is not healthy - cannot connect to ASI-Chain node")
-            raise RuntimeError("Cannot connect to node")
+            # awaited, not fire-and-forget: the process exits right after this raises
+            await self.alerts.notify_and_wait(
+                AlertEvent(AlertKind.NODE_UNREACHABLE, "health check failed at startup")
+                .with_context("node", f"{settings.node_host}:{settings.grpc_port}")
+            )
+            raise AlertedError("Cannot connect to node")
 
         logger.info("✅ ASI-Chain node connection established")
 
@@ -110,6 +165,8 @@ class RustBlockIndexer:
         logger.info("🔄 Starting continuous sync loop...")
         sync_cycles = 0
         while self.running:
+            self._cycle_error = None
+            self._cycle_kind = None
             try:
                 await self._sync_blocks()
                 await self._sync_pending_deploys()
@@ -129,8 +186,133 @@ class RustBlockIndexer:
 
             except Exception as e:
                 logger.error("❌ Sync cycle failed", error=str(e), exc_info=True)
+                self._record_cycle_failure(e)
+
+            self._close_cycle()
 
             await asyncio.sleep(settings.sync_interval)
+
+    def _record_cycle_failure(self, error: Exception):
+        """Note a failed step of the current sync cycle.
+
+        Called from each step's own `except` rather than from the sync loop: every
+        step swallows its exceptions, so nothing reaches the loop's handler.
+        """
+        kind = classify_failure(error)
+        if kind is None and self._cycle_kind is not None:
+            return
+        self._cycle_error = error
+        self._cycle_kind = kind
+
+    def _close_cycle(self):
+        """Count the cycle against the stall threshold and alert once it is reached.
+
+        A single failed cycle, even a dependency error, is often a blip that the
+        next cycle recovers from, so every kind waits for the same run of
+        consecutive failures. The alert is named after the outage behind the
+        latest cycle when there is one, and is a plain stall otherwise.
+
+        Runs outside the loop's `try`, so it must never raise: an escaped exception
+        here would kill the sync task.
+        """
+        try:
+            if self._cycle_error is None:
+                self._consecutive_failures = 0
+                return
+
+            self._consecutive_failures += 1
+            if self._consecutive_failures < settings.sync_stall_threshold:
+                return
+
+            kind = self._cycle_kind or AlertKind.SYNC_STALLED
+            event = AlertEvent(kind, describe_error(self._cycle_error))
+            if kind is AlertKind.NODE_UNREACHABLE:
+                event.with_context("node", f"{settings.node_host}:{settings.grpc_port}")
+            self.alerts.notify(
+                event.with_context("consecutive_failures", self._consecutive_failures)
+            )
+        except Exception as e:
+            logger.error("Failed to close sync cycle", error=str(e), exc_info=True)
+
+    def _track_node_availability(self, available: bool, error: str = ""):
+        """Alert when the node keeps coming back empty at runtime.
+
+        The node client swallows RPC errors and returns None / [] instead, so an
+        outage after startup never reaches `classify_failure`. Counting empty
+        results over consecutive cycles is what surfaces it.
+        """
+        if available:
+            self._node_unavailable_cycles = 0
+            return
+
+        self._node_unavailable_cycles += 1
+        if self._node_unavailable_cycles < settings.node_unreachable_cycles:
+            return
+
+        self.alerts.notify(
+            AlertEvent(AlertKind.NODE_UNREACHABLE, error)
+            .with_context("node", f"{settings.node_host}:{settings.grpc_port}")
+            .with_context("cycles", self._node_unavailable_cycles)
+        )
+
+    def _track_cursor(self, completed_height: int, end: int, failures: int,
+                      error: Optional[str]):
+        """Alert when the sync cursor stops advancing.
+
+        A failed block is not lost — the cursor halts below it and the batch is
+        retried next cycle. So a single failure is normal and self-healing; the
+        thing worth waking someone for is the same block failing over and over,
+        which pins the cursor and stops indexing entirely.
+        """
+        if not failures and completed_height >= end:
+            self._stuck_height = None
+            self._stuck_cycles = 0
+            return
+
+        if completed_height == self._stuck_height:
+            self._stuck_cycles += 1
+        else:
+            self._stuck_height = completed_height
+            self._stuck_cycles = 1
+
+        if self._stuck_cycles < settings.cursor_stuck_cycles:
+            return
+
+        self.alerts.notify(
+            AlertEvent(AlertKind.BLOCKS_STUCK, error or "block processing failed")
+            .with_context("stuck_after_block", completed_height)
+            .with_context("cycles", self._stuck_cycles)
+        )
+
+    def _track_lag(self, lag: int):
+        """Alert when lag is deep and has stopped shrinking.
+
+        Depth alone is not enough: a genesis backfill sits legitimately far behind
+        while still catching up every cycle.
+
+        Recovery is judged on the medians of the window's two halves rather than
+        its endpoints, so neither a single spike nor a one-block drift decides it.
+        """
+        self._lag_history.append(lag)
+        if len(self._lag_history) > settings.lag_alert_cycles:
+            self._lag_history.pop(0)
+
+        if len(self._lag_history) < settings.lag_alert_cycles:
+            return
+        if min(self._lag_history) <= settings.lag_alert_blocks:
+            return
+
+        half = len(self._lag_history) // 2
+        older = statistics.median(self._lag_history[:half])
+        recent = statistics.median(self._lag_history[half:])
+        if recent <= older * settings.lag_recovery_ratio:
+            return
+
+        self.alerts.notify(
+            AlertEvent(AlertKind.SYNC_FALLING_BEHIND, "lag is not recovering")
+            .with_context("lag_blocks", lag)
+            .with_context("cycles", settings.lag_alert_cycles)
+        )
 
     async def stop(self):
         """Stop the indexer."""
@@ -148,15 +330,20 @@ class RustBlockIndexer:
             last_finalized_data = await self.client.get_last_finalized_block()
             if not last_finalized_data:
                 logger.warning("Could not get last finalized block")
+                self._track_node_availability(False, "could not get last finalized block")
                 return
 
             latest_block_number = last_finalized_data.get("blockNumber")
             if latest_block_number is None:
                 logger.warning("No block number in finalized block data")
+                self._track_node_availability(False, "could not get latest block number")
                 return
+
+            self._track_lag(max(0, latest_block_number - last_indexed))
 
             if last_indexed >= latest_block_number:
                 logger.debug("Already up to date", last_indexed=last_indexed, latest=latest_block_number)
+                self._track_node_availability(True)
                 return
 
             # Check whether the database is fresh. A fresh database starts at
@@ -186,7 +373,13 @@ class RustBlockIndexer:
 
             if not block_summaries:
                 logger.warning("No blocks returned for range", start=start, end=end)
+                # an empty range (start_from_block above the finalized tip) is not an outage
+                self._track_node_availability(
+                    end < start, f"no blocks returned for heights {start}-{end}"
+                )
                 return
+
+            self._track_node_availability(True)
 
             logger.info(f"Retrieved {len(block_summaries)} blocks, fetching details...")
 
@@ -194,6 +387,8 @@ class RustBlockIndexer:
             # succeeded. A failed sibling is retried on the next sync cycle.
             progress = BlockBatchProgress(start, end)
             processed_count = 0
+            skipped = []
+            last_skip_error = None
             for block_summary in block_summaries:
                 block_number = block_summary.get("blockNumber")
                 progress.mark_seen(block_number)
@@ -203,12 +398,16 @@ class RustBlockIndexer:
                     if not block_hash:
                         logger.warning("Block summary missing hash", block=block_summary)
                         progress.mark_failed(block_number)
+                        skipped.append(block_number)
+                        last_skip_error = "block summary missing hash"
                         continue
 
                     full_block = await self.client.get_block_details(block_hash)
                     if not full_block:
                         logger.warning(f"Could not get details for block {block_hash}")
                         progress.mark_failed(block_number)
+                        skipped.append(block_number)
+                        last_skip_error = "could not get block details"
                         continue
 
                     await self._process_block(full_block)
@@ -220,10 +419,14 @@ class RustBlockIndexer:
                 except Exception as e:
                     progress.mark_failed(block_number)
                     logger.error(f"Failed to process block", error=str(e), block=block_summary)
+                    skipped.append(block_number)
+                    last_skip_error = describe_error(e)
 
             completed_height = progress.last_completed_height
             if completed_height >= start:
                 await db.set_last_indexed_block(completed_height)
+
+            self._track_cursor(completed_height, end, len(skipped), last_skip_error)
 
             if completed_height < end:
                 logger.warning(
@@ -241,6 +444,7 @@ class RustBlockIndexer:
 
         except Exception as e:
             logger.error(f"Sync blocks error: {e}", exc_info=True)
+            self._record_cycle_failure(e)
 
     async def _sync_pending_deploys(self):
         """Refresh the pending_deploys snapshot from the node's deploy buffers.
@@ -319,6 +523,7 @@ class RustBlockIndexer:
 
         except Exception as e:
             logger.error(f"Failed to sync pending deploys: {e}", exc_info=True)
+            self._record_cycle_failure(e)
 
     async def _process_block(self, block_data: Dict):
         """Process a single block with full details."""
@@ -552,7 +757,7 @@ class RustBlockIndexer:
                 )
 
     async def _update_validator_states(self):
-        """Update validator states using bonds and active-validators commands."""
+        """Update validator states from the node's bonds (gRPC) and active validators (HTTP)."""
         try:
             # Get current bonds
             bonds_data = await self.client.get_bonds()
@@ -606,6 +811,7 @@ class RustBlockIndexer:
 
         except Exception as e:
             logger.error(f"Failed to update validator states: {e}")
+            self._record_cycle_failure(e)
 
     async def _check_epoch_transitions(self):
         """Check and record epoch transitions."""
@@ -613,7 +819,7 @@ class RustBlockIndexer:
             # Get current block
             current_block = await db.get_last_indexed_block()
 
-            # Only check every 100 blocks to avoid too many CLI calls
+            # Only check every 100 blocks to avoid too many node requests
             if current_block - self.last_epoch_check_block < 100:
                 return
 
@@ -671,9 +877,10 @@ class RustBlockIndexer:
 
         except Exception as e:
             logger.error(f"Failed to check epoch transitions: {e}")
+            self._record_cycle_failure(e)
 
     async def _update_network_stats(self):
-        """Update network statistics using network-consensus command."""
+        """Update network statistics from the node's consensus data (finalized block, bonds, active validators)."""
         try:
             # Only update every 50 blocks
             current_block = await db.get_last_indexed_block()
@@ -709,52 +916,78 @@ class RustBlockIndexer:
 
         except Exception as e:
             logger.error(f"Failed to update network stats: {e}")
+            self._record_cycle_failure(e)
 
     async def _verify_main_chain(self):
-        """Periodically verify main chain integrity."""
-        try:
-            # Only verify every 500 blocks
-            current_block = await db.get_last_indexed_block()
-            if current_block % 500 != 0:
-                return
+        """Periodically verify main chain integrity.
 
-            # Get recent main chain blocks
+        The node's main chain runs past what is indexed (unfinalized tip, sync lag),
+        so only heights at or below the cursor are compared. A height can hold
+        several DAG siblings: a reorg is a stored height whose canonical hash is not
+        among the hashes stored there. A height with no rows is not indexed yet.
+        """
+        try:
+            # A distance, not a multiple: the cursor advances in BATCH_SIZE steps
+            # and can jump over any given multiple
+            current_block = await db.get_last_indexed_block()
+            if (self._last_verified_block is not None
+                    and current_block - self._last_verified_block
+                    < self.MAIN_CHAIN_CHECK_INTERVAL):
+                return
 
             main_chain = await self.client.show_main_chain(depth=20)
             if not main_chain:
                 return
 
-            # Verify we have these blocks and they match
+            canonical = []
+            for block_info in main_chain:
+                block_num = block_info.get("blockNumber")
+                block_hash = block_info.get("blockHash")
+                if block_num is not None and block_hash and block_num <= current_block:
+                    canonical.append((block_num, block_hash))
+            if not canonical:
+                logger.debug("Main chain verification skipped, nothing indexed in range")
+                return
+
             async with db.session() as session:
-                for block_info in main_chain:
-                    block_num = block_info.get("blockNumber")
-                    block_hash = block_info.get("blockHash")
-
-                    if block_num is None or not block_hash:
-                        continue
-
-                    # Check if we have this block with matching hash
-                    stored_block = await session.scalar(
-                        select(Block).where(
-                            and_(
-                                Block.block_number == block_num,
-                                Block.block_hash == block_hash
-                            )
-                        ).limit(1)
+                rows = await session.execute(
+                    select(Block.block_number, Block.block_hash).where(
+                        Block.block_number.in_({block_num for block_num, _ in canonical})
                     )
+                )
+                stored: Dict[int, set] = {}
+                for block_num, block_hash in rows:
+                    stored.setdefault(block_num, set()).add(block_hash)
 
-                    if not stored_block:
-                        logger.warning(
-                            "Main chain mismatch detected",
-                            block_number=block_num,
-                            expected_hash=block_hash
-                        )
-                        # Could trigger a re-sync here if needed
+            mismatches = sorted(
+                (block_num, block_hash) for block_num, block_hash in canonical
+                if block_num in stored and block_hash not in stored[block_num]
+            )
 
-            logger.info("Main chain verification complete", blocks_checked=len(main_chain))
+            if mismatches:
+                logger.warning(
+                    "Main chain mismatch detected",
+                    heights=[block_num for block_num, _ in mismatches],
+                    expected_hashes=[block_hash for _, block_hash in mismatches],
+                )
+                shown = [block_hash for _, block_hash in mismatches[:3]]
+                if len(mismatches) > len(shown):
+                    shown.append(f"+{len(mismatches) - len(shown)} more")
+                self.alerts.notify(
+                    AlertEvent(
+                        AlertKind.CHAIN_REORG_DETECTED,
+                        "stored blocks do not include the canonical hash at their height"
+                    )
+                    .with_context("heights", ", ".join(str(n) for n, _ in mismatches))
+                    .with_context("expected_hashes", ", ".join(shown))
+                )
+
+            self._last_verified_block = current_block
+            logger.info("Main chain verification complete", blocks_checked=len(canonical))
 
         except Exception as e:
             logger.error(f"Failed to verify main chain: {e}")
+            self._record_cycle_failure(e)
 
     async def _process_validators(self, session, block_data: Dict):
         """Process validator bonds for a block."""

@@ -465,6 +465,85 @@ groups:
           summary: "Network consensus unhealthy"
 ```
 
+### Mattermost Alerts (built-in)
+
+The indexer also ships its own alerting path: it posts directly to a
+Mattermost incoming webhook when the sync loop hits a failure a human should
+look at. Alerts are one-way. Nothing is posted when the problem clears.
+
+Enable it with:
+
+```bash
+ALERTS_ENABLED=true
+MATTERMOST_WEBHOOK_URL=https://mattermost.example.com/hooks/xxxxxxxx
+MATTERMOST_CHANNEL=  # optional, overrides the webhook's default channel
+ALERT_ENVIRONMENT=devnet  # shown in the alert title
+```
+
+What triggers each alert (a "cycle" is one pass of the sync loop, every
+`SYNC_INTERVAL` seconds):
+
+| Alert | Raised when |
+|---|---|
+| Node unreachable | The startup health check fails (the process then exits); **or** the node returns no data — no last finalized block, or no blocks for a non-empty range — for `NODE_UNREACHABLE_CYCLES` consecutive cycles; **or** node RPC errors (gRPC / HTTP) fail `SYNC_STALL_THRESHOLD` consecutive cycles |
+| Database unreachable | Database errors — asyncpg errors, SQLAlchemy `OperationalError` / `InterfaceError`, or a network failure reaching Postgres (connection refused, DNS, connect timeout) — fail `SYNC_STALL_THRESHOLD` consecutive cycles |
+| Sync stalled | Any other error fails `SYNC_STALL_THRESHOLD` consecutive cycles |
+| Block sync stuck | The sync cursor retries the same failing block for `CURSOR_STUCK_CYCLES` cycles |
+| Sync falling behind | Lag stays above `LAG_ALERT_BLOCKS` for a full window of `LAG_ALERT_CYCLES` cycles without shrinking by `LAG_RECOVERY_RATIO` |
+| Chain reorg detected | A stored height does not contain the node's canonical hash for that height (checked at startup, then every 500 indexed blocks) |
+| Indexer stopped | The sync loop exits or crashes for a reason that was not already alerted on |
+
+A single failed cycle is never alerted on by itself. A cycle counts as failed
+once, however many of its steps failed, and a successful cycle resets the count.
+When the node or database is behind the failure, the alert is named after it
+rather than "Sync stalled". Repeats of the same alert kind inside
+`ALERT_THROTTLE_SEC` are collapsed into the next message as a suppressed count.
+Error text is cut to `ALERT_MAX_TEXT_LEN` characters, and SQL statements and
+their parameters are never posted.
+
+Detection thresholds are configurable per deployment, since what counts as
+"falling behind" or "stuck" differs by network:
+
+| Variable | Default | Allowed | Meaning |
+|---|---|---|---|
+| `SYNC_STALL_THRESHOLD` | `3` | ≥ 1 | Consecutive failed cycles before a node, database or stall alert |
+| `NODE_UNREACHABLE_CYCLES` | `3` | ≥ 1 | Consecutive cycles the node may return no data before alerting |
+| `LAG_ALERT_BLOCKS` | `500` | ≥ 0 | Lag depth (in blocks) that counts as falling behind, not a backlog being worked through |
+| `LAG_ALERT_CYCLES` | `60` | ≥ 2 | Cycles the lag must stay deeper than `LAG_ALERT_BLOCKS` without shrinking before alerting |
+| `LAG_RECOVERY_RATIO` | `0.9` | 0 < x ≤ 1 | Lag counts as recovering when the recent half of the window is at most this fraction of the older half; lower values demand faster catch-up |
+| `CURSOR_STUCK_CYCLES` | `3` | ≥ 1 | Cycles the sync cursor may retry the same block before that stops looking transient |
+
+See `.env.example` for the full list of alert-related variables, including
+`ALERT_THROTTLE_SEC`, `ALERT_TIMEOUT_SEC`, `ALERT_MAX_TEXT_LEN` and
+`ALERT_STORE_TIMEOUT_SEC`.
+
+The indexer refuses to start when `ALERTS_ENABLED=true` and
+`MATTERMOST_WEBHOOK_URL` is empty, or when a threshold is out of range.
+
+On the hosts, these values come from the untracked `.env` in the repository
+checkout. `deploy.sh` sources that file and docker-compose passes the values
+through, and CI does not write it. Add the alert variables to `.env` on each
+host by hand. `.env` is kept out of the image by `.dockerignore`, so the
+webhook URL never ends up baked into an image layer.
+
+#### Throttling across restarts
+
+The throttle window starts only after a delivery succeeds. If a delivery fails,
+the next occurrence of that alert kind retries it. Each kind's last delivery
+time is also stored in the `indexer_state` table, under keys named
+`alert_last_sent:<kind>`. A container stuck in a restart loop therefore still
+posts at most once per window, for example "Node unreachable" at every startup
+health check.
+
+That stored state is best-effort. If the database itself is unreachable, the
+indexer can neither read nor write it. In that case each restart starts with an
+empty throttle and can post again, once per restart. To silence a known outage,
+set `ALERTS_ENABLED=false` or stop the container.
+
+When the sync loop dies, the process exits with status 1 after a single
+"Indexer stopped" alert, or after no alert at all when the cause was already
+reported (for example, the node failing its startup health check).
+
 ## Backup and Recovery
 
 ### Automated Backups

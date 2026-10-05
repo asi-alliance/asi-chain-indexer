@@ -48,7 +48,6 @@ deployment.log
 *.sqlite3
 
 # Binary files
-node_cli_*
 *.bin
 
 # Temporary files

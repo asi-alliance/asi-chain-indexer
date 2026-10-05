@@ -18,19 +18,19 @@ The indexer service is the core backend component responsible for blockchain dat
 
 **Key Classes and Modules:**
 
-1. **RustBlockIndexer** (`rust_indexer.py`)
-   - Primary indexer implementation using Rust CLI client
+1. **BlockIndexer** (`block_indexer.py`)
+   - Primary indexer implementation, reads the chain through the gRPC node client
    - Handles block synchronization, deployment processing, and validator tracking
    - Implements continuous sync loop with configurable interval
    - Processes blocks in batches for optimal performance
    - Methods: `start()`, `stop()`, `_sync_blocks()`, `_sync_pending_deploys()`, `_process_block()`, `_process_deployment_enhanced()`, `_extract_transfers()`, `_process_validators()`, `_update_validator_states()`, `_check_epoch_transitions()`, `_update_network_stats()`, `_verify_main_chain()`
 
-2. **RustCLIClient** (`rust_cli_client.py`)
-   - Wrapper around Rust CLI executable for blockchain operations
+2. **GrpcNodeClient** (`grpc_node_client.py`)
+   - Client for the node's `DeployServiceV1` gRPC API, plus its HTTP endpoint for active validators
    - Provides async methods for all blockchain queries
-   - Handles command execution, output parsing, and error handling
+   - Handles request construction, response parsing, and error handling
    - Implements health checks and connection verification
-   - Methods: `get_last_finalized_block()`, `get_blocks_by_height()`, `get_block_details()`, `get_deploy_info()`, `get_bonds()`, `get_active_validators()`, `get_epoch_info()`, `show_block_deploys()`, `get_network_consensus()`, `show_main_chain()`, `health_check()`
+   - Methods: `get_last_finalized_block()`, `get_blocks_by_height()`, `get_block_details()`, `get_deploy_info()`, `get_pending_deploys()`, `get_bonds()`, `get_active_validators()`, `get_epoch_info()`, `get_network_consensus()`, `show_main_chain()`, `health_check()`
 
 3. **Database** (`database.py`)
    - Manages PostgreSQL connections using asyncpg and SQLAlchemy
@@ -52,7 +52,7 @@ The indexer service is the core backend component responsible for blockchain dat
 6. **IndexerService** (`main.py`)
    - Main service orchestrator that coordinates all components
    - Handles startup, shutdown, and signal management
-   - Initializes database, Rust CLI client, and monitoring server
+   - Initializes database, gRPC node client, and monitoring server
 
 **Transfer Extraction Patterns:**
 

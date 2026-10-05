@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.models import BalanceState, Block, Deployment, Transfer, ValidatorBond
-from src.rust_indexer import RustBlockIndexer
+from src.block_indexer import BlockIndexer
 from src.sync_progress import BlockBatchProgress
 
 
@@ -117,14 +117,14 @@ async def test_sync_retries_a_failed_sibling_before_advancing(
 ) -> None:
     fake_database = FakeDatabase()
     fake_client = FakeClient()
-    indexer = RustBlockIndexer()
+    indexer = BlockIndexer()
     indexer.client = fake_client
     indexer._process_block = AsyncMock()
 
-    monkeypatch.setattr("src.rust_indexer.db", fake_database)
-    monkeypatch.setattr("src.rust_indexer.settings.batch_size", 3)
-    monkeypatch.setattr("src.rust_indexer.settings.start_from_block", 0)
-    monkeypatch.setattr("src.rust_indexer.settings.delay_before_node", 0)
+    monkeypatch.setattr("src.block_indexer.db", fake_database)
+    monkeypatch.setattr("src.block_indexer.settings.batch_size", 3)
+    monkeypatch.setattr("src.block_indexer.settings.start_from_block", 0)
+    monkeypatch.setattr("src.block_indexer.settings.delay_before_node", 0)
 
     await indexer._sync_blocks()
 

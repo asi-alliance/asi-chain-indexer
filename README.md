@@ -457,7 +457,7 @@ The indexer exposes a Prometheus-compatible `/metrics` endpoint on port 9090:
    docker compose -f docker-compose.yml ps
    
    # Check network connectivity between containers
-   docker exec asi-rust-indexer ping postgres
+   docker exec asi-indexer ping postgres
    ```
 
 3. **Permission errors with volumes**
@@ -520,7 +520,7 @@ building a complete chain history.
 indexer/
 ├── src/
 │   ├── grpc_node_client.py    # Async gRPC client (DeployServiceV1)
-│   ├── rust_indexer.py        # Indexer service (legacy name retained; uses gRPC, not Rust CLI)
+│   ├── block_indexer.py       # Indexer service (BlockIndexer)
 │   ├── models.py              # Database models (DAG-aware)
 │   ├── database.py            # asyncpg/SQLAlchemy sessions
 │   ├── main.py                # Entry point / orchestrator
@@ -550,8 +550,7 @@ indexer/
 ├── Environment Templates:
 │   ├── .env.example           # Reference with all options
 │   ├── .env.template          # Blank template
-│   ├── .env.remote-observer   # Remote observer node sample
-│   └── .env.rust              # Legacy
+│   └── .env.remote-observer   # Remote observer node sample
 ├── Documentation:
 │   ├── README.md                 # This file
 │   ├── API.md                    # REST API documentation
@@ -573,7 +572,7 @@ them locally (e.g. after editing a `.proto`):
 3. Restart the indexer
 
 If you need to call a new node RPC, add a method to `GrpcNodeClient` in
-`src/grpc_node_client.py`, then wire it into `src/rust_indexer.py`.
+`src/grpc_node_client.py`, then wire it into `src/block_indexer.py`.
 
 ## License
 
