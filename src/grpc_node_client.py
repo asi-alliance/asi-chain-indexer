@@ -16,6 +16,7 @@ from google.protobuf import empty_pb2
 from google.protobuf.descriptor import FieldDescriptor
 
 from src.config import settings
+from src.amounts import amount
 
 logger = structlog.get_logger(__name__)
 
@@ -62,6 +63,18 @@ class GrpcNodeClient:
 
         self.channel = grpc.aio.insecure_channel(f"{self.node_host}:{self.grpc_port}")
         self.stub = svc.DeployServiceStub(self.channel)
+
+    async def require_native_precision(self, expected: int) -> None:
+        response = await self.stub.status(empty_pb2.Empty(), timeout=self.timeout)
+        status = _unwrap(response, "status")
+        # Old nodes omit all metadata (proto3 scalar defaults). Their units are 8 decimals.
+        has_metadata = bool(status.nativeTokenName or status.nativeTokenSymbol)
+        actual = status.nativeTokenDecimals if has_metadata else 8
+        if actual != expected:
+            raise ValueError(
+                f"Node native token decimals ({actual}) do not match "
+                f"NATIVE_TOKEN_DECIMALS ({expected})"
+            )
 
     async def close(self):
         await self.channel.close()
@@ -110,7 +123,7 @@ class GrpcNodeClient:
                     data = await resp.json()
 
             return [
-                {"validator": v["publicKey"], "stake": v["stake"]}
+                {"validator": v["publicKey"], "stake": amount(v["stake"])}
                 for v in data.get("validators", [])
             ]
 

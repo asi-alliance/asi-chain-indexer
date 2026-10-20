@@ -11,6 +11,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./migrations/000_comprehensive_initial_schema.sql:/docker-entrypoint-initdb.d/000_comprehensive_initial_schema.sql
+      - ./migrations/001_bigint_amounts.sql:/docker-entrypoint-initdb.d/001_bigint_amounts.sql
     ports:
       - "5432:5432"
     healthcheck:
@@ -33,6 +34,7 @@ services:
       GRPC_PORT: ${GRPC_PORT}
       HTTP_PORT: ${HTTP_PORT}
       NODE_TIMEOUT: ${NODE_TIMEOUT:-30}
+      NATIVE_TOKEN_DECIMALS: ${NATIVE_TOKEN_DECIMALS:-8}
 
       # Database
       DATABASE_URL: ${DATABASE_URL}

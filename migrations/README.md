@@ -1,38 +1,38 @@
 # ASI Chain Indexer Database Migrations
 
-## Current Migration Strategy
+## Current schema
 
-This directory contains a **single comprehensive initial migration** that includes all necessary database schema components for the ASI Chain indexer.
+Apply these migrations in order to a new database:
 
-### Active Migration
-
-- **`000_comprehensive_initial_schema.sql`** - Complete database schema including:
-  - Core blockchain tables (blocks, deployments, pending_deploys, transfers)
-  - Validator and staking tables with extended name fields (VARCHAR(160))
-  - Balance tracking with bonded/unbonded separation
-  - Network statistics and epoch transition tracking
-  - All necessary indexes, triggers, and constraints
-  - Documentation comments
-
-### Migration History
-
-Previous migration files have been moved to `backup_old_migrations/` for reference:
-
-- `001_initial_schema.sql` - Original core tables
-- `002_add_enhanced_tables.sql` - Added enhanced fields and statistics tables
-- `003_add_block_details.sql` - Block details enhancements (redundant)
-- `003_add_genesis_and_balance_tracking.sql` - Balance tracking (redundant) 
-- `004_extend_validator_name.sql` - Extended validator name field (integrated)
-- `002_fix_field_lengths.sql` - Field length fixes (integrated)
-
-## For New Deployments
-
-**Use only the comprehensive migration:**
+1. `000_comprehensive_initial_schema.sql`: original tables, views and functions.
+2. `001_bigint_amounts.sql`: exact token amounts and per-record decimal precision.
 
 ```bash
-# Apply the complete schema
-psql -U indexer -d asichain -f 000_comprehensive_initial_schema.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/000_comprehensive_initial_schema.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/001_bigint_amounts.sql
 ```
+
+For an existing version 000 database, back up the database, stop indexer writes,
+and apply **only 001, once**. The migration takes table locks while widening
+columns and rebuilding generated balance totals and `transaction_history_view`.
+Reload Hasura metadata after migration and before deploying the matching explorer.
+Compose runs both migrations only when initializing an empty PostgreSQL volume;
+restarting Compose does not migrate an existing volume.
+
+The migration preserves existing raw units and human amounts, labels historical
+rows with `token_decimals=8`, and stringifies historical bond amounts in JSONB.
+New ORM rows explicitly record `NATIVE_TOKEN_DECIMALS` (default 8; configure 18 for
+an 18-decimal chain). SQL inserts that omit precision retain the legacy default 8.
+No balance multiplication or automatic chain denomination change occurs.
+
+Raw monetary columns use `NUMERIC(78,0)` with a uint256 range check. Display columns
+support up to 77 fractional digits; the extra width avoids rounding at any supported
+precision. Keep `HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES=true`. Protocol counters,
+block heights, timestamps and the node's int64 phlo fields retain their bounded
+integer types. The node's int64 bond/transfer RPC limits are unchanged.
+
+Historical migrations in `backup_old_migrations/` are reference material, not part
+of this sequence.
 
 ## Schema Features
 
@@ -55,11 +55,3 @@ psql -U indexer -d asichain -f 000_comprehensive_initial_schema.sql
 - Supports all current indexer functionality
 - Includes all enhancements from previous migrations
 - Ready for production deployment
-
-## Benefits of Single Migration Approach
-
-1. **Simplified deployment**: One file contains everything
-2. **No migration conflicts**: Eliminates dependency issues  
-3. **Complete documentation**: All schema elements in one place
-4. **Version clarity**: Clear schema version (000) for fresh deployments
-5. **Backup preservation**: Historical migrations preserved for reference

@@ -4,11 +4,28 @@ from datetime import datetime
 
 from sqlalchemy import (
     BigInteger, Boolean, Column, DateTime, ForeignKey, Index, Integer,
-    Numeric, String, Text, UniqueConstraint
+    CheckConstraint, Numeric, String, Text, UniqueConstraint
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
+from sqlalchemy.types import TypeDecorator
+
+from src.amounts import MAX_AMOUNT, amount, token_decimal
+from src.config import settings
+
+
+class Amount(TypeDecorator):
+    """Store exact raw units and return Python integers from numeric columns."""
+    impl = Numeric(78, 0)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        return None if value is None else amount(value)
+
+    def process_result_value(self, value, dialect):
+        return None if value is None else amount(value)
+
 
 Base = declarative_base()
 
@@ -26,6 +43,10 @@ class Block(Base):
     state_root_hash = Column(String(64))  # New field
     pre_state_hash = Column(String(64))  # New field
     finalization_status = Column(String(20), nullable=False)  # New field
+    token_decimals = Column(
+        Integer, CheckConstraint("token_decimals BETWEEN 0 AND 77"),
+        nullable=False, default=lambda: settings.native_token_decimals,
+    )
     bonds_map = Column(JSONB)  # New field for storing bonds as JSON
     justifications = Column(JSONB)  # New field for storing justifications
     fault_tolerance = Column(Numeric(5, 4))  # New field
@@ -112,6 +133,11 @@ class Transfer(Base):
 
     __tablename__ = "transfers"
 
+    token_decimals = Column(
+        Integer, CheckConstraint("token_decimals BETWEEN 0 AND 77"),
+        nullable=False, default=lambda: settings.native_token_decimals,
+    )
+
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     deploy_id = Column(String(140), ForeignKey("deployments.deploy_id"), nullable=False, index=True)
     block_hash = Column(String(64), ForeignKey("blocks.block_hash"), nullable=False, index=True)
@@ -119,8 +145,11 @@ class Transfer(Base):
     from_address = Column(String(150), nullable=False, index=True)
     from_public_key = Column(String(150), nullable=True, index=True)  # Support validator public keys
     to_address = Column(String(150), nullable=False, index=True)  # Support validator public keys
-    amount_dust = Column(BigInteger, nullable=False)
-    amount_asi = Column(Numeric(20, 8), nullable=False)
+    amount_dust = Column(
+        Amount(), CheckConstraint(f"amount_dust >= 0 AND amount_dust <= {MAX_AMOUNT}"),
+        nullable=False,
+    )
+    amount_asi = Column(Numeric(155, 77), nullable=False)
     status = Column(String(20), default="success", index=True)
     timestamp = Column(BigInteger, nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -177,9 +206,17 @@ class Validator(Base):
 
     __tablename__ = "validators"
 
+    token_decimals = Column(
+        Integer, CheckConstraint("token_decimals BETWEEN 0 AND 77"),
+        nullable=False, default=lambda: settings.native_token_decimals,
+    )
+
     public_key = Column(String(130), primary_key=True)
     name = Column(String(50))
-    total_stake = Column(BigInteger, default=0)
+    total_stake = Column(
+        Amount(), CheckConstraint(f"total_stake >= 0 AND total_stake <= {MAX_AMOUNT}"),
+        default=0,
+    )
     first_seen_block = Column(BigInteger)
     last_seen_block = Column(BigInteger)
     status = Column(String(20), default="bonded", index=True)  # New field: active/bonded/quarantine/inactive
@@ -195,11 +232,19 @@ class ValidatorBond(Base):
 
     __tablename__ = "validator_bonds"
 
+    token_decimals = Column(
+        Integer, CheckConstraint("token_decimals BETWEEN 0 AND 77"),
+        nullable=False, default=lambda: settings.native_token_decimals,
+    )
+
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     block_hash = Column(String(64), ForeignKey("blocks.block_hash"), nullable=False)
     block_number = Column(BigInteger, nullable=False)
     validator_public_key = Column(String(130), ForeignKey("validators.public_key"), nullable=False)
-    stake = Column(BigInteger, nullable=False)
+    stake = Column(
+        Amount(), CheckConstraint(f"stake >= 0 AND stake <= {MAX_AMOUNT}"),
+        nullable=False,
+    )
 
     # Relationships
     block = relationship("Block", back_populates="validator_bonds", foreign_keys=[block_hash])
@@ -245,14 +290,25 @@ class BalanceState(Base):
 
     __tablename__ = "balance_states"
 
+    token_decimals = Column(
+        Integer, CheckConstraint("token_decimals BETWEEN 0 AND 77"),
+        nullable=False, default=lambda: settings.native_token_decimals,
+    )
+
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     address = Column(String(150), nullable=False)  # Support both ASI addresses and validator public keys
     block_hash = Column(String(64), ForeignKey("blocks.block_hash", ondelete="CASCADE"), nullable=False)
     block_number = Column(BigInteger, nullable=False)
-    unbonded_balance_dust = Column(BigInteger, nullable=False, default=0)
-    unbonded_balance_asi = Column(Numeric(20, 8), nullable=False, default=0)
-    bonded_balance_dust = Column(BigInteger, nullable=False, default=0)
-    bonded_balance_asi = Column(Numeric(20, 8), nullable=False, default=0)
+    unbonded_balance_dust = Column(
+        Amount(), CheckConstraint(f"unbonded_balance_dust >= 0 AND unbonded_balance_dust <= {MAX_AMOUNT}"),
+        nullable=False, default=0,
+    )
+    unbonded_balance_asi = Column(Numeric(155, 77), nullable=False, default=0)
+    bonded_balance_dust = Column(
+        Amount(), CheckConstraint(f"bonded_balance_dust >= 0 AND bonded_balance_dust <= {MAX_AMOUNT}"),
+        nullable=False, default=0,
+    )
+    bonded_balance_asi = Column(Numeric(155, 77), nullable=False, default=0)
     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     # Relationships
@@ -274,7 +330,7 @@ class BalanceState(Base):
     @property
     def total_balance_asi(self):
         """Calculate total balance in ASI."""
-        return self.unbonded_balance_asi + self.bonded_balance_asi
+        return token_decimal(self.total_balance_dust, self.token_decimals, aggregate=True)
 
 
 class EpochTransition(Base):

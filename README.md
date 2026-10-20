@@ -577,3 +577,37 @@ If you need to call a new node RPC, add a method to `GrpcNodeClient` in
 ## License
 
 This project is licensed under the Apache License 2.0. See LICENSE file for details.
+
+## Exact token amounts
+
+Token transfers, balances and validator stakes use exact Python integers and
+PostgreSQL `NUMERIC(78,0)` storage, with a uint256 range check. Human-readable
+amounts use exact decimal strings, including in monitoring responses. Hasura
+must keep `HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES=true`.
+
+`NATIVE_TOKEN_DECIMALS` defaults to **8** for existing networks. Set it to **18**
+for a node whose native token metadata declares 18 decimals. Startup verifies
+this against the node's status; legacy nodes without metadata support only the
+8-decimal profile. This setting describes the chain's units; changing it does
+not rescale balances or perform a chain denomination upgrade.
+
+Apply migration `001_bigint_amounts.sql` before running this version. It widens
+storage without changing existing values and records historical precision as 8.
+Each newly indexed block, transfer, bond and balance records its configured
+precision. See [migration instructions](migrations/README.md).
+
+The published node transfer and bond RPC fields remain `int64`; this change does
+not extend that wire format. Rholang BigInt transfer literals (`123n`) and exact
+HTTP validator amounts can use the wider storage where exposed by the node.
+
+For storage boundary verification after migrations 000 and 001:
+
+```bash
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/bigint-storage.sql
+```
+
+The check rolls back its writes and verifies uint256 bounds and decimal precision.
+Run `make protos` and `python -m pytest tests/ -q` for regression tests. Set
+`TEST_DATABASE_URL` to a test PostgreSQL server with `CREATEDB` permission to also
+exercise migration 000 → 001, ORM round trips, legacy precision and notifications.
+That integration test creates and removes only its own randomly named database.

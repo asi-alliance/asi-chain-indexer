@@ -4,7 +4,6 @@ import asyncio
 import re
 import statistics
 from datetime import datetime
-from decimal import Decimal
 from typing import Dict, List, Optional
 
 import aiohttp
@@ -18,6 +17,7 @@ from sqlalchemy.exc import InterfaceError, OperationalError
 from src.addr import convert_to_asi_address, public_key_to_asi_address
 from src.alerts import AlertedError, AlertEvent, AlertKind, AlertService, describe_error
 from src.config import settings
+from src.amounts import amount, token_decimal, integer_json
 from src.database import db
 from src.models import (
     Block, BlockParent, Deployment, PendingDeploy, Transfer, Validator, ValidatorBond,
@@ -69,18 +69,18 @@ class BlockIndexer:
     # Pattern for extracting ASI transfers from Rholang terms
     TRANSFER_PATTERNS = [
         # Standard AsiVault transfer pattern with literal address: @vault!("transfer", "address", amount,
-        r'@vault!\s*\(\s*"transfer"\s*,\s*"([0-9a-zA-Z0-9]{52,56})"\s*,\s*(\d+)\s*,',
+        r'@vault!\s*\(\s*"transfer"\s*,\s*"([0-9a-zA-Z0-9]{52,56})"\s*,\s*(\d+)n?\s*,',
         # Variable-based transfer pattern: @vault!("transfer", recipient, amount,
-        r'@vault!\s*\(\s*"transfer"\s*,\s*(\w+)\s*,\s*(\d+)\s*,',
+        r'@vault!\s*\(\s*"transfer"\s*,\s*(\w+)\s*,\s*(\d+)n?\s*,',
         # Match pattern with ASI addresses: match ("from", "to", amount)
-        r'match\s*\(\s*"([0-9a-zA-Z0-9]{52,56})"\s*,\s*"([0-9a-zA-Z0-9]{52,57})"\s*,\s*(\d+)\s*\)',
+        r'match\s*\(\s*"([0-9a-zA-Z0-9]{52,56})"\s*,\s*"([0-9a-zA-Z0-9]{52,57})"\s*,\s*(\d+)n?\s*\)',
         # AsiVault findOrCreate pattern
-        r'ASIVault!\s*\(\s*"findOrCreate"\s*,\s*"([0-9a-zA-Z0-9]{52,57})"\s*,\s*(\d+)\s*\)',
+        r'ASIVault!\s*\(\s*"findOrCreate"\s*,\s*"([0-9a-zA-Z0-9]{52,57})"\s*,\s*(\d+)n?\s*\)',
     ]
 
     # New pattern specifically for the transfer deployments in blocks 365, 377
     # Simplified pattern that works with the actual Rholang format
-    DIRECT_TRANSFER_PATTERN = r'match \("(1111[^"]+)", "(1111[^"]+)", (\d+)\)'
+    DIRECT_TRANSFER_PATTERN = r'match \("(1111[^"]+)", "(1111[^"]+)", (\d+)n?\)'
 
     # Pattern to extract address assignments from match statements
     ADDRESS_BINDING_PATTERNS = [
@@ -155,6 +155,7 @@ class BlockIndexer:
             )
             raise AlertedError("Cannot connect to node")
 
+        await self.client.require_native_precision(settings.native_token_decimals)
         logger.info("✅ ASI-Chain node connection established")
 
         # Get current indexer state
@@ -561,7 +562,7 @@ class BlockIndexer:
                 state_hash=state_root_hash,
                 state_root_hash=state_root_hash,
                 finalization_status="finalized" if block_info.get("isFinalized") else "unfinalized",
-                bonds_map=bonds_map,
+                bonds_map=integer_json(bonds_map),
                 seq_num=block_info.get("seqNum"),
                 sig=block_info.get("sig"),
                 sig_algorithm=block_info.get("sigAlgorithm"),
@@ -1000,17 +1001,22 @@ class BlockIndexer:
             # First ensure validator exists in validators table
             result = await session.execute(
                 text("""
-                     INSERT INTO validators (public_key, name, total_stake, status, first_seen_block, last_seen_block)
-                     VALUES (:public_key, :name, :stake, 'active', :block_number,
+                     INSERT INTO validators (public_key, name, total_stake, token_decimals, status, first_seen_block, last_seen_block)
+                     VALUES (:public_key, :name, :stake, :token_decimals, 'active', :block_number,
                              :block_number)
-                     ON CONFLICT (public_key) DO UPDATE SET total_stake     = GREATEST(validators.total_stake, :stake),
+                     ON CONFLICT (public_key) DO UPDATE SET total_stake = CASE
+                         WHEN validators.token_decimals = EXCLUDED.token_decimals
+                         THEN GREATEST(validators.total_stake, EXCLUDED.total_stake)
+                         ELSE EXCLUDED.total_stake END,
+                                                            token_decimals = EXCLUDED.token_decimals,
                                                             last_seen_block = :block_number,
                                                             status          = 'active'
                      """),
                 {
                     "public_key": validator_key,
                     "name": validator_key[:20] + "...",  # Short name for display
-                    "stake": stake,
+                    "stake": amount(stake),
+                    "token_decimals": settings.native_token_decimals,
                     "block_number": block_data["blockNumber"]
                 }
             )
@@ -1053,9 +1059,9 @@ class BlockIndexer:
                         from_public_key = from_any
                         from_address = public_key_to_asi_address(from_any)
 
-                    amount_dust = int(amount_str)
+                    amount_dust = amount(amount_str)
                     if amount_dust > 0:
-                        amount_asi = Decimal(amount_dust) / Decimal(100_000_000)
+                        amount_asi = token_decimal(amount_dust, settings.native_token_decimals)
 
                         transfer = Transfer(
                             deploy_id=deploy_data.get("sig"),
@@ -1075,7 +1081,7 @@ class BlockIndexer:
                             block=block_number,
                             from_address=from_any[:20] + "...",
                             to_address=to_address[:20] + "...",
-                            amount_asi=float(amount_asi)
+                            amount_asi=str(amount_asi)
                         )
                 except (ValueError, IndexError) as e:
                     logger.warning(f"Failed to parse direct transfer: {e}")
@@ -1174,11 +1180,11 @@ class BlockIndexer:
                         continue
 
                     # Parse amount
-                    amount_dust = int(amount_str)
+                    amount_dust = amount(amount_str)
                     if amount_dust <= 0:
                         continue
 
-                    amount_asi = Decimal(amount_dust) / Decimal(100_000_000)
+                    amount_asi = token_decimal(amount_dust, settings.native_token_decimals)
 
                     from_addr = convert_to_asi_address(from_address, deploy_data)
 
@@ -1200,7 +1206,7 @@ class BlockIndexer:
                         "💸 Found ASI transfer",
                         from_address=from_addr[:20] + "...",
                         to_address=to_address[:20] + "...",
-                        amount_asi=float(amount_asi)
+                        amount_asi=str(amount_asi)
                     )
 
                 except (ValueError, IndexError) as e:
@@ -1238,13 +1244,13 @@ class BlockIndexer:
                     # Extract ASI address and amount using regex
                     # Pattern: initVault!("address", amount)
                     import re
-                    vault_pattern = r'initVault!\s*\(\s*"([^"]+)"\s*,\s*(\d+)\s*\)'
+                    vault_pattern = r'initVault!\s*\(\s*"([^"]+)"\s*,\s*(\d+)n?\s*\)'
                     matches = re.findall(vault_pattern, deploy_term)
 
                     for address, amount_str in matches:
                         if address.startswith('1111'):  # ASI addresses start with 1111
-                            amount_dust = int(amount_str)
-                            amount_asi = amount_dust / 100000000  # Convert dust to ASI
+                            amount_dust = amount(amount_str)
+                            amount_asi = token_decimal(amount_dust, settings.native_token_decimals)  # Convert dust to ASI
                             allocations.append((address, amount_dust, amount_asi))
                             logger.info(f"Found genesis allocation: {address} -> {amount_asi} ASI")
 
@@ -1252,12 +1258,12 @@ class BlockIndexer:
                 elif 'PoS' in deploy_term or 'bond' in deploy_term.lower():
                     # Extract validator public key and bond amount
                     # Look for patterns like: (pubkey, amount) in the deployment
-                    bond_pattern = r'\(([0-9a-fA-F]{130}),\s*(\d+)\)'
+                    bond_pattern = r'\(([0-9a-fA-F]{130}),\s*(\d+)n?\)'
                     matches = re.findall(bond_pattern, deploy_term)
 
                     for pubkey, amount_str in matches:
-                        amount_dust = int(amount_str)
-                        amount_asi = amount_dust / 100000000
+                        amount_dust = amount(amount_str)
+                        amount_asi = token_decimal(amount_dust, settings.native_token_decimals)
                         bonds.append((pubkey, amount_dust, amount_asi))
                         logger.info(f"Found genesis bond: {pubkey[:20]}... -> {amount_asi} ASI")
 
@@ -1272,8 +1278,8 @@ class BlockIndexer:
                         pubkey = validator.get('validator')
                         stake = validator.get('stake', 0)
                         if pubkey and stake > 0:
-                            bonds.append((pubkey, stake, stake / 100000000))
-                            logger.info(f"Found validator bond: {pubkey[:20]}... -> {stake / 100000000} ASI")
+                            bonds.append((pubkey, stake, token_decimal(stake, settings.native_token_decimals)))
+                            logger.info(f"Found validator bond: {pubkey[:20]}... -> {token_decimal(stake, settings.native_token_decimals)} ASI")
 
                 # For allocations, we might need to query initial balances
                 # This is network-specific and might require additional logic
@@ -1305,8 +1311,8 @@ class BlockIndexer:
                     validator_key = bond.get('validator')
                     stake = bond.get('stake', 0)
                     if validator_key and stake > 0:
-                        bonds.append((validator_key, stake, stake / 100000000))
-                        logger.info(f"Found validator bond: {validator_key[:20]}... -> {stake / 100000000} ASI")
+                        bonds.append((validator_key, stake, token_decimal(stake, settings.native_token_decimals)))
+                        logger.info(f"Found validator bond: {validator_key[:20]}... -> {token_decimal(stake, settings.native_token_decimals)} ASI")
             else:
                 # Try to get from client if not in block_info
                 try:
@@ -1318,9 +1324,9 @@ class BlockIndexer:
                                 validator_key = bond.get('validator')
                                 stake = bond.get('stake', 0)
                                 if validator_key and stake > 0:
-                                    bonds.append((validator_key, stake, stake / 100000000))
+                                    bonds.append((validator_key, stake, token_decimal(stake, settings.native_token_decimals)))
                                     logger.info(
-                                        f"Found validator bond: {validator_key[:20]}... -> {stake / 100000000} ASI")
+                                        f"Found validator bond: {validator_key[:20]}... -> {token_decimal(stake, settings.native_token_decimals)} ASI")
                 except Exception as e:
                     logger.warning(f"Could not get bonds from genesis block: {e}")
 
@@ -1332,8 +1338,8 @@ class BlockIndexer:
                         validator_key = bond.get("validator")
                         stake = bond.get("stake", 0)
                         if validator_key and stake > 0:
-                            bonds.append((validator_key, stake, stake / 100000000))
-                            logger.info(f"Found validator bond: {validator_key[:20]}... -> {stake / 100000000} ASI")
+                            bonds.append((validator_key, stake, token_decimal(stake, settings.native_token_decimals)))
+                            logger.info(f"Found validator bond: {validator_key[:20]}... -> {token_decimal(stake, settings.native_token_decimals)} ASI")
                 except Exception as e:
                     logger.error(f"Error getting validator bonds: {e}")
 
@@ -1378,7 +1384,7 @@ class BlockIndexer:
                 deployer="0000000000000000000000000000000000000000000000000000000000000000",
                 deployer_address=public_key_to_asi_address(
                     "0000000000000000000000000000000000000000000000000000000000000000"),
-                term=f"Genesis ASI allocation to {address}: {amount_asi:,.0f} ASI",
+                term=f"Genesis ASI allocation to {address}: {amount_asi:f} ASI",
                 timestamp=block_info.get("timestamp"),
                 sig=deploy_id,
                 deployment_type="genesis_mint",
@@ -1418,7 +1424,7 @@ class BlockIndexer:
                 block_hash=block_info.get("blockHash"),
                 deployer=validator_pubkey,
                 deployer_address=public_key_to_asi_address(validator_pubkey),
-                term=f"Genesis validator bond: {amount_asi:,.0f} ASI staked",
+                term=f"Genesis validator bond: {amount_asi:f} ASI staked",
                 timestamp=block_info.get("timestamp"),
                 sig=deploy_id,
                 deployment_type="genesis_bond",
@@ -1492,7 +1498,7 @@ class BlockIndexer:
 
         # PoS contract balance state (holds all bonded ASI)
         total_bonded_dust = sum(bond[1] for bond in validator_bonds)
-        total_bonded_asi = sum(bond[2] for bond in validator_bonds)
+        total_bonded_asi = token_decimal(total_bonded_dust, settings.native_token_decimals)
 
         pos_balance_state = BalanceState(
             address="1111gW5kkGxHg7xDg6dRkZx2f7qxTizJzaCH9VEM1oJKWRvSX9Sk5",
