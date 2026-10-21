@@ -139,6 +139,7 @@ class Transfer(Base):
     )
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
+    event_index = Column(Integer, nullable=True)
     deploy_id = Column(String(140), ForeignKey("deployments.deploy_id"), nullable=False, index=True)
     block_hash = Column(String(64), ForeignKey("blocks.block_hash"), nullable=False, index=True)
     block_number = Column(BigInteger, nullable=False, index=True)
@@ -158,6 +159,7 @@ class Transfer(Base):
     deployment = relationship("Deployment", back_populates="transfers")
 
     __table_args__ = (
+        UniqueConstraint("deploy_id", "event_index", name="uq_transfer_event"),
         Index("idx_transfers_from", "from_address"),
         Index("idx_transfers_to", "to_address"),
         Index("idx_transfers_block", "block_number"),

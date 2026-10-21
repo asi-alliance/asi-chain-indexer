@@ -59,6 +59,9 @@ async def test_migration_preserves_history_and_roundtrips_wide_amounts(monkeypat
         await connection.execute(
             (ROOT / "migrations/001_bigint_amounts.sql").read_text()
         )
+        await connection.execute(
+            (ROOT / "migrations/002_executed_transfers.sql").read_text()
+        )
         for table in [
             "blocks",
             "transfers",
@@ -221,6 +224,9 @@ async def test_periodic_validator_refresh_updates_precision_after_migration(
         await connection.execute(
             (ROOT / "migrations/001_bigint_amounts.sql").read_text()
         )
+        await connection.execute(
+            (ROOT / "migrations/002_executed_transfers.sql").read_text()
+        )
         assert (
             await connection.fetchval(
                 "SELECT token_decimals FROM validators WHERE public_key='validator'"
@@ -280,4 +286,86 @@ async def test_periodic_validator_refresh_updates_precision_after_migration(
         if connection is not None:
             await connection.close()
         await admin.execute(f'DROP DATABASE IF EXISTS "{database_name}"')
+        await admin.close()
+
+
+@pytest.mark.asyncio
+async def test_replayed_transfers_replace_false_rows_and_keep_identical_events(
+    monkeypatch,
+):
+    url = os.environ.get("TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("Set TEST_DATABASE_URL for PostgreSQL integration tests")
+    admin = await asyncpg.connect(url)
+    database = "report_test_" + uuid4().hex
+    connection = engine = None
+    try:
+        await admin.execute(f'CREATE DATABASE "{database}"')
+        parsed = urlsplit(url)
+        test_url = urlunsplit(parsed._replace(path="/" + database))
+        connection = await asyncpg.connect(test_url)
+        for migration in [
+            "000_comprehensive_initial_schema.sql",
+            "001_bigint_amounts.sql",
+            "002_executed_transfers.sql",
+        ]:
+            await connection.execute((ROOT / "migrations" / migration).read_text())
+        await connection.execute(
+            """
+            INSERT INTO blocks(block_hash, block_number, timestamp, proposer, finalization_status) VALUES ('block', 1, 1, 'validator', 'finalized');
+            INSERT INTO deployments(deploy_id, block_hash, block_number, deployer, deployer_address, term, timestamp, sig)
+              VALUES ('deploy', 'block', 1, 'sender', 'sender', 'arbitrary term', 1, 'deploy');
+            INSERT INTO transfers(deploy_id, block_hash, block_number, from_address, to_address, amount_dust, amount_asi, timestamp)
+              VALUES ('deploy', 'block', 1, 'sender', 'receiver', 2000, 2000, 1);
+        """
+        )
+        engine = create_async_engine(
+            test_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        )
+        indexer = BlockIndexer()
+        deploy = {
+            "sig": "deploy",
+            "timestamp": 1,
+            "executedTransfers": [
+                {
+                    "event_index": index,
+                    "from_address": "sender",
+                    "to_address": "receiver",
+                    "amount": 2**64 + 1,
+                }
+                for index in [0, 2]
+            ],
+        }
+        block = {"blockHash": "block", "blockNumber": 1, "token_decimals": 18}
+        for _ in range(2):
+            async with AsyncSession(engine) as session:
+                await indexer._store_transfers(session, block, deploy)
+                await session.commit()
+        rows = await connection.fetch(
+            "SELECT event_index, amount_dust, amount_asi, token_decimals FROM transfers ORDER BY event_index"
+        )
+        assert [r["event_index"] for r in rows] == [0, 2]
+        assert all(
+            r["amount_dust"] == 2**64 + 1
+            and r["amount_asi"] == Decimal("18.446744073709551617")
+            and r["token_decimals"] == 18
+            for r in rows
+        )
+        # A missing report aborts before deleting already verified movements.
+        async with AsyncSession(engine) as session:
+            with pytest.raises(ValueError):
+                await indexer._store_transfers(session, block, {"sig": "deploy"})
+        assert await connection.fetchval("SELECT count(*) FROM transfers") == 2
+        async with AsyncSession(engine) as session:
+            await indexer._store_transfers(
+                session, block, {**deploy, "executedTransfers": []}
+            )
+            await session.commit()
+        assert await connection.fetchval("SELECT count(*) FROM transfers") == 0
+    finally:
+        if engine:
+            await engine.dispose()
+        if connection:
+            await connection.close()
+        await admin.execute(f'DROP DATABASE "{database}" WITH (FORCE)')
         await admin.close()

@@ -6,17 +6,19 @@ Apply these migrations in order to a new database:
 
 1. `000_comprehensive_initial_schema.sql`: original tables, views and functions.
 2. `001_bigint_amounts.sql`: exact token amounts and per-record decimal precision.
+3. `002_executed_transfers.sql`: stable native transfer event identity.
 
 ```bash
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/000_comprehensive_initial_schema.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/001_bigint_amounts.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/002_executed_transfers.sql
 ```
 
 For an existing version 000 database, back up the database, stop indexer writes,
-and apply **only 001, once**. The migration takes table locks while widening
+and apply **001 and 002, once each**. The migration takes table locks while widening
 columns and rebuilding generated balance totals and `transaction_history_view`.
 Reload Hasura metadata after migration and before deploying the matching explorer.
-Compose runs both migrations only when initializing an empty PostgreSQL volume;
+Compose runs these migrations only when initializing an empty PostgreSQL volume;
 restarting Compose does not migrate an existing volume.
 
 The migration preserves existing raw units and human amounts, labels historical
@@ -55,3 +57,32 @@ of this sequence.
 - Supports all current indexer functionality
 - Includes all enhancements from previous migrations
 - Ready for production deployment
+
+## Repair source-inferred transfer history
+
+Stop indexer writes. For a version 001 database apply only 002, then run
+`python -m src.reindex_transfers` with the same database/node settings as the
+indexer. It replaces inferred rows with successful native movements, rebuilds
+genesis allocations/balances, and preserves each block's recorded precision.
+It does not reset the node, blocks, deploys or sync cursor. Each block commits
+atomically; a failed report aborts the command, which can safely be rerun.
+Restart the indexer and reload Hasura metadata after successful completion.
+Do not consider legacy `event_index IS NULL` transfers execution-verified.
+
+Transfer indexing now requires an observer with `/reporting/trace`, retained
+replay state and explicit PRECHARGE/USER/REFUND phase markers (tested against
+f1r3node-rust 98eb647e6cfd864e4765f22e1fe97d84cac713fe). The native SystemVault
+channel is derived from that standard genesis contract; a custom SystemVault
+requires a reviewed adapter. Full traces preserve `GInt` and `GBigInt` values;
+compact node transfer summaries remain int64 and are not used. Missing/busy or
+incompatible traces fail the block for retry, never fall back to source regexes.
+Only successful native user movements enter `transfers`; rejected attempts are
+not ledger movements, and deploy execution status alone does not imply success.
+Repeated identical successful calls retain separate event indexes. A failed
+deploy has no committed user movements. This is not a generic custom-token index.
+
+Genesis allocation events retain every standard generator entry. Balance
+snapshots contain one row per address: repeated addresses replace the previous
+vault-map entry, rather than summing inaccessible overwritten vaults.
+
+Repeated genesis addresses with different amounts and ambiguous concurrent transfer result channels fail closed and require operator investigation; the repair never guesses which amount moved.

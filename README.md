@@ -29,7 +29,7 @@ A high-performance blockchain indexer for ASI-Chain that synchronizes data from 
 The indexer provides complete automation for blockchain data synchronization:
 - Full blockchain sync from genesis (block 0) via the node gRPC/HTTP API
 - Automatic Hasura GraphQL relationships setup
-- Enhanced ASI transfer detection with Rholang pattern matching
+- Execution-backed ASI transfer detection from observer replay traces
 - Comprehensive database schema with single migration
 - Balance tracking with bonded/unbonded separation
 - DAG-aware block storage (multi-parent support via `block_parents`)
@@ -40,14 +40,14 @@ The indexer provides complete automation for blockchain data synchronization:
 ✅ **Working Features:**
 - **Genesis block processing** with automatic extraction of validator bonds and initial allocations
 - **Full blockchain synchronization from block 0** via the node gRPC/HTTP API
-- **Enhanced ASI transfer detection** - now supports match-based Rholang patterns
+- **Executed ASI transfers** - exact Int/BigInt amounts and per-operation results from native replay traces
 - **Balance state tracking** - separate bonded and unbonded balances per address
 - **GraphQL API** via Hasura with automatic bash-based configuration
 - Enhanced block metadata extraction (state roots, bonds, validators, justifications)
 - PostgreSQL storage with 150-char address fields (supports both ASI addresses and validator keys)
 - Deployment extraction with full Rholang code
 - Smart contract type classification (ASI transfers, validator ops, etc.)
-- ASI transfer extraction with both variable-based and match-based pattern matching
+- ASI transfer extraction from native USER-phase events; rejected calls and dead branches produce no successful transfers
 - Address validation supporting 52-56 character ASI addresses
 - Validator tracking with full public keys (130+ characters)
 - Network consensus monitoring
@@ -611,3 +611,5 @@ Run `make protos` and `python -m pytest tests/ -q` for regression tests. Set
 `TEST_DATABASE_URL` to a test PostgreSQL server with `CREATEDB` permission to also
 exercise migration 000 → 001, ORM round trips, legacy precision and notifications.
 That integration test creates and removes only its own randomly named database.
+
+Existing indexer installations must apply migration 002 and repair earlier inferred transfers before rollout. See [migration and repair instructions](migrations/README.md#repair-source-inferred-transfer-history).

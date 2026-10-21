@@ -98,21 +98,47 @@ async def test_precision_checked_against_node_metadata(actual, expected, valid):
 
 
 @pytest.mark.parametrize("decimals", [8, 10, 18, 77])
-@pytest.mark.parametrize("suffix", ["", "n"])
-def test_extracts_exact_legacy_and_bigint_transfers(monkeypatch, decimals, suffix):
-    monkeypatch.setattr("src.block_indexer.settings.native_token_decimals", decimals)
-    sender, recipient = "1111" + "a" * 50, "1111" + "b" * 50
+def test_extracts_exact_reported_transfers(monkeypatch, decimals):
     indexer = BlockIndexer.__new__(BlockIndexer)
-    for term in [
-        f'match ("{sender}", "{recipient}", {MAX_AMOUNT}{suffix})',
-        f'@vault!("transfer", "{recipient}", {MAX_AMOUNT}{suffix}, *ret)',
-    ]:
-        result = indexer._extract_transfers(
-            {"term": term, "sig": "test", "deployer": sender, "timestamp": 1}, 10
+    result = indexer._extract_transfers(
+        {
+            "sig": "test",
+            "timestamp": 1,
+            "executedTransfers": [
+                {
+                    "event_index": 0,
+                    "from_address": "sender",
+                    "to_address": "receiver",
+                    "amount": MAX_AMOUNT,
+                }
+            ],
+        },
+        10,
+        decimals,
+    )
+    assert result[0].amount_dust == MAX_AMOUNT
+    assert result[0].amount_asi == token_decimal(MAX_AMOUNT, decimals)
+    assert result[0].token_decimals == decimals
+
+
+def test_source_text_never_proves_a_transfer():
+    indexer = BlockIndexer.__new__(BlockIndexer)
+    with pytest.raises(ValueError, match="Missing executed"):
+        indexer._extract_transfers(
+            {"sig": "test", "term": 'match ("sender", "receiver", 001n)'}, 10
         )
-        assert len(result) == 1
-        assert result[0].amount_dust == MAX_AMOUNT
-        assert result[0].amount_asi == token_decimal(MAX_AMOUNT, decimals)
+    assert (
+        indexer._extract_transfers(
+            {
+                "sig": "test",
+                "timestamp": 1,
+                "term": 'if (false) { @vault!("transfer", "receiver", 001n, *ret) }',
+                "executedTransfers": [],
+            },
+            10,
+        )
+        == []
+    )
 
 
 def test_aggregate_display_can_exceed_single_amount_limit():
@@ -122,41 +148,6 @@ def test_aggregate_display_can_exceed_single_amount_limit():
     )
     with pytest.raises(ValueError):
         token_decimal(raw, 18)
-
-
-@pytest.mark.parametrize("decimals", [8, 18])
-@pytest.mark.parametrize("suffix", ["", "n"])
-@pytest.mark.parametrize("pattern", ["direct", "vault"])
-@pytest.mark.parametrize(
-    "literal,expected",
-    [
-        ("000100000000", 100000000),
-        ("000" + str(MAX_AMOUNT), MAX_AMOUNT),
-        ("000", None),
-        ("000" + str(MAX_AMOUNT + 1), None),
-    ],
-    ids=["legacy-leading-zero", "uint256-leading-zero", "zero", "overflow"],
-)
-def test_extracts_leading_zero_literals(
-    monkeypatch, decimals, suffix, pattern, literal, expected
-):
-    monkeypatch.setattr("src.block_indexer.settings.native_token_decimals", decimals)
-    sender, recipient = "1111" + "a" * 50, "1111" + "b" * 50
-    term = (
-        f'match ("{sender}", "{recipient}", {literal}{suffix})'
-        if pattern == "direct"
-        else f'@vault!("transfer", "{recipient}", {literal}{suffix}, *ret)'
-    )
-    indexer = BlockIndexer.__new__(BlockIndexer)
-    result = indexer._extract_transfers(
-        {"term": term, "sig": "test", "deployer": sender, "timestamp": 1}, 10
-    )
-    if expected is None:
-        assert result == []
-    else:
-        assert len(result) == 1
-        assert result[0].amount_dust == expected
-        assert result[0].amount_asi == token_decimal(expected, decimals)
 
 
 def test_small_decimal_api_values_use_plain_decimal_strings():

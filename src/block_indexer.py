@@ -10,7 +10,7 @@ import aiohttp
 import asyncpg
 import grpc
 import structlog
-from sqlalchemy import select, text
+from sqlalchemy import select, text, delete
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import InterfaceError, OperationalError
 
@@ -25,6 +25,7 @@ from src.models import (
 )
 from src.grpc_node_client import GrpcNodeClient
 from src.sync_progress import BlockBatchProgress
+from src.transfer_reports import block_transfers
 
 logger = structlog.get_logger(__name__)
 
@@ -65,32 +66,6 @@ class BlockIndexer:
 
     # Indexed blocks between main-chain (reorg) verifications
     MAIN_CHAIN_CHECK_INTERVAL = 500
-
-    # Pattern for extracting ASI transfers from Rholang terms
-    TRANSFER_PATTERNS = [
-        # Standard AsiVault transfer pattern with literal address: @vault!("transfer", "address", amount,
-        r'@vault!\s*\(\s*"transfer"\s*,\s*"([0-9a-zA-Z0-9]{52,56})"\s*,\s*(\d+)n?\s*,',
-        # Variable-based transfer pattern: @vault!("transfer", recipient, amount,
-        r'@vault!\s*\(\s*"transfer"\s*,\s*(\w+)\s*,\s*(\d+)n?\s*,',
-        # Match pattern with ASI addresses: match ("from", "to", amount)
-        r'match\s*\(\s*"([0-9a-zA-Z0-9]{52,56})"\s*,\s*"([0-9a-zA-Z0-9]{52,57})"\s*,\s*(\d+)n?\s*\)',
-        # AsiVault findOrCreate pattern
-        r'ASIVault!\s*\(\s*"findOrCreate"\s*,\s*"([0-9a-zA-Z0-9]{52,57})"\s*,\s*(\d+)n?\s*\)',
-    ]
-
-    # New pattern specifically for the transfer deployments in blocks 365, 377
-    # Simplified pattern that works with the actual Rholang format
-    DIRECT_TRANSFER_PATTERN = r'match \("(1111[^"]+)", "(1111[^"]+)", (\d+)n?\)'
-
-    # Pattern to extract address assignments from match statements
-    ADDRESS_BINDING_PATTERNS = [
-        # match "address" { varName =>
-        r'match\s*"([0-9a-zA-Z0-9]{52,56})"\s*\{\s*(\w+)\s*=>',
-        # varName = "address"
-        r'(\w+)\s*=\s*"([0-9a-zA-Z0-9]{52,56})"',
-        # match ("from", "to", amount) { (varFrom, varTo, varAmount) =>
-        r'match\s*\(\s*"([0-9a-zA-Z0-9]{52,56})"\s*,\s*"([0-9a-zA-Z0-9]{52,57})"\s*,\s*\d+\s*\)\s*\{\s*\((\w+)\s*,\s*(\w+)\s*,\s*\w+\)\s*=>',
-    ]
 
     @staticmethod
     def classify_deployment(term: str) -> str:
@@ -546,6 +521,12 @@ class BlockIndexer:
                 logger.debug("Block already indexed", block_number=block_number)
                 return
 
+        if settings.enable_asi_transfer_extraction and deployments and block_number != 0:
+            report = await self.client.get_block_report(block_hash)
+            movements = block_transfers(report, block_hash, [d["sig"] for d in deployments])
+            for deployment in deployments:
+                deployment["executedTransfers"] = movements[deployment["sig"]]
+
         # Process block in transaction
         async with db.session() as session:
             # Extract block data
@@ -597,6 +578,7 @@ class BlockIndexer:
                 # Ensure bonds are included in the block_info for genesis processing
                 genesis_block_info = dict(block_info)
                 genesis_block_info['bonds'] = bonds_map
+                genesis_block_info['deploys'] = deployments
                 await self._process_genesis_transfers(session, genesis_block_info)
                 await self._process_genesis_balance_states(session, genesis_block_info)
 
@@ -710,52 +692,19 @@ class BlockIndexer:
         if not settings.enable_asi_transfer_extraction:
             return
 
-        transfers = self._extract_transfers(deploy_data, block_data.get("blockNumber"))
-        if not transfers:
-            return
+        if block_data["blockNumber"] == 0:
+            return  # genesis issuance is handled separately
+        await self._store_transfers(session, block_data, deploy_data)
 
-        logger.info("📤 Found transfers", count=len(transfers), deploy=deploy_id[:16] + "...")
-
-        # Load existing transfers for this deploy_id to avoid inserting duplicates
-        existing_rows = await session.execute(
-            select(Transfer.from_address, Transfer.to_address, Transfer.amount_dust, Transfer.block_number)
-            .where(Transfer.deploy_id == deploy_id)
-        )
-        existing_set = {
-            (row[0], row[1], int(row[2]), int(row[3]))
-            for row in existing_rows.fetchall()
-        }
-
-        # Insert only new transfers (pure Python dedup, no unique index required)
-        for t in transfers:
-            key = (t.from_address, t.to_address, int(t.amount_dust), int(t.block_number))
-            if key in existing_set:
-                continue
-            try:
-                # ORM insert is fine here (PK is auto-generated 'id')
-                session.add(Transfer(
-                    deploy_id=t.deploy_id,
-                    block_hash=block_data.get("blockHash"),
-                    block_number=t.block_number,
-                    from_address=t.from_address,
-                    from_public_key=t.from_public_key,
-                    to_address=t.to_address,
-                    amount_dust=t.amount_dust,
-                    amount_asi=t.amount_asi,
-                    status=t.status,
-                    timestamp=t.timestamp,
-                ))
-                # optionally: await session.flush()
-                existing_set.add(key)  # keep the set in sync within this run
-            except Exception as e:
-                logger.warning(
-                    "transfer insert failed",
-                    deploy_id=deploy_id,
-                    from_addr=t.from_address[:16],
-                    to_addr=t.to_address[:16],
-                    amount=t.amount_dust,
-                    err=str(e),
-                )
+    async def _store_transfers(self, session, block_data, deploy_data):
+        # Replace this deploy's old inferred rows atomically. This also makes
+        # historical repair, restart and a deploy in multiple DAG blocks idempotent.
+        transfers = self._extract_transfers(deploy_data, block_data["blockNumber"],
+                                           block_data.get("token_decimals", settings.native_token_decimals))
+        await session.execute(delete(Transfer).where(Transfer.deploy_id == deploy_data["sig"]))
+        for transfer in transfers:
+            transfer.block_hash = block_data["blockHash"]
+            session.add(transfer)
 
     async def _update_validator_states(self):
         """Update validator states from the node's bonds (gRPC) and active validators (HTTP)."""
@@ -1032,340 +981,60 @@ class BlockIndexer:
             )
             session.add(bond)
 
-    def _extract_transfers(self, deploy_data: Dict, block_number: int) -> List[Transfer]:
-        """Extract ASI transfers from deployment term."""
-        transfers = []
-        term = deploy_data.get("term", "")
+    def _extract_transfers(self, deploy_data: Dict, block_number: int, decimals=None) -> List[Transfer]:
+        """Only movements proved by the native replay trace are transfers."""
+        if "executedTransfers" not in deploy_data:
+            raise ValueError("Missing executed transfer report")
+        decimals = settings.native_token_decimals if decimals is None else decimals
+        return [Transfer(
+            deploy_id=deploy_data["sig"], block_number=block_number,
+            event_index=movement["event_index"],
+            from_address=movement["from_address"], to_address=movement["to_address"],
+            from_public_key=(deploy_data.get("deployer") if
+                convert_to_asi_address(deploy_data.get("deployer", ""), deploy_data) == movement["from_address"] else None),
+            amount_dust=movement["amount"],
+            amount_asi=token_decimal(movement["amount"], decimals), token_decimals=decimals,
+            status="success", timestamp=deploy_data["timestamp"],
+        ) for movement in deploy_data["executedTransfers"]]
 
-        # Log first 200 chars of term for debugging
-        if term and block_number < 10:  # Only log first few blocks
-            logger.debug(f"Deploy term preview: {term[:200]}...")
-
-        # Check if term contains AsiVault operations or match statements with addresses
-        if not term:
-            return transfers
-
-        # Check for direct transfer pattern first (blocks 365, 377 style)
-        direct_matches = re.findall(self.DIRECT_TRANSFER_PATTERN, term)
-        # if block_number in [365, 377]:
-        #     logger.info(f"Block {block_number}: Pattern search result: {len(direct_matches)} matches found")
-        if direct_matches:
-            for match in direct_matches:
-                try:
-                    from_any, to_address, amount_str = match
-                    from_public_key = ''
-                    # Validate addresses (ASI addresses can be 52-57 characters)
-                    if from_any.startswith('1111') and len(from_any) > 51:
-                        from_address = from_any
-                    else:
-                        from_public_key = from_any
-                        from_address = public_key_to_asi_address(from_any)
-
-                    # Rholang permits leading zeros; keep amount() validation strict.
-                    amount_dust = amount(amount_str.lstrip("0") or "0")
-                    if amount_dust > 0:
-                        amount_asi = token_decimal(amount_dust, settings.native_token_decimals)
-
-                        transfer = Transfer(
-                            deploy_id=deploy_data.get("sig"),
-                            timestamp=deploy_data.get("timestamp", 0),
-                            block_number=block_number,
-                            from_address=from_address[:150],
-                            from_public_key=from_public_key[:150],
-                            to_address=to_address[:150],
-                            amount_dust=amount_dust,
-                            amount_asi=amount_asi,
-                            status="success" if not deploy_data.get("errored") else "failed"
-                        )
-                        transfers.append(transfer)
-
-                        logger.info(
-                            "💸 Found direct ASI transfer",
-                            block=block_number,
-                            from_address=from_any[:20] + "...",
-                            to_address=to_address[:20] + "...",
-                            amount_asi=str(amount_asi)
-                        )
-                except (ValueError, IndexError) as e:
-                    logger.warning(f"Failed to parse direct transfer: {e}")
-
-        # If we found direct transfers, return them immediately
-        if transfers:
-            return transfers
-
-        # Otherwise check other patterns if the term contains AsiVault operations
-        if ("ASIVault" not in term and "transfer" not in term) and ("vault" not in term.lower()):
-            return transfers
-
-        # First, extract address bindings from the term
-        address_bindings = {}
-
-        # Debug logging for block 334
-        # if block_number == 334:
-        #     logger.info("Analyzing block 334 deployment", term_length=len(term))
-
-        for pattern in self.ADDRESS_BINDING_PATTERNS:
-            matches = re.findall(pattern, term)
-            for match in matches:
-                if len(match) == 2:
-                    # Could be (address, var) or (var, address) depending on pattern
-                    if match[0].startswith('1111') and len(match[0]) in range(52, 57):
-                        # First element is address
-                        address_bindings[match[1]] = match[0]
-                    elif match[1].startswith('1111') and len(match[1]) in range(52, 57):
-                        # Second element is address
-                        address_bindings[match[0]] = match[1]
-                elif len(match) == 4:
-                    # New pattern: (fromAddr, toAddr, fromVar, toVar)
-                    if match[0].startswith('1111') and match[1].startswith('1111'):
-                        address_bindings[match[2]] = match[0]  # fromVar = fromAddr
-                        address_bindings[match[3]] = match[1]  # toVar = toAddr
-                        # if block_number == 334:
-                        #     logger.info("Found address bindings in block 334", bindings=address_bindings)
-
-        # Try each transfer pattern
-        for pattern in self.TRANSFER_PATTERNS:
-            matches = re.findall(pattern, term)
-
-            # Log pattern matches for debugging
-            if matches and block_number > 330:
-                logger.info(f"Pattern match found", pattern=pattern[:50], matches=matches[:2])
-
-            for match in matches:
-                try:
-                    if len(match) == 2:
-                        # Pattern with just recipient and amount
-                        to_identifier, amount_str = match
-                        from_address = deploy_data.get("deployer", deploy_data.get("sender", ""))
-
-                        # Check if to_identifier is a variable that we have a binding for
-                        if to_identifier in address_bindings:
-                            to_address = address_bindings[to_identifier]
-                        elif to_identifier.startswith('1111') and len(to_identifier) in range(52, 57):
-                            # It's already an address
-                            to_address = to_identifier
-                        else:
-                            # Skip if we can't resolve the address
-                            continue
-
-                    elif len(match) == 3:
-                        # Pattern with sender, recipient, and amount
-                        from_identifier, to_identifier, amount_str = match
-
-                        # Resolve from address
-                        if from_identifier in address_bindings:
-                            from_address = address_bindings[from_identifier]
-                        elif from_identifier.startswith('1111') and len(from_identifier) in range(52, 57):
-                            from_address = from_identifier
-                        else:
-                            from_address = deploy_data.get("deployer", deploy_data.get("sender", ""))
-
-                        # Resolve to address
-                        if to_identifier in address_bindings:
-                            to_address = address_bindings[to_identifier]
-                        elif to_identifier.startswith('1111') and len(to_identifier) in range(52, 57):
-                            to_address = to_identifier
-                        else:
-                            continue
-                    else:
-                        continue
-
-                    # Validate addresses
-                    if not from_address or not to_address:
-                        continue
-
-                    if len(from_address) > 150 or len(to_address) > 150:
-                        logger.error(
-                            "Skipping transfer with invalid address length",
-                            from_len=len(from_address),
-                            to_len=len(to_address)
-                        )
-                        continue
-
-                    # Parse amount
-                    # Rholang permits leading zeros; keep amount() validation strict.
-                    amount_dust = amount(amount_str.lstrip("0") or "0")
-                    if amount_dust <= 0:
-                        continue
-
-                    amount_asi = token_decimal(amount_dust, settings.native_token_decimals)
-
-                    from_addr = convert_to_asi_address(from_address, deploy_data)
-
-                    # Create transfer record
-                    transfer = Transfer(
-                        timestamp=deploy_data["timestamp"],
-                        deploy_id=deploy_data.get("sig"),
-                        block_number=block_number,
-                        from_address=from_addr[:150],  # Use 150 char limit as per schema
-                        from_public_key=from_address[:150],  # Use 150 char limit as per schema
-                        to_address=to_address[:150],
-                        amount_dust=amount_dust,
-                        amount_asi=amount_asi,
-                        status="success" if not deploy_data.get("errored") else "failed"
-                    )
-                    transfers.append(transfer)
-
-                    logger.info(
-                        "💸 Found ASI transfer",
-                        from_address=from_addr[:20] + "...",
-                        to_address=to_address[:20] + "...",
-                        amount_asi=str(amount_asi)
-                    )
-
-                except (ValueError, IndexError) as e:
-                    logger.warning(
-                        "Failed to parse transfer",
-                        pattern=pattern,
-                        match=match,
-                        error=str(e)
-                    )
-
-        return transfers
-
-    async def _extract_genesis_data(self, block_info: Dict) -> Optional[Dict]:
-        """Extract genesis allocations and bonds from the genesis block dynamically."""
-        # Use cached data if available
+    async def _extract_genesis_data(self, block_info: Dict) -> Dict:
+        """Read the immutable genesis generator and that block's bonds only."""
         if self._genesis_data_cache is not None:
             return self._genesis_data_cache
-
-        try:
-            logger.info("🔍 Extracting genesis data from blockchain...")
-
-            # For network-agnostic approach, we extract from blockchain state
-            # rather than parsing deployments which may vary by network
-            return await self._extract_genesis_from_state(block_info)
-
-            allocations = []
-            bonds = []
-
-            # Parse each deployment to extract initial allocations and bonds
-            for deploy in genesis_deployments:
-                deploy_term = deploy.get('term', '')
-
-                # Look for AsiVault initialization patterns
-                if 'initVault' in deploy_term or 'ASIVault' in deploy_term:
-                    # Extract ASI address and amount using regex
-                    # Pattern: initVault!("address", amount)
-                    import re
-                    vault_pattern = r'initVault!\s*\(\s*"([^"]+)"\s*,\s*(\d+)n?\s*\)'
-                    matches = re.findall(vault_pattern, deploy_term)
-
-                    for address, amount_str in matches:
-                        if address.startswith('1111'):  # ASI addresses start with 1111
-                            amount_dust = amount(amount_str)
-                            amount_asi = token_decimal(amount_dust, settings.native_token_decimals)  # Convert dust to ASI
-                            allocations.append((address, amount_dust, amount_asi))
-                            logger.info(f"Found genesis allocation: {address} -> {amount_asi} ASI")
-
-                # Look for PoS initialization patterns for bonds
-                elif 'PoS' in deploy_term or 'bond' in deploy_term.lower():
-                    # Extract validator public key and bond amount
-                    # Look for patterns like: (pubkey, amount) in the deployment
-                    bond_pattern = r'\(([0-9a-fA-F]{130}),\s*(\d+)n?\)'
-                    matches = re.findall(bond_pattern, deploy_term)
-
-                    for pubkey, amount_str in matches:
-                        amount_dust = amount(amount_str)
-                        amount_asi = token_decimal(amount_dust, settings.native_token_decimals)
-                        bonds.append((pubkey, amount_dust, amount_asi))
-                        logger.info(f"Found genesis bond: {pubkey[:20]}... -> {amount_asi} ASI")
-
-            # If we couldn't parse from deployments, try to get from initial state
-            if not allocations and not bonds:
-                logger.warning("Could not parse genesis data from deployments, trying alternative method...")
-
-                # Get initial validator bonds from the blockchain state
-                initial_bonds = await self.client.get_active_validators()
-                if initial_bonds:
-                    for validator in initial_bonds:
-                        pubkey = validator.get('validator')
-                        stake = validator.get('stake', 0)
-                        if pubkey and stake > 0:
-                            bonds.append((pubkey, stake, token_decimal(stake, settings.native_token_decimals)))
-                            logger.info(f"Found validator bond: {pubkey[:20]}... -> {token_decimal(stake, settings.native_token_decimals)} ASI")
-
-                # For allocations, we might need to query initial balances
-                # This is network-specific and might require additional logic
-                logger.info("Note: Initial ASI allocations may need to be discovered through balance queries")
-
-            # Cache the result
-            self._genesis_data_cache = {
-                'allocations': allocations,
-                'bonds': bonds
-            }
-            return self._genesis_data_cache
-
-        except Exception as e:
-            logger.error(f"Failed to extract genesis data: {e}")
-            return None
-
-    async def _extract_genesis_from_state(self, block_info: Dict) -> Optional[Dict]:
-        """Extract genesis data from blockchain state as fallback."""
-        try:
-            logger.info("📊 Extracting genesis data from blockchain state...")
-
-            allocations = []
-            bonds = []
-
-            # Step 1: Get bonds from the block_info passed to us (which has bonds_map)
-            if 'bonds' in block_info:
-                # bonds is already parsed from bonds_map JSONB column
-                for bond in block_info['bonds']:
-                    validator_key = bond.get('validator')
-                    stake = bond.get('stake', 0)
-                    if validator_key and stake > 0:
-                        bonds.append((validator_key, stake, token_decimal(stake, settings.native_token_decimals)))
-                        logger.info(f"Found validator bond: {validator_key[:20]}... -> {token_decimal(stake, settings.native_token_decimals)} ASI")
-            else:
-                # Try to get from client if not in block_info
-                try:
-                    blocks = await self.client.get_blocks_by_height(0, 0)
-                    if blocks and len(blocks) > 0:
-                        genesis_block = blocks[0]
-                        if 'bonds' in genesis_block:
-                            for bond in genesis_block['bonds']:
-                                validator_key = bond.get('validator')
-                                stake = bond.get('stake', 0)
-                                if validator_key and stake > 0:
-                                    bonds.append((validator_key, stake, token_decimal(stake, settings.native_token_decimals)))
-                                    logger.info(
-                                        f"Found validator bond: {validator_key[:20]}... -> {token_decimal(stake, settings.native_token_decimals)} ASI")
-                except Exception as e:
-                    logger.warning(f"Could not get bonds from genesis block: {e}")
-
-            # Step 2: If no bonds in genesis block, ask the node directly
-            if not bonds:
-                try:
-                    bonds_data = await self.client.get_bonds()
-                    for bond in (bonds_data or {}).get("bonds", []):
-                        validator_key = bond.get("validator")
-                        stake = bond.get("stake", 0)
-                        if validator_key and stake > 0:
-                            bonds.append((validator_key, stake, token_decimal(stake, settings.native_token_decimals)))
-                            logger.info(f"Found validator bond: {validator_key[:20]}... -> {token_decimal(stake, settings.native_token_decimals)} ASI")
-                except Exception as e:
-                    logger.error(f"Error getting validator bonds: {e}")
-
-            # For a network-agnostic approach, we can try to detect initial allocations
-            # by looking at the first few blocks for large transfers from genesis
-            logger.info("Note: Initial ASI allocations will be discovered as transfers are processed")
-
-            # Cache the result
-            self._genesis_data_cache = {
-                'allocations': allocations,
-                'bonds': bonds
-            }
-            return self._genesis_data_cache
-
-        except Exception as e:
-            logger.error(f"Failed to extract genesis from state: {e}", exc_info=True)
-            return None
+        decimals = block_info.get("token_decimals", settings.native_token_decimals)
+        allocations = []
+        for deploy in block_info.get("deploys", []):
+            term = deploy.get("term", "")
+            # Limit parsing to the standard VaultsGenerator initialization list.
+            # Do not scan arbitrary contracts, comments or current wallet balances.
+            if deploy.get("errored") or 'initVault!(*vault, addr, initialBalance)' not in term:
+                continue
+            term = re.sub(r'/\*.*?\*/|//[^\n]*', '', term, flags=re.S)
+            for match in re.finditer(r'match\s*\[(.*?)\]\s*\{\s*vaults\s*=>', term, re.S):
+                entries = re.findall(r'\(\s*"([1-9A-HJ-NP-Za-km-z]{50,60})"\s*,\s*(\d+)n?\s*\)', match[1])
+                if not entries:
+                    raise ValueError("Unsupported genesis vault allocation list")
+                for address, raw in entries:
+                    raw = amount(int(raw))
+                    allocations.append((address, raw, token_decimal(raw, decimals)))
+        seen = {}
+        for address, raw, _ in allocations:
+            if address in seen and seen[address] != raw:
+                raise ValueError("Ambiguous genesis allocations for repeated address")
+            seen[address] = raw
+        bonds = []
+        for bond in block_info.get("bonds", []):
+            raw = amount(bond["stake"])
+            if raw:
+                bonds.append((bond["validator"], raw, token_decimal(raw, decimals)))
+        self._genesis_data_cache = {"allocations": allocations, "bonds": bonds}
+        return self._genesis_data_cache
 
     async def _process_genesis_transfers(self, session, block_info: Dict):
         """Process genesis transfers for initial ASI allocations and validator bonds."""
         logger.info("💰 Processing genesis transfers and validator bonds")
 
+        decimals = block_info.get("token_decimals", settings.native_token_decimals)
         # Extract genesis data dynamically
         genesis_data = await self._extract_genesis_data(block_info)
 
@@ -1399,6 +1068,7 @@ class BlockIndexer:
 
             # Create genesis allocation transfer
             transfer = Transfer(
+                token_decimals=decimals, event_index=0,
                 timestamp=block_info.get("timestamp", 0),
                 deploy_id=deploy_id,
                 block_hash=block_info.get("blockHash"),
@@ -1439,6 +1109,7 @@ class BlockIndexer:
 
             # Create genesis bond transfer (validator -> PoS contract)
             transfer = Transfer(
+                token_decimals=decimals, event_index=0,
                 timestamp=block_info.get("timestamp", 0),
                 deploy_id=deploy_id,
                 block_hash=block_info.get("blockHash"),
@@ -1461,6 +1132,7 @@ class BlockIndexer:
         """Process genesis balance states for initial allocations and validator bonds."""
         logger.info("⚖️ Processing genesis balance states")
 
+        decimals = block_info.get("token_decimals", settings.native_token_decimals)
         # Extract genesis data dynamically
         genesis_data = await self._extract_genesis_data(block_info)
 
@@ -1472,8 +1144,12 @@ class BlockIndexer:
         genesis_allocations = genesis_data['allocations']
 
         # Add genesis wallet balance states
-        for address, amount_dust, amount_asi in genesis_allocations:
+        # Repeated genesis addresses replace the vault-map entry; never add
+        # duplicate balance rows or sum inaccessible overwritten vaults.
+        balances = {address: (raw, human) for address, raw, human in genesis_allocations}
+        for address, (amount_dust, amount_asi) in balances.items():
             balance_state = BalanceState(
+                token_decimals=decimals,
                 address=address,
                 block_hash=block_info.get("blockHash"),
                 block_number=0,
@@ -1490,6 +1166,7 @@ class BlockIndexer:
         # Add validator balance states
         for validator_pubkey, amount_dust, amount_asi in validator_bonds:
             balance_state = BalanceState(
+                token_decimals=decimals,
                 address=validator_pubkey,
                 block_hash=block_info.get("blockHash"),
                 block_number=0,
@@ -1502,9 +1179,10 @@ class BlockIndexer:
 
         # PoS contract balance state (holds all bonded ASI)
         total_bonded_dust = sum(bond[1] for bond in validator_bonds)
-        total_bonded_asi = token_decimal(total_bonded_dust, settings.native_token_decimals)
+        total_bonded_asi = token_decimal(total_bonded_dust, decimals)
 
         pos_balance_state = BalanceState(
+            token_decimals=decimals,
             address="1111gW5kkGxHg7xDg6dRkZx2f7qxTizJzaCH9VEM1oJKWRvSX9Sk5",
             block_hash=block_info.get("blockHash"),
             block_number=0,
