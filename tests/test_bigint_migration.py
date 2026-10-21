@@ -5,6 +5,8 @@ import json
 import os
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -15,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from src.amounts import MAX_AMOUNT, token_decimal
 from src.block_indexer import BlockIndexer
+from src.database import Database
 from src.models import BalanceState, Block, Deployment, Transfer, Validator
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -181,4 +184,100 @@ async def test_migration_preserves_history_and_roundtrips_wide_amounts(monkeypat
         if connection is not None:
             await connection.close()
         await admin.execute(f'DROP DATABASE IF EXISTS "{database}"')
+        await admin.close()
+
+
+@pytest.mark.parametrize("decimals", [8, 18])
+@pytest.mark.asyncio
+async def test_periodic_validator_refresh_updates_precision_after_migration(
+    monkeypatch, decimals
+):
+    url = os.environ.get("TEST_DATABASE_URL")
+    if not url:
+        pytest.skip(
+            "Set TEST_DATABASE_URL to run PostgreSQL migration integration tests"
+        )
+    admin = await asyncpg.connect(url)
+    database_name = "validator_refresh_test_" + uuid4().hex
+    connection = database = None
+    try:
+        await admin.execute(f'CREATE DATABASE "{database_name}"')
+        parsed = urlsplit(url)
+        test_url = urlunsplit(parsed._replace(path="/" + database_name))
+        connection = await asyncpg.connect(test_url)
+        await connection.execute(
+            (ROOT / "migrations/000_comprehensive_initial_schema.sql").read_text()
+        )
+        await connection.execute(
+            """
+            INSERT INTO blocks(block_hash, block_number, timestamp, proposer, finalization_status)
+            VALUES ('legacy', 0, 1, 'validator', 'finalized');
+            INSERT INTO validators(public_key, total_stake)
+            VALUES ('validator', 123456789);
+            INSERT INTO validator_bonds(block_hash, block_number, validator_public_key, stake)
+            VALUES ('legacy', 0, 'validator', 123456789);
+            """
+        )
+        await connection.execute(
+            (ROOT / "migrations/001_bigint_amounts.sql").read_text()
+        )
+        assert (
+            await connection.fetchval(
+                "SELECT token_decimals FROM validators WHERE public_key='validator'"
+            )
+            == 8
+        )
+
+        monkeypatch.setattr(
+            "src.block_indexer.settings.native_token_decimals", decimals
+        )
+        database = Database(test_url)
+        await database.connect()
+        await database.set_last_indexed_block(0)
+        monkeypatch.setattr("src.block_indexer.db", database)
+        indexer = BlockIndexer()
+        indexer.client = SimpleNamespace(
+            get_bonds=AsyncMock(),
+            get_active_validators=AsyncMock(return_value=["validator"]),
+        )
+
+        # Refresh at the same indexed height, without processing another block.
+        for increment in (0, 1):
+            stake = 10**decimals + increment
+            indexer.client.get_bonds.return_value = {
+                "bonds": [
+                    {"validator": key, "stake": stake}
+                    for key in ("validator", "new-validator")
+                ]
+            }
+            await indexer._update_validator_states()
+            assert indexer._cycle_error is None
+            rows = await connection.fetch(
+                "SELECT total_stake, token_decimals FROM validators"
+            )
+            assert len(rows) == 2
+            for row in rows:
+                assert (row["total_stake"], row["token_decimals"]) == (stake, decimals)
+                assert token_decimal(
+                    int(row["total_stake"]), row["token_decimals"]
+                ) == (Decimal(1) + Decimal(increment).scaleb(-decimals))
+            assert await database.get_last_indexed_block() == 0
+            assert await connection.fetchval("SELECT COUNT(*) FROM blocks") == 1
+
+        historical = await connection.fetchrow(
+            "SELECT stake, token_decimals FROM validator_bonds WHERE block_hash='legacy'"
+        )
+        assert (historical["stake"], historical["token_decimals"]) == (123456789, 8)
+        assert (
+            await connection.fetchval(
+                "SELECT token_decimals FROM blocks WHERE block_hash='legacy'"
+            )
+            == 8
+        )
+    finally:
+        if database is not None:
+            await database.disconnect()
+        if connection is not None:
+            await connection.close()
+        await admin.execute(f'DROP DATABASE IF EXISTS "{database_name}"')
         await admin.close()

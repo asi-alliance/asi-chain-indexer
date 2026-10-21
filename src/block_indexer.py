@@ -786,6 +786,7 @@ class BlockIndexer:
                         public_key=validator_key,
                         name=validator_key,
                         total_stake=stake,
+                        token_decimals=settings.native_token_decimals,
                         first_seen_block=current_block,
                         last_seen_block=current_block,
                         status="active" if is_active else "bonded",
@@ -795,6 +796,7 @@ class BlockIndexer:
                         index_elements=["public_key"],
                         set_={
                             "total_stake": stake,
+                            "token_decimals": stmt.excluded.token_decimals,
                             "last_seen_block": current_block,
                             "status": "active" if is_active else "bonded",
                             "updated_at": datetime.utcnow()
