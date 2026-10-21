@@ -1055,8 +1055,7 @@ class BlockIndexer:
                 block_number=0,
                 block_hash=block_info.get("blockHash"),
                 deployer="0000000000000000000000000000000000000000000000000000000000000000",
-                deployer_address=public_key_to_asi_address(
-                    "0000000000000000000000000000000000000000000000000000000000000000"),
+                deployer_address="genesis",
                 term=f"Genesis ASI allocation to {address}: {amount_asi:f} ASI",
                 timestamp=block_info.get("timestamp"),
                 sig=deploy_id,
@@ -1074,9 +1073,8 @@ class BlockIndexer:
                 block_hash=block_info.get("blockHash"),
                 block_number=0,
                 # Genesis mint
-                from_address=public_key_to_asi_address(
-                    "0000000000000000000000000000000000000000000000000000000000000000"),
-                from_public_key="0000000000000000000000000000000000000000000000000000000000000000",
+                from_address="genesis",
+                from_public_key=None,
                 to_address=address,
                 amount_dust=amount_dust,
                 amount_asi=amount_asi,

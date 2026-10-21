@@ -362,6 +362,21 @@ async def test_replayed_transfers_replace_false_rows_and_keep_identical_events(
             )
             await session.commit()
         assert await connection.fetchval("SELECT count(*) FROM transfers") == 0
+        # Exercise the formerly unreachable allocation write path, including
+        # the synthetic mint origin and a repeated genesis wallet address.
+        term = (ROOT / "tests/fixtures/genesis-vaults.rho").read_text()
+        genesis = {"blockHash": "genesis", "blockNumber": 0, "timestamp": 1,
+                   "token_decimals": 18, "bonds": [], "deploys": [{"term": term}]}
+        async with AsyncSession(engine) as session:
+            session.add(Block(block_hash="genesis", block_number=0, timestamp=1,
+                              proposer="validator", finalization_status="finalized", token_decimals=18))
+            await session.flush()
+            await indexer._process_genesis_transfers(session, genesis)
+            await indexer._process_genesis_balance_states(session, genesis)
+            await session.commit()
+        assert await connection.fetchval("SELECT count(*) FROM transfers WHERE status='genesis_mint' AND from_address='genesis' AND token_decimals=18") == 21
+        assert await connection.fetchval("SELECT count(*) FROM balance_states WHERE unbonded_balance_dust>0 AND token_decimals=18") == 20
+        assert await connection.fetchval("SELECT sum(amount_dust) FROM transfers WHERE status='genesis_mint'") == 10550031996790000000000000000
     finally:
         if engine:
             await engine.dispose()
