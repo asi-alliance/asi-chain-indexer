@@ -43,6 +43,8 @@ def _to_dict(message) -> Dict[str, Any]:
         value = getattr(message, field.name)
         if field.is_repeated:
             result[field.json_name] = [_field_value(field, item) for item in value]
+        elif field.type == FieldDescriptor.TYPE_MESSAGE and not message.HasField(field.name):
+            result[field.json_name] = None
         else:
             result[field.json_name] = _field_value(field, value)
     return result
@@ -156,8 +158,13 @@ class GrpcNodeClient:
                 # DeployDataProto.deployer/sig are raw bytes, which _to_dict
                 # base64-encodes; re-encode as hex for consistency with the
                 # deployments table (DeployInfo.sig is a hex string there).
-                d["deployer"] = bytes(info.deploy.deployer).hex()
-                d["sig"] = bytes(info.deploy.sig).hex()
+                # Disabled for the cost-accounted node: an offered envelope has empty
+                # deployer and sig fields, so the sync skipped every pending entry.
+                # d["deployer"] = bytes(info.deploy.deployer).hex()
+                # d["sig"] = bytes(info.deploy.sig).hex()
+                d["sig"] = bytes(info.deploy.deployId).hex()
+                members = info.deploy.authorizationV61.policy.allOf.members
+                d["deployer"] = bytes(members[0].publicKey).hex() if members else ""
                 deploys.append({**d, "isRejected": info.isRejected})
 
             return {
