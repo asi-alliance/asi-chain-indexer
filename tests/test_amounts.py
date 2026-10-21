@@ -124,6 +124,41 @@ def test_aggregate_display_can_exceed_single_amount_limit():
         token_decimal(raw, 18)
 
 
+@pytest.mark.parametrize("decimals", [8, 18])
+@pytest.mark.parametrize("suffix", ["", "n"])
+@pytest.mark.parametrize("pattern", ["direct", "vault"])
+@pytest.mark.parametrize(
+    "literal,expected",
+    [
+        ("000100000000", 100000000),
+        ("000" + str(MAX_AMOUNT), MAX_AMOUNT),
+        ("000", None),
+        ("000" + str(MAX_AMOUNT + 1), None),
+    ],
+    ids=["legacy-leading-zero", "uint256-leading-zero", "zero", "overflow"],
+)
+def test_extracts_leading_zero_literals(
+    monkeypatch, decimals, suffix, pattern, literal, expected
+):
+    monkeypatch.setattr("src.block_indexer.settings.native_token_decimals", decimals)
+    sender, recipient = "1111" + "a" * 50, "1111" + "b" * 50
+    term = (
+        f'match ("{sender}", "{recipient}", {literal}{suffix})'
+        if pattern == "direct"
+        else f'@vault!("transfer", "{recipient}", {literal}{suffix}, *ret)'
+    )
+    indexer = BlockIndexer.__new__(BlockIndexer)
+    result = indexer._extract_transfers(
+        {"term": term, "sig": "test", "deployer": sender, "timestamp": 1}, 10
+    )
+    if expected is None:
+        assert result == []
+    else:
+        assert len(result) == 1
+        assert result[0].amount_dust == expected
+        assert result[0].amount_asi == token_decimal(expected, decimals)
+
+
 def test_small_decimal_api_values_use_plain_decimal_strings():
     monitor = MonitoringServer.__new__(MonitoringServer)
     for decimals in [8, 10, 18, 77]:

@@ -1061,7 +1061,8 @@ class BlockIndexer:
                         from_public_key = from_any
                         from_address = public_key_to_asi_address(from_any)
 
-                    amount_dust = amount(amount_str)
+                    # Rholang permits leading zeros; keep amount() validation strict.
+                    amount_dust = amount(amount_str.lstrip("0") or "0")
                     if amount_dust > 0:
                         amount_asi = token_decimal(amount_dust, settings.native_token_decimals)
 
@@ -1182,7 +1183,8 @@ class BlockIndexer:
                         continue
 
                     # Parse amount
-                    amount_dust = amount(amount_str)
+                    # Rholang permits leading zeros; keep amount() validation strict.
+                    amount_dust = amount(amount_str.lstrip("0") or "0")
                     if amount_dust <= 0:
                         continue
 
