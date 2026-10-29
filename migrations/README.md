@@ -16,14 +16,8 @@ This directory contains a **single comprehensive initial migration** that includ
 
 ### Migration History
 
-Previous migration files have been moved to `backup_old_migrations/` for reference:
-
-- `001_initial_schema.sql` - Original core tables
-- `002_add_enhanced_tables.sql` - Added enhanced fields and statistics tables
-- `003_add_block_details.sql` - Block details enhancements (redundant)
-- `003_add_genesis_and_balance_tracking.sql` - Balance tracking (redundant) 
-- `004_extend_validator_name.sql` - Extended validator name field (integrated)
-- `002_fix_field_lengths.sql` - Field length fixes (integrated)
+Legacy migrations were consolidated into `000_comprehensive_initial_schema.sql`
+and removed from the active tree. Earlier versions remain available in Git history.
 
 ## For New Deployments
 
@@ -62,4 +56,3 @@ psql -U indexer -d asichain -f 000_comprehensive_initial_schema.sql
 2. **No migration conflicts**: Eliminates dependency issues  
 3. **Complete documentation**: All schema elements in one place
 4. **Version clarity**: Clear schema version (000) for fresh deployments
-5. **Backup preservation**: Historical migrations preserved for reference
