@@ -48,9 +48,11 @@ run: ## Run the indexer locally
 run-reset: ## Run the indexer with database reset
 	$(PYTHON) -m src.main --reset
 
-migrate: ## Initialize a new database with migrations 000 and 001
+migrate: ## Initialize a new database with migrations 000 through 003
 	psql -v ON_ERROR_STOP=1 $(DATABASE_URL) < migrations/000_comprehensive_initial_schema.sql
 	psql -v ON_ERROR_STOP=1 $(DATABASE_URL) < migrations/001_bigint_amounts.sql
+	psql -v ON_ERROR_STOP=1 $(DATABASE_URL) < migrations/002_executed_transfers.sql
+	psql -v ON_ERROR_STOP=1 $(DATABASE_URL) < migrations/003_native_transfer_calls.sql
 
 docker-build: ## Build Docker image
 	docker build -t asi-indexer:latest .

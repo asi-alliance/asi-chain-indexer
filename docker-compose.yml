@@ -13,6 +13,7 @@ services:
       - ./migrations/000_comprehensive_initial_schema.sql:/docker-entrypoint-initdb.d/000_comprehensive_initial_schema.sql
       - ./migrations/001_bigint_amounts.sql:/docker-entrypoint-initdb.d/001_bigint_amounts.sql
       - ./migrations/002_executed_transfers.sql:/docker-entrypoint-initdb.d/002_executed_transfers.sql
+      - ./migrations/003_native_transfer_calls.sql:/docker-entrypoint-initdb.d/003_native_transfer_calls.sql
     ports:
       - "5432:5432"
     healthcheck:

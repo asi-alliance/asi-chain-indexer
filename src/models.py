@@ -140,6 +140,7 @@ class Transfer(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     event_index = Column(Integer, nullable=True)
+    native_result_id = Column(String(64), ForeignKey("native_transfer_results.id"), unique=True)
     deploy_id = Column(String(140), ForeignKey("deployments.deploy_id"), nullable=False, index=True)
     block_hash = Column(String(64), ForeignKey("blocks.block_hash"), nullable=False, index=True)
     block_number = Column(BigInteger, nullable=False, index=True)
@@ -165,6 +166,50 @@ class Transfer(Base):
         Index("idx_transfers_block", "block_number"),
         Index("idx_transfers_created", "created_at"),
     )
+
+
+class NativeTransferCall(Base):
+    __tablename__ = "native_transfer_calls"
+
+    id = Column(String(64), primary_key=True)
+    block_hash = Column(String(64), ForeignKey("blocks.block_hash"), nullable=False)
+    deploy_id = Column(String(160), ForeignKey("deployments.deploy_id"), nullable=False)
+    event_index = Column(Integer, CheckConstraint("event_index >= 0"), nullable=False)
+    return_channel = Column(Text, nullable=False, index=True)
+    from_address = Column(Text)
+    to_address = Column(Text)
+    requested_amount = Column(Text, nullable=False)
+    token_decimals = Column(Integer, CheckConstraint("token_decimals BETWEEN 0 AND 77"), nullable=False)
+    timestamp = Column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("block_hash", "deploy_id", "event_index", name="uq_native_call"),
+        Index("ix_native_transfer_call_identity", "deploy_id", "event_index"),
+    )
+
+
+class NativeTransferResult(Base):
+    __tablename__ = "native_transfer_results"
+
+    id = Column(String(64), primary_key=True)
+    call_id = Column(String(64), ForeignKey("native_transfer_calls.id"), nullable=False, index=True)
+    block_hash = Column(String(64), ForeignKey("blocks.block_hash"), nullable=False)
+    deploy_id = Column(String(160), ForeignKey("deployments.deploy_id"), nullable=False)
+    response_index = Column(Integer, CheckConstraint("response_index >= 0"), nullable=False)
+    phase = Column(String(32), nullable=False)
+    success = Column(Boolean, nullable=False)
+    timestamp = Column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("block_hash", "deploy_id", "response_index", name="uq_native_result"),
+    )
+
+
+class NativeTransferResultAlias(Base):
+    __tablename__ = "native_transfer_result_aliases"
+
+    result_id = Column(String(64), ForeignKey("native_transfer_results.id"), primary_key=True)
+    call_id = Column(String(64), ForeignKey("native_transfer_calls.id"), primary_key=True, index=True)
 
 
 class PendingDeploy(Base):

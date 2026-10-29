@@ -1,6 +1,4 @@
-import copy
 import hashlib
-import json
 from pathlib import Path
 
 import pytest
@@ -85,9 +83,12 @@ def report(events):
     return {
         "deployInfo": {"sig": "test", "errored": False},
         "report": [
-            {"phase": "REPORT_PHASE_PRECHARGE", "events": payment(1000000)},
+            {
+                "phase": "REPORT_PHASE_PRECHARGE",
+                "events": payment(1000000, ret="ab" * 32),
+            },
             {"phase": "REPORT_PHASE_USER", "events": events},
-            {"phase": "REPORT_PHASE_REFUND", "events": payment(800000)},
+            {"phase": "REPORT_PHASE_REFUND", "events": payment(800000, ret="cd" * 32)},
         ],
     }
 
@@ -124,9 +125,23 @@ def test_dead_branch_and_deploy_rollback_have_no_movements():
     assert transfer_results(r) == []
 
 
-@pytest.mark.parametrize("events", [payment()[:1], payment() + payment()[1:]])
-def test_missing_or_ambiguous_result_is_not_success(events):
+def test_unanswered_call_is_pending_not_success():
+    assert transfer_results(report(payment()[:1])) == []
+
+
+def test_ambiguous_result_is_not_success():
     with pytest.raises(ReportUnavailable):
+        transfer_results(report(payment() + payment()[1:]))
+
+
+def test_rejected_empty_destination_does_not_require_ledger_identity():
+    events = payment(1, False)
+    events[0]["Comm"]["produces"][0]["data"]["pars"][2] = expr("GString", "")
+    assert transfer_results(report(events)) == []
+    events[1]["Produce"]["data"]["pars"][0] = expr(
+        "ETupleBody", {"ps": [expr("GBool", True), expr("GString", "")]}
+    )
+    with pytest.raises(ReportUnavailable, match="identity"):
         transfer_results(report(events))
 
 
@@ -145,7 +160,8 @@ def test_standard_system_vault_channel_derivation():
     # DeployDataProto(deployer=SystemVault public key,timestamp=1559156183943),
     # zero-padded seed; Blake2b512Random's sixth hash, first half = 11th name.
     pk = bytes.fromhex(
-        "040f035630a5d2199184890b4b6b83440c842da0b6becca539f788f7b35d6e873561f673cd6ebe2e32236398a86f29dad992e8fba32534734300fcc5104bcfea0e"
+        "040f035630a5d2199184890b4b6b83440c842da0b6becca539f788f7b35d6e873561"
+        "f673cd6ebe2e32236398a86f29dad992e8fba32534734300fcc5104bcfea0e"
     )
 
     def varint(n):

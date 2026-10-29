@@ -25,7 +25,10 @@ from src.models import (
 )
 from src.grpc_node_client import GrpcNodeClient
 from src.sync_progress import BlockBatchProgress
-from src.transfer_reports import block_transfers
+from src.transfer_reports import block_events
+from src.native_transfers import (
+    reconcile_block, reconcile_completed_duplicates, require_indexed_parents,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -110,6 +113,13 @@ class BlockIndexer:
         logger.info("📊 Connecting to database...")
         await db.connect()
         await db.create_tables()
+        if settings.enable_asi_transfer_extraction:
+            async with db.session() as session:
+                needs_repair = await session.scalar(text(
+                    "SELECT value FROM indexer_state WHERE key = 'native_transfer_backfill_required'"
+                ))
+                if needs_repair == "1":
+                    raise ValueError("Run python -m src.reindex_transfers before starting transfer indexing")
         logger.info("✅ Database connected and tables ready")
 
         # Initialize gRPC node client
@@ -365,8 +375,13 @@ class BlockIndexer:
             processed_count = 0
             skipped = []
             last_skip_error = None
-            for block_summary in block_summaries:
+            for block_summary in sorted(block_summaries, key=lambda block: (
+                block.get("blockNumber") if block.get("blockNumber") is not None else -1,
+                block.get("blockHash") or ""
+            )):
                 block_number = block_summary.get("blockNumber")
+                if block_number is not None and block_number > progress.last_completed_height + 1:
+                    break
                 progress.mark_seen(block_number)
                 try:
                     # Get full block details
@@ -521,11 +536,10 @@ class BlockIndexer:
                 logger.debug("Block already indexed", block_number=block_number)
                 return
 
+        traces = None
         if settings.enable_asi_transfer_extraction and deployments and block_number != 0:
             report = await self.client.get_block_report(block_hash)
-            movements = block_transfers(report, block_hash, [d["sig"] for d in deployments])
-            for deployment in deployments:
-                deployment["executedTransfers"] = movements[deployment["sig"]]
+            traces = block_events(report, block_hash, [d["sig"] for d in deployments])
 
         # Process block in transaction
         async with db.session() as session:
@@ -571,7 +585,20 @@ class BlockIndexer:
 
             # Process deployments with enhanced data
             for deploy_data in deployments:
-                await self._process_deployment_enhanced(session, block_info, deploy_data)
+                await self._process_deployment_enhanced(
+                    session, block_info, deploy_data, store_transfers=False
+                )
+
+            if traces is not None:
+                movements = await reconcile_block(session, block_info, deployments, traces, self.client)
+                for deploy_data in deployments:
+                    deploy_data["executedTransfers"] = movements[deploy_data["sig"]]
+                    await self._store_transfers(session, block_info, deploy_data)
+            elif settings.enable_asi_transfer_extraction and block_number != 0:
+                await require_indexed_parents(session, block_info, self.client)
+
+            if settings.enable_asi_transfer_extraction and block_number != 0:
+                await reconcile_completed_duplicates(session, block_info)
 
             # Process genesis transfers if this is block 0
             if block_number == 0:
@@ -618,7 +645,8 @@ class BlockIndexer:
                 timestamp=datetime.fromtimestamp(block_info.get("timestamp", 0) / 1000)
             )
 
-    async def _process_deployment_enhanced(self, session, block_data: Dict, deploy_data: Dict):
+    async def _process_deployment_enhanced(self, session, block_data: Dict, deploy_data: Dict,
+                                         *, store_transfers=True):
         """Process a deployment; deploy_data already has everything from the block response."""
         deploy_id = deploy_data.get("sig")
         if not deploy_id:
@@ -688,8 +716,9 @@ class BlockIndexer:
             await session.flush()  # surface FK/NOT NULL issues early
         except Exception as e:
             logger.warning("deployment upsert failed", deploy_id=deploy_id, err=str(e))
+            raise
 
-        if not settings.enable_asi_transfer_extraction:
+        if not store_transfers or not settings.enable_asi_transfer_extraction:
             return
 
         if block_data["blockNumber"] == 0:
@@ -989,12 +1018,14 @@ class BlockIndexer:
         return [Transfer(
             deploy_id=deploy_data["sig"], block_number=block_number,
             event_index=movement["event_index"],
+            native_result_id=movement.get("native_result_id"),
             from_address=movement["from_address"], to_address=movement["to_address"],
             from_public_key=(deploy_data.get("deployer") if
                 convert_to_asi_address(deploy_data.get("deployer", ""), deploy_data) == movement["from_address"] else None),
             amount_dust=movement["amount"],
-            amount_asi=token_decimal(movement["amount"], decimals), token_decimals=decimals,
-            status="success", timestamp=deploy_data["timestamp"],
+            amount_asi=token_decimal(movement["amount"], movement.get("token_decimals", decimals)),
+            token_decimals=movement.get("token_decimals", decimals),
+            status="success", timestamp=movement.get("timestamp", deploy_data["timestamp"]),
         ) for movement in deploy_data["executedTransfers"]]
 
     async def _extract_genesis_data(self, block_info: Dict) -> Dict:

@@ -609,7 +609,13 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/bigint-storage.sql
 The check rolls back its writes and verifies uint256 bounds and decimal precision.
 Run `make protos` and `python -m pytest tests/ -q` for regression tests. Set
 `TEST_DATABASE_URL` to a test PostgreSQL server with `CREATEDB` permission to also
-exercise migration 000 → 001, ORM round trips, legacy precision and notifications.
+exercise migrations 000–003, ORM round trips, delayed transfers, legacy precision and notifications.
 That integration test creates and removes only its own randomly named database.
 
-Existing indexer installations must apply migration 002 and repair earlier inferred transfers before rollout. See [migration and repair instructions](migrations/README.md#repair-source-inferred-transfer-history).
+Existing indexer installations must apply migrations through 003 and repair transfer history before rollout. See [migration and repair instructions](migrations/README.md#repair-source-inferred-transfer-history).
+
+Unanswered native calls remain pending without stopping block indexing. A later
+committed reply records delivery under the completion deploy and block. The
+read-only `native_transfer_lifecycle` GraphQL view links initiation and completion;
+pending and rejected calls do not contribute to transfer totals. Reload Hasura
+metadata after migration. Explorer rendering of these lifecycle fields is separate.

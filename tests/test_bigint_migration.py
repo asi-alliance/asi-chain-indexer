@@ -62,6 +62,9 @@ async def test_migration_preserves_history_and_roundtrips_wide_amounts(monkeypat
         await connection.execute(
             (ROOT / "migrations/002_executed_transfers.sql").read_text()
         )
+        await connection.execute(
+            (ROOT / "migrations/003_native_transfer_calls.sql").read_text()
+        )
         for table in [
             "blocks",
             "transfers",
@@ -227,6 +230,9 @@ async def test_periodic_validator_refresh_updates_precision_after_migration(
         await connection.execute(
             (ROOT / "migrations/002_executed_transfers.sql").read_text()
         )
+        await connection.execute(
+            (ROOT / "migrations/003_native_transfer_calls.sql").read_text()
+        )
         assert (
             await connection.fetchval(
                 "SELECT token_decimals FROM validators WHERE public_key='validator'"
@@ -308,6 +314,7 @@ async def test_replayed_transfers_replace_false_rows_and_keep_identical_events(
             "000_comprehensive_initial_schema.sql",
             "001_bigint_amounts.sql",
             "002_executed_transfers.sql",
+            "003_native_transfer_calls.sql",
         ]:
             await connection.execute((ROOT / "migrations" / migration).read_text())
         await connection.execute(

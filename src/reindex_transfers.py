@@ -1,17 +1,20 @@
 """Repair indexed transfer history without resetting the node or chain data.
 
-Stop indexer writes, apply migration 002, then run python -m src.reindex_transfers.
+Stop indexer writes, apply migrations through 003, then run python -m src.reindex_transfers.
 Each block is atomic and a failed/missing report aborts; rerunning is safe.
 """
 
 import asyncio
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 
 from src.block_indexer import BlockIndexer
 from src.database import db
 from src.grpc_node_client import GrpcNodeClient
 from src.models import BalanceState, Block, Deployment, Transfer
-from src.transfer_reports import block_transfers
+from src.transfer_reports import block_events
+from src.native_transfers import (
+    reconcile_block, reconcile_completed_duplicates, require_indexed_parents,
+)
 
 
 async def repair():
@@ -24,7 +27,6 @@ async def repair():
             blocks = (
                 await session.scalars(
                     select(Block)
-                    .where((Block.block_number == 0) | Block.deployments.any())
                     .order_by(Block.block_number, Block.block_hash)
                 )
             ).all()
@@ -59,10 +61,11 @@ async def repair():
                     await indexer._process_genesis_balance_states(session, info)
             elif deploys:
                 report = await client.get_block_report(block.block_hash)
-                movements = block_transfers(
+                traces = block_events(
                     report, block.block_hash, [d["sig"] for d in deploys]
                 )
                 async with db.session() as session:
+                    movements = await reconcile_block(session, info, deploys, traces, client)
                     for deploy in deploys:
                         # deployments has one canonical occurrence per deploy.
                         owner = await session.scalar(
@@ -74,7 +77,17 @@ async def repair():
                             continue
                         deploy["executedTransfers"] = movements[deploy["sig"]]
                         await indexer._store_transfers(session, info, deploy)
+                    await reconcile_completed_duplicates(session, info)
+            else:
+                async with db.session() as session:
+                    await require_indexed_parents(session, info, client)
+                    await reconcile_completed_duplicates(session, info)
             print(f"Repaired block {block.block_number} {block.block_hash}", flush=True)
+        async with db.session() as session:
+            await session.execute(text("""
+                UPDATE indexer_state SET value = '0', updated_at = NOW()
+                WHERE key = 'native_transfer_backfill_required'
+            """))
     finally:
         await client.close()
         await db.disconnect()

@@ -294,6 +294,25 @@ def main():
     
     for table in tables:
         track_table(table)
+
+    track_table("native_transfer_lifecycle")
+    set_table_permissions("native_transfer_lifecycle")
+    for relationship, column, remote in [
+        ("initiation_deployment", "initiation_deploy_id", "deployments"),
+        ("completion_deployment", "completion_deploy_id", "deployments"),
+        ("initiation_block", "initiation_block_hash", "blocks"),
+        ("completion_block", "completion_block_hash", "blocks"),
+        ("transfer", "transfer_id", "transfers"),
+    ]:
+        remote_column = {"deployments": "deploy_id", "blocks": "block_hash", "transfers": "id"}[remote]
+        create_manual_relationship("native_transfer_lifecycle", relationship,
+                                   {column: remote_column}, remote)
+    create_manual_array_relationship("deployments", "native_transfer_calls",
+                                     {"deploy_id": "initiation_deploy_id"},
+                                     "native_transfer_lifecycle")
+    create_manual_array_relationship("deployments", "completed_native_transfers",
+                                     {"deploy_id": "completion_deploy_id"},
+                                     "native_transfer_lifecycle")
     
     # Step 2: Track views (if any)
     print("\n👁️  Step 2: Tracking Views")
