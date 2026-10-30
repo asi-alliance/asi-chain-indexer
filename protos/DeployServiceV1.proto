@@ -51,8 +51,10 @@ service DeployService {
   // block-level; for deploy effect-finality use finalizationState or
   // deployFinalizationStatus.
   rpc findDeploy(FindDeployQuery) returns (FindDeployResponse) {}
-  // Preview new top-level unforgeable names (for example, to compute signatures over them).
-  rpc previewPrivateNames(PrivateNamePreviewQuery) returns (PrivateNamePreviewResponse) {}
+  // Preview legacy top-level unforgeable names. Protocol 6 returns an error.
+  rpc previewPrivateNames(PrivateNamePreviewQuery) returns (PrivateNamePreviewResponse) {
+    option deprecated = true;
+  }
   // Get details about a particular block.
   rpc lastFinalizedBlock(LastFinalizedBlockQuery) returns (LastFinalizedBlockResponse) {}
   // Check if a given block is finalized.

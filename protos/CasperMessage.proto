@@ -36,6 +36,154 @@ message BlockRequestProto {
   bytes  hash = 1;
 }
 
+// -------- Phase 7b-1 snapshot chunk-fetch --------
+// Joiners request individual 4 MiB chunks of a finalized snapshot
+// by (block_hash, chunk_index).  block_hash keys into the
+// serving validator's `snapshot_merkle_roots` cache to locate the
+// on-disk snapshot; chunk_index selects the 4 MiB slice.  The
+// response carries the raw bytes plus the chunk's precomputed
+// Blake2b256 hash so the requester can verify against a
+// concurrently-fetched inclusion proof against the anchored root.
+//
+// Server-provided hash fields (chunk_hash, merkle_root) are
+// ADVISORY — the receiver MUST re-derive from the raw bytes and
+// its locally-anchored root respectively.  See each field's
+// comment for the authoritative-vs-advisory contract.
+//
+// Merkle-tree shape: the chunk-hash tree is a plain bottom-up
+// binary Merkle tree with LAST-LEAF DUPLICATION on odd-count
+// levels (standard practice).  A receiver verifying an
+// inclusion proof MUST apply the identical duplication rule
+// when reconstructing the parent chain, or the recomputed root
+// will diverge from `merkle_root` even for well-formed
+// snapshots.  Pinned here against drift between the Wave 3.5
+// server slice and the Wave 3.6 client slice.
+
+message GetSnapshotChunkRequestProto {
+  option (scalapb.message).extends = "CasperMessageProto";
+  bytes  block_hash    = 1;   // finalized block hash whose snapshot to fetch
+  uint32 chunk_index   = 2;   // which 4 MiB piece
+}
+
+message SnapshotChunkResponseProto {
+  option (scalapb.message).extends = "CasperMessageProto";
+  bytes  block_hash    = 1;   // echo of the request's block_hash
+  uint32 chunk_index   = 2;   // echo of the request's chunk_index
+  bytes  chunk_bytes   = 3;   // raw chunk payload (may be < 4 MiB for tail)
+  // Blake2b256(chunk_bytes) — 32 bytes.
+  //
+  // ADVISORY.  The receiver MUST recompute `Blake2b256(chunk_bytes)`
+  // locally and compare — a malicious server could stuff a hash
+  // that walks the Merkle proof without matching the actual
+  // bytes, so trusting this field as authoritative would skip
+  // the real check.  Kept in the wire for a fast pre-verify
+  // short-circuit when the bytes are large.
+  bytes  chunk_hash    = 4;
+  // Merkle root anchor over all chunk hashes — 32 bytes.
+  //
+  // ADVISORY.  The receiver MUST compare against the root it
+  // locally anchored via block finalization (NOT trust the
+  // response's claim).  A matching value is a necessary
+  // sanity check; it is NOT the authority.
+  bytes  merkle_root   = 5;
+  uint32 chunk_count   = 6;   // total number of chunks in this snapshot
+  repeated MerkleProofStepProto merkle_proof = 7; // inclusion proof for chunk_index
+}
+
+// One step of a bottom-up Merkle inclusion proof.  sibling_hash
+// is the co-child at this level; is_sibling_right = true means
+// the sibling is the right child (concat = current || sibling);
+// false means left (concat = sibling || current).
+message MerkleProofStepProto {
+  bytes sibling_hash        = 1;
+  bool  is_sibling_right    = 2;
+}
+
+// Sent by a joiner asking "do you have a serveable snapshot for
+// this block?"  Broadcast + point-to-point; serving nodes reply
+// with HasSnapshotProto when they can serve it.  Mirrors the
+// HasBlockRequestProto / HasBlockProto pattern.
+message HasSnapshotRequestProto {
+  option (scalapb.message).extends = "CasperMessageProto";
+  bytes block_hash = 1;
+}
+
+// Response to HasSnapshotRequestProto.  Carries `merkle_root`
+// so the joiner can pin an anchor BEFORE issuing per-chunk
+// requests.  Both merkle_root and chunk_count here are
+// ADVISORY — the joiner MUST re-verify merkle_root against
+// its locally-anchored root (from block finalization) and
+// expect chunk_count to match the actual chunks it later
+// receives via GetSnapshotChunkRequest.  A server
+// reporting an inflated chunk_count would be caught by the
+// per-chunk inclusion-proof check during fetch.
+message HasSnapshotProto {
+  option (scalapb.message).extends = "CasperMessageProto";
+  bytes  block_hash  = 1;
+  bytes  merkle_root = 2;   // ADVISORY anchor the joiner can pin
+  uint32 chunk_count = 3;   // ADVISORY count the joiner can budget
+}
+
+// -------- Phase 7b-2 between-snapshot WAL payload fetch --------
+// After a joiner has assembled the latest snapshot, the WAL
+// between that snapshot and the head block still references
+// payload bytes by Blake2b256 hash.  For each hash that the
+// joiner can't reproduce locally (deterministic-Rholang /
+// deploy-data reducer misses), it asks peers for the bytes by
+// hash.  The response echoes the hash + the raw bytes; the
+// joiner rehashes the bytes to verify against the requested
+// hash before applying.
+//
+// `payload_hash` in BOTH request and response is the content-
+// address.  The echoed hash in the response is ADVISORY — the
+// joiner MUST recompute `Blake2b256(payload_bytes)` and compare
+// against the ORIGINAL request's hash.  A server returning
+// mismatched bytes with a correct-looking echoed hash would
+// otherwise skip the real content-integrity check.
+//
+// Payload sizes are bounded by write-op semantics: single
+// fs_write / fs_read replies map to one hash.  Cap enforced
+// at MAX_PAYLOAD_BYTES = 4 MiB (same as snapshot CHUNK_SIZE —
+// a natural upper bound; anything larger would already be
+// chunked by Phase 7b-1 during snapshot).
+
+message GetWalPayloadRequestProto {
+  option (scalapb.message).extends = "CasperMessageProto";
+  bytes payload_hash = 1;   // Blake2b256(payload bytes) — 32 bytes
+}
+
+message WalPayloadResponseProto {
+  option (scalapb.message).extends = "CasperMessageProto";
+  // ADVISORY echo of the request's payload_hash.  Receiver
+  // MUST recompute `Blake2b256(payload_bytes)` and compare
+  // against the ORIGINAL request's hash (NOT this echo).
+  bytes payload_hash  = 1;
+  bytes payload_bytes = 2;  // raw payload bytes; joiner rehashes to verify
+}
+
+// Sent by a joiner asking "do you have bytes for this payload
+// hash?"  Broadcast + point-to-point; serving nodes reply with
+// HasWalPayloadProto when they can serve it.  Mirrors the
+// HasSnapshotRequestProto / HasSnapshotProto pattern.
+message HasWalPayloadRequestProto {
+  option (scalapb.message).extends = "CasperMessageProto";
+  bytes payload_hash = 1;
+}
+
+// Response to HasWalPayloadRequestProto.  Carries `payload_size`
+// so the joiner can budget before issuing the full fetch via
+// GetWalPayloadRequest.  Size is ADVISORY — the receiver MUST
+// cap at MAX_PAYLOAD_BYTES (4 MiB) regardless of what the
+// server claims here, and the actual response's byte count is
+// the authoritative truth.  A server over-reporting here would
+// get caught by the comm-layer message-size limit before memory
+// pressure.
+message HasWalPayloadProto {
+  option (scalapb.message).extends = "CasperMessageProto";
+  bytes  payload_hash = 1;
+  uint32 payload_size = 2;   // ADVISORY count the joiner can budget
+}
+
 message ForkChoiceTipRequestProto {
   option (scalapb.message).extends = "CasperMessageProto";
 }
@@ -66,10 +214,62 @@ message BlockApprovalProto {
   Signature sig                         = 2 [(scalapb.field).no_box = true];
 }
 
+// The anchor's finalized floor and frontier as the responder derived them,
+// so a node restored from that anchor can start deriving forward instead of
+// re-deriving finality from history it will never hold.
+//
+// Both blocks are named by hash AND number because the receiver needs the
+// numbers before it holds the blocks: they size the download window, and the
+// hashes are useless until the blocks they name are on disk.
+message FinalizedFloorSeedProto {
+  bytes floorHash       = 1;
+  int64 floorNumber     = 2;
+  bytes frontierHash    = 3;
+  int64 frontierNumber  = 4;
+}
+
 message ApprovedBlockProto  {
   option (scalapb.message).extends = "CasperMessageProto";
   ApprovedBlockCandidateProto candidate = 1 [(scalapb.field).no_box = true];
   repeated Signature sigs               = 2;
+  // Deliberately here and not on the candidate: the candidate's serialized
+  // bytes are the payload the genesis ceremony signs and `Validate::approved_block`
+  // re-derives, so a field there would put unsigned peer-supplied data inside
+  // the signed envelope. Absent from peers that predate it, which the receiver
+  // handles by deferring rather than by assuming a floor.
+  FinalizedFloorSeedProto floorSeed     = 3;
+}
+
+// The finalized-floor cache for a set of blocks, shipped so a restored node
+// receives finality for its window instead of re-deriving it from history it
+// does not keep. Values are pure functions of the named blocks, computed by
+// the responder when it validated them; trust is the same class as the
+// approved block itself — the peer that chose your anchor.
+message FloorCacheRequestProto {
+  repeated bytes hashes = 1;
+}
+
+message FloorCacheEntryProto {
+  bytes blockHash    = 1;
+  bytes floorHash    = 2;
+  bytes frontierHash = 3;
+}
+
+message FloorCacheResponseProto {
+  repeated FloorCacheEntryProto entries = 1;
+  // The shard's genesis block hash (empty when the responder does not hold
+  // it). A truncated requester holds no height-0 block but must seed
+  // newly-bonded latest-message slots with the same network-uniform genesis
+  // sentinel every ceremony node derives locally. Same trust class as the
+  // entries: the peer that chose the anchor.
+  bytes genesisHash = 2;
+  // The genesis block itself (absent when the responder does not hold it).
+  // Hash-addressed: the receiver verifies it against genesisHash before
+  // storing, so the field carries no trust of its own. Holding genesis makes
+  // a truncated node's latest-message structures identical to a ceremony
+  // node's — the newly-bonded sentinel points at it and the propose snapshot
+  // dereferences every slot.
+  BlockMessageProto genesisBlock = 3;
 }
 
 message ApprovedBlockRequestProto {
@@ -123,6 +323,7 @@ message BlockMetadataInternal {
   bool directlyFinalized                     = 9; // whether the block has been last finalized block (LFB)
   bool finalized                             = 10;// whether the block is finalized
   float faultToleranceValue                  = 11;// cached normalized FT at finalization time
+  bytes mergeBase                            = 12;// recorded state parent (BlockProto body mergeBase); empty = header-derivable
 }
 
 message HeaderProto {
@@ -138,6 +339,8 @@ message HeaderProto {
  * **TODO**: details of signatures and payment. See RHOL-781
  */
 message DeployDataProto {
+  reserved 15;
+  reserved "primary_phlo_share";
   bytes  deployer             = 1; //public key
   string term                 = 2; //rholang source code to deploy (will be parsed into `Par`)
   int64  timestamp            = 3; //millisecond timestamp
@@ -149,6 +352,172 @@ message DeployDataProto {
   string shardId              = 11;//shard ID to prevent replay of deploys between shards
   string language             = 12;//language (rholang or metta) of the source code
   int64 expirationTimestamp   = 13;//optional millisecond timestamp after which deploy is invalid (0 = no expiration)
+  repeated CompoundSigner cosigners = 14; //additional cosigners (empty = legacy single-sig)
+  // Phase 2: M-of-N threshold quorum size.
+  //   0  → N-of-N (Phase 1 semantics): every signer must verify.
+  //   k>0 → M-of-N: at least `k` of `cosigners.len() + 1` signers must
+  //         present a valid signature. Placeholder signers (sig.is_empty())
+  //         are allowed and do not count toward quorum.
+  // Constraint at decode: 0 ≤ cosigner_threshold ≤ cosigners.len() + 1.
+  int32 cosigner_threshold   = 16;
+  // Phase 3: LL-rich signature algebra. When present, OVERRIDES
+  // `cosigners[]` and `cosigner_threshold` — the deploy is validated
+  // against the algebraic expression instead of the flat list. Atomic
+  // leaves (SigAtom) carry the per-signer (pk, sig, sig_algorithm) tuples,
+  // and the algebra describes their combination.
+  // See `rholang/src/rust/interpreter/accounting/mod.rs::Sig` for the
+  // operational semantics.
+  optional SigCompound sig_algebra = 17;
+  repeated rhoapi.CostSignature authorityPresentations = 18;
+  bytes deployId = 19;
+  DeployAuthorizationV61 authorizationV61 = 20;
+  optional bytes fundingIntent = 21;
+}
+
+enum SignatureSchemeV61 {
+  SIGNATURE_SCHEME_V61_UNSPECIFIED = 0;
+  SIGNATURE_SCHEME_V61_SECP256K1 = 1;
+  SIGNATURE_SCHEME_V61_SECP256K1_ETH = 2;
+  SIGNATURE_SCHEME_V61_SCHNORR_SECP256K1 = 3;
+  SIGNATURE_SCHEME_V61_FROST_SECP256K1 = 4;
+  SIGNATURE_SCHEME_V61_ED25519 = 5;
+}
+
+message PrincipalV61 {
+  SignatureSchemeV61 scheme = 1;
+  bytes publicKey = 2;
+}
+
+message AllOfPolicyV61 {
+  repeated PrincipalV61 members = 1;
+}
+
+message ThresholdPolicyV61 {
+  uint32 minimum = 1;
+  repeated PrincipalV61 members = 2;
+}
+
+message AuthorizationPolicyV61 {
+  oneof policy {
+    AllOfPolicyV61 allOf = 1;
+    ThresholdPolicyV61 threshold = 2;
+  }
+}
+
+message SignatureWitnessV61 {
+  uint32 memberIndex = 1;
+  bytes signature = 2;
+}
+
+message DeployAuthorizationV61 {
+  uint32 formatVersion = 1;
+  AuthorizationPolicyV61 policy = 2;
+  bytes presenceBitmap = 3;
+  repeated SignatureWitnessV61 witnesses = 4;
+}
+
+// One cosigner in a multi-signature deploy. Sorted ascending by `pk` bytes
+// in `DeployDataProto.cosigners` (decoder enforces). Each cosigner signs
+// the same canonical message hash as the primary deployer.
+message CompoundSigner {
+  // D3 (DR-9): per-signer phlo_share is removed; funding is per-signature
+  // supply Σ⟦s⟧, not an escrow share. Tag 4 RESERVED.
+  reserved 4;
+  reserved "phloShare";
+  bytes  pk           = 1; //cosigner public key
+  bytes  sig          = 2; //cosigner signature of (hash(term) + timestamp) using private key
+  string sigAlgorithm = 3; //name of the algorithm used to sign (e.g., "secp256k1", "ed25519")
+}
+
+// Phase 2 / Phase 3 LL-rich signature algebra wire encoding.
+//
+// `SigCompound` is a recursive algebraic shape mirroring the runtime
+// `Sig` enum (`rholang/src/rust/interpreter/accounting/mod.rs`). When
+// present on a `DeployDataProto` (future field expansion — Phase 2/3 RFC),
+// the verifier validates the deploy against the `Sig` expression instead
+// of the flat `cosigners[]` list.
+//
+// At Phase 1 (current), `Sig::And` is the only compound shape used and
+// the flat cosigners[] field encodes a left-associated And tree. The
+// `SigCompound` message is introduced here to give downstream Phase 2/3
+// wire-format extensions a forward-compatible scaffold:
+//
+//   - Phase 2 (M-of-N quorum): set `threshold` field to encode a
+//     `Sig::Threshold` envelope; populate `members[]` with the candidate
+//     signers and `threshold_min` with the required quorum size.
+//   - Phase 3 (LL-rich): set `plus` / `with_` / `bang` / `whynot` /
+//     `lolly` to encode the corresponding LL connectives. Branch witness
+//     for `Plus` is carried via `plus_branch` (0 = left, 1 = right).
+message SigCompound {
+  oneof connective {
+    SigAtom      atom      = 1;   // Sig::Ground / Sig::Quote leaf (atom_kind selects axis)
+    SigPair      tensor    = 2;   // Sig::And / Sig::Tensor (multiplicative ⊗)
+    SigPlus      plus      = 3;   // Sig::Plus  (additive ⊕ with branch witness)
+    SigPair      with_     = 4;   // Sig::With  (additive & — LL "with")
+    SigBang      bang      = 5;   // Sig::Bang  (exponential !)
+    SigCompound  whynot    = 6;   // Sig::WhyNot (exponential ?)
+    SigLolly     lolly     = 7;   // Sig::Lolly  (linear implication ⊸)
+    SigThreshold threshold = 8;   // Sig::Threshold (M-of-N quorum)
+  }
+}
+
+// Distinguishes the two atomic signature axes of the cost-accounted
+// rho-calculus (`publications/cost-accounting/cost-accounted-rho.tex`
+// §App-A, eqs. eq:app-sig-ground / eq:app-sig-hash):
+//   GROUND (`g`)  — a ground signature key `g ∈ G`; Σ⟦g⟧ = quote(H_g).
+//   QUOTE  (`#P`) — a cryptographic process-hash `#P`; Σ⟦#P⟧ = quote(H(𝒫⟦P⟧)).
+// Both reflect to a quoted name on the wire, so the SIGNATURE-CHANNEL
+// derivation is identical for equal `pk` bytes; the axis is carried only
+// so the runtime `Sig` value round-trips faithfully. GROUND = 0 is the
+// proto3 default, so any legacy `SigAtom` decoded without this field is a
+// ground atom — preserving backward compatibility.
+enum AtomKind {
+  GROUND = 0;
+  QUOTE  = 1;
+}
+
+message SigAtom {
+  // D3 (DR-9): per-leaf phlo_share is removed (no escrow share). Tag 4 RESERVED.
+  reserved 4;
+  reserved "phloShare";
+  bytes    pk           = 1;
+  bytes    sig          = 2;
+  string   sigAlgorithm = 3;
+  AtomKind atom_kind    = 5;
+}
+
+message SigPair {
+  SigCompound left  = 1;
+  SigCompound right = 2;
+}
+
+message SigPlus {
+  SigCompound left          = 1;
+  SigCompound right         = 2;
+  int32       chosen_branch = 3; // 0 = left, 1 = right (signer's choice)
+}
+
+message SigBang {
+  SigCompound inner               = 1;
+  // uses_bound = 0 means unbounded (LL-canonical); uses_bound > 0 means
+  // bounded replication (Phase 3 §3.5 capability registry).
+  int64       uses_bound          = 2;
+  // capability_handle: optional registry pointer to a pre-registered
+  // replicable signature (Phase 3 §3.5 rho:system:capabilities).
+  bytes       capability_handle   = 3;
+}
+
+message SigLolly {
+  SigCompound from                = 1;
+  SigCompound to                  = 2;
+  // capability_handle: pointer into rho:system:capabilities registry
+  // that holds the transformer process for this σ_from ⊸ σ_to delegation.
+  bytes       capability_handle   = 3;
+}
+
+message SigThreshold {
+  int32 threshold              = 1; // required quorum size k
+  repeated SigCompound members = 2; // candidate signers (n total; k-of-n)
 }
 
 message ProcessedDeployProto {
@@ -157,6 +526,7 @@ message ProcessedDeployProto {
     repeated EventProto deployLog = 3; //the new terms and comm. rule reductions from this deploy
     bool errored                  = 5; //true if deploy encountered a user error
     string systemDeployError      = 6;
+    optional bytes nativeCostEvidence = 14;
 }
 
 message SlashSystemDeployDataProto {
@@ -187,10 +557,36 @@ message BodyProto {
   repeated ProcessedSystemDeployProto systemDeploys = 3;
   bytes extraBytes                                  = 4;
   repeated RejectedDeployProto rejectedDeploys      = 5;
+  // User-deploy sigs whose chains this block's merge APPLIED from scope
+  // into its pre-state. The state plane's positive fact: a deploy's
+  // effect enters a state either by fresh execution (a `deploys` entry)
+  // or by a merge re-applying its chain — which, without this field, no
+  // block data records. Empty for non-merged blocks. Validator-recomputed
+  // and consensus-checked alongside rejectedDeploys.
+  repeated bytes appliedFromScope                   = 6;
+  // The block whose committed state this block's pre-state derives from:
+  // for a merged block its main parent, or the floor block when that
+  // parent's state does not hold the floor's settled content; the covering
+  // parent for the fast path; empty where the header derives it
+  // (single-parent and genesis). Recording it makes state-membership a walk over recorded
+  // pointers instead of a per-block re-derivation:
+  // state(B) = state(mergeBase) + appliedFromScope + deploys.
+  bytes mergeBase                                   = 7;
 }
 
 message RejectedDeployProto{
-  bytes sig = 1;
+  bytes sig       = 1;
+  // Set by the merge that formed this record when the sig's effect is
+  // present in that merge's own post-state (a kept copy in the same merge,
+  // or already settled in its base): the record discarded a redundant copy
+  // and does not dispute the sig's standing win. Validators recompute the
+  // flag during checkpoint validation; a mismatch invalidates the block.
+  bool duplicate  = 2;
+  // The block that held the copy this record adjudicated. The merge knows
+  // it exactly (the rejected chain's source block); recording it makes
+  // coverage an equality instead of an inference. Validators recompute the
+  // carrier during checkpoint validation; a mismatch invalidates the block.
+  bytes carrier   = 3;
 }
 
 message JustificationProto {

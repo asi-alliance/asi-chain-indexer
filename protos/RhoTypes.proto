@@ -45,6 +45,57 @@ message Par {
       [(scalapb.field).type =
            "coop.rchain.models.AlwaysEqual[scala.collection.immutable.BitSet]"];
   bool connective_used = 10;
+  repeated CostSignedTerm cost_signed_terms = 13;
+  repeated CostStack cost_stacks = 14;
+}
+
+message CostSignature {
+  oneof value {
+    bytes ground = 1;
+    sint32 bound_level = 2;
+    Par quote = 3;
+    CostSignatureCompound compound = 4;
+    Par name = 5;
+    bool unit = 6;
+  }
+}
+
+message CostSignatureCompound {
+  repeated CostSignature elements = 1;
+}
+
+message CostSignedTerm {
+  Par body = 1;
+  CostSignature signature = 2;
+  // Added by G3 (DR-135, S3b): the price of the holder of a held term (Rule
+  // H). Only the reducer sets it, on the held terms that it makes. A signed
+  // term of the surface syntax has no held price, which prost omits.
+  optional uint64 held_price = 3;
+}
+
+message CostRegion {
+  bytes instance_id = 1;
+  CostSignature signature = 2;
+  // Added by G3 (DR-135): the signed price of the context that created the
+  // region (R4). Zero outside native execution, which prost omits.
+  uint64 price = 3;
+  // Added by G3 (DR-135): on a system residue region, the caller of the system
+  // body (A1). Absent everywhere else.
+  CostCaller caller = 4;
+}
+
+// Added by G3 (DR-135): an owner with its signed price (A1).
+message CostCaller {
+  CostSignature signature = 1;
+  uint64 price = 2;
+}
+
+message CostAuthority {
+  repeated CostRegion regions = 1;
+}
+
+message CostStack {
+  repeated CostSignature cells = 1;
 }
 
 /**
@@ -61,6 +112,7 @@ message TaggedContinuation {
   // every spatial pattern has matched, so cross-channel guards see every
   // bound variable. Empty Par = no guard. See plan §7.12.
   Par guard = 3;
+  CostAuthority cost_authority = 4;
 }
 
 /**
@@ -84,6 +136,8 @@ message ListParWithRandom {
   repeated Par pars = 1;
   bytes randomState = 2
       [(scalapb.field).type = "coop.rchain.crypto.hash.Blake2b512Random"];
+  CostAuthority cost_authority = 3;
+  CostStack cost_stack = 4;
 }
 
 // While we use vars in both positions, when producing the normalized
@@ -131,6 +185,7 @@ message ReceiveBind {
   Par source = 2 [(scalapb.field).no_box = true];
   Var remainder = 3;
   int32 freeCount = 4;
+  CostSignature cost_signature = 5;
 }
 
 message BindPattern {
@@ -266,10 +321,16 @@ message Expr {
 
     // Extended numeric types (Rholang numeric types spec, 2025-11-13)
     // fixed64 (not protobuf double) to preserve bit-exact IEEE 754 semantics (-0.0 vs 0.0, NaN payloads)
-    fixed64 g_double = 34;         // IEEE 754 f64 stored as raw bits (covers f32 losslessly)
+    fixed64 g_double = 34;         // IEEE 754 f64 stored as raw bits (f64 suffix)
     bytes g_big_int = 35;          // Arbitrary-precision signed integer (big-endian two's complement)
     GBigRational g_big_rat = 36;   // Exact rational number
     GFixedPoint g_fixed_point = 37; // Fixed-point decimal
+    uint64 g_uint64 = 38;          // Unsigned 64-bit integer (u64 suffix)
+    fixed32 g_float32 = 39;        // IEEE 754 f32 stored as raw bits (f32 suffix)
+    int32 g_int32 = 40;            // Signed 32-bit integer (i32 suffix)
+    uint32 g_uint32 = 41;          // Unsigned 32-bit integer (u32 suffix)
+    uint32 g_uint16 = 42;          // Unsigned 16-bit integer (u16 suffix), always <= u16::MAX
+    uint32 g_uint8 = 43;           // Unsigned 8-bit integer (u8 suffix), always <= u8::MAX
   }
 }
 
@@ -516,6 +577,8 @@ message GUnforgeable {
     GDeployId g_deploy_id_body = 2;
     GDeployerId g_deployer_id_body = 3;
     GSysAuthToken g_sys_auth_token_body = 4;
+    GAuthorityId g_authority_id_body = 5;
+    GPrincipalId g_principal_id_body = 6;
   }
 }
 
@@ -532,3 +595,12 @@ message GDeployerId {
 }
 
 message GSysAuthToken {}
+
+message GAuthorityId {
+  bytes id = 1;
+}
+
+message GPrincipalId {
+  uint32 keyFamily = 1;
+  bytes publicKey = 2;
+}

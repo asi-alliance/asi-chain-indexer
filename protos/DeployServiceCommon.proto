@@ -103,28 +103,6 @@ message DeployFinalizationStatusInfo {
   optional bytes latestBlockHash     = 3;
 }
 
-message PendingDeploysQuery {
-  // Empty bytes = return all pending deploys regardless of deployer.
-  // Non-empty = return only deploys signed by this public key.
-  bytes deployerPubkey = 1;
-}
-
-message PendingDeployInfo {
-  DeployDataProto deploy = 1 [(scalapb.field).no_box = true];
-  // true  = from rejected_deploy_buffer (recovering after merge conflict)
-  // false = from deploy_storage (fresh, not yet proposed)
-  bool   isRejected = 2;
-}
-
-message PendingDeploysResponsePayload {
-  repeated PendingDeployInfo deploys = 1;
-  // Total count of pending deploys that matched the query before cap
-  // truncation was applied. Compare with `deploys.size()` to detect
-  // truncation: when `deploys.size() < totalAvailable`, more pending
-  // deploys exist than were returned.
-  uint32 totalAvailable = 2;
-}
-
 message BondStatusQuery {
   bytes publicKey = 1;
 }
@@ -167,6 +145,28 @@ message DeployInfo{
   string systemDeployError    = 12;
   repeated TransferInfo transfers = 13;
   bool transfersAvailable         = 14; // true when transfers were extracted (readonly), false on validators
+}
+
+message PendingDeploysQuery {
+  // Empty bytes = return all pending deploys regardless of deployer.
+  // Non-empty = return only deploys signed by this public key.
+  bytes deployerPubkey = 1;
+}
+
+message PendingDeployInfo {
+  DeployDataProto deploy = 1 [(scalapb.field).no_box = true];
+  // true  = from rejected_deploy_buffer (recovering after merge conflict)
+  // false = from deploy_storage (fresh, not yet proposed)
+  bool   isRejected = 2;
+}
+
+message PendingDeploysResponsePayload {
+  repeated PendingDeployInfo deploys = 1;
+  // Total count of pending deploys that matched the query before cap
+  // truncation was applied. Compare with `deploys.size()` to detect
+  // truncation: when `deploys.size() < totalAvailable`, more pending
+  // deploys exist than were returned.
+  uint32 totalAvailable = 2;
 }
 
 message LightBlockInfo {
@@ -260,13 +260,55 @@ message ReportProto{
   }
 }
 
+enum ReportPhase {
+  REPORT_PHASE_UNSPECIFIED = 0;
+  REPORT_PHASE_PRECHARGE   = 1;
+  REPORT_PHASE_USER        = 2;
+  REPORT_PHASE_REFUND      = 3;
+}
+
 message SingleReport{
   repeated ReportProto events = 1;
+  ReportPhase phase           = 2;
+}
+
+// Added by DR-134 (DR-70): one purse row of the settlement receipt of an
+// offered deploy. The REV amounts are decimal strings, because they are
+// 128-bit values.
+message OfferedPurseReport{
+  bytes address      = 1;
+  string resourceRev = 2;
+  string feeRev      = 3;
+  uint64 postBalance = 4;
+}
+
+// Added by DR-134 (DR-70): the settlement receipt of an offered deploy, the
+// same data as the receipt route of the HTTP API.
+message OfferedSettlementReport{
+  uint64 phloUsed                    = 1;
+  uint64 freshPhlo                   = 2;
+  uint64 retainedPhlo                = 3;
+  uint64 phloLimit                   = 4;
+  uint64 phloPrice                   = 5;
+  string feeRev                      = 6;
+  string revSpent                    = 7;
+  string revCeiling                  = 8;
+  repeated OfferedPurseReport purses = 9;
+}
+
+// Added by DR-134 (DR-70): the committed native cost evidence of an offered
+// deploy and its settlement receipt. An offered deploy reports no event
+// batches.
+message OfferedDeployReport{
+  bytes nativeCostEvidence        = 1;
+  OfferedSettlementReport receipt = 2;
 }
 
 message DeployInfoWithEventData{
   DeployInfo deployInfo        = 1 [(scalapb.field).no_box = true];
   repeated SingleReport report = 2;
+  // Added by DR-134 (DR-70): set only for an offered deploy.
+  OfferedDeployReport offered  = 3;
 }
 
 message SystemDeployInfoWithEventData{
