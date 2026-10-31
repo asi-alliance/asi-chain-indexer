@@ -596,9 +596,25 @@ storage without changing existing values and records historical precision as 8.
 Each newly indexed block, transfer, bond and balance records its configured
 precision. See [migration instructions](migrations/README.md).
 
-The published node transfer and bond RPC fields remain `int64`; this change does
-not extend that wire format. Rholang BigInt transfer literals (`123n`) and exact
-HTTP validator amounts can use the wider storage where exposed by the node.
+The client supports the exact-amount contract in
+[Rust node PR #896](https://github.com/F1R3FLY-io/f1r3node-rust/pull/896), pinned at
+`b3fef2de9708d54b560d1a9b262c4aff997e65d4`. Every `getBlock` and
+`lastFinalizedBlock` request sets `exactTransferAmounts=true`, including bond
+refreshes and deploy lookups, so wide transfers do not reject the whole block.
+Transfer dictionaries expose both `amount` and `amountRaw` as exact base-unit
+decimal strings, preferring `amountRaw` over the legacy int64 field. Failed
+attempts retain their signed requested amount. Bond and phlo fields retain
+their existing integer types.
+
+Older nodes ignore the added request fields. When their response omits
+`amountRaw`, the client converts the legacy int64 directly to a decimal string.
+Old nodes can still omit BigInt transfers from their compact summaries; the
+indexer continues to derive ledger movements from full phase-marked replay
+traces, including delayed completion, rather than from those summaries.
+
+Deploy this indexer before upgrading nodes to #896. Rebuild the Docker image to
+regenerate the protobuf stubs, or run `make protos` for a local installation.
+This API adaptation requires no additional database migration beyond 000–003.
 
 For storage boundary verification after migrations 000 and 001:
 
