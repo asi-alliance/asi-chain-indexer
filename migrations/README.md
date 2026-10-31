@@ -35,8 +35,8 @@ precision. Keep `HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES=true`. Protocol counters
 block heights, timestamps and the node's int64 phlo fields retain their bounded
 integer types. The node's int64 bond/transfer RPC limits are unchanged.
 
-Historical migrations in `backup_old_migrations/` are reference material, not part
-of this sequence.
+Legacy migrations were consolidated into `000_comprehensive_initial_schema.sql`
+and removed from the active tree. Earlier versions remain available in Git history.
 
 ## Schema Features
 

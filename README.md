@@ -531,7 +531,7 @@ indexer/
 │   └── grpc_stubs/            # Generated gRPC client (from protos/)
 ├── migrations/
 │   ├── 000_comprehensive_initial_schema.sql  # Current complete schema
-│   └── backup_old_migrations/
+│   └── README.md                           # Migration instructions
 ├── scripts/
 │   ├── full-init-hasura.sh               # FULL Hasura setup (recommended)
 │   ├── refresh-network-metrics-once.sh   # Sidecar entrypoint for metrics-cron

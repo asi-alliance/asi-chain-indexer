@@ -205,6 +205,79 @@ async def test_same_block_late_rejection_and_identical_successes(ledger):
 
 
 @pytest.mark.asyncio
+async def test_successful_noop_without_user_segment_advances_cursor(
+    ledger, monkeypatch
+):
+    await ledger.add(0, "genesis", [])
+    await ledger.db.set_last_indexed_block(0)
+    noop = report([])
+    noop["deployInfo"]["sig"] = "noop"
+    del noop["report"][1]
+    details = {
+        "blockInfo": {
+            "blockHash": "noop-block",
+            "blockNumber": 1,
+            "timestamp": 1000,
+            "sender": "validator",
+            "parentsHashList": ["genesis"],
+        },
+        "deploys": [
+            {
+                "sig": "noop",
+                "term": "Nil",
+                "timestamp": 1000,
+                "deployer": "04" + "11" * 64,
+            }
+        ],
+    }
+    ledger.indexer.client.get_block_report.return_value = {
+        "blockInfo": {"blockHash": "noop-block"},
+        "deploys": [noop],
+    }
+    ledger.indexer.client.get_last_finalized_block = AsyncMock(
+        return_value={"blockNumber": 1}
+    )
+    ledger.indexer.client.get_blocks_by_height = AsyncMock(
+        return_value=[{"blockHash": "noop-block", "blockNumber": 1}]
+    )
+    ledger.indexer.client.get_block_details = AsyncMock(return_value=details)
+    monkeypatch.setattr("src.block_indexer.settings.delay_before_node", 0)
+    await ledger.indexer._sync_blocks()
+    assert await ledger.db.get_last_indexed_block() == 1
+    assert (
+        await ledger.conn.fetchval(
+            "SELECT count(*) FROM deployments WHERE deploy_id='noop'"
+        )
+        == 1
+    )
+    assert await ledger.conn.fetchval("SELECT count(*) FROM native_transfer_calls") == 0
+    assert await ledger.conn.fetchval("SELECT count(*) FROM transfers") == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", [0, 1])
+async def test_fee_phase_without_user_segment_completes_pending_call(ledger, phase):
+    raw = 2**150
+    events = payment(raw)
+    await ledger.add(1, "origin", [("start", report(events[:1]))])
+    completion = report([])
+    del completion["report"][1]
+    completion["report"][phase]["events"] += events[1:]
+    await ledger.add(2, "completion", [("finish", completion)], ["origin"])
+    row = await ledger.conn.fetchrow("SELECT * FROM transfers")
+    assert (row["amount_dust"], row["block_hash"], row["deploy_id"]) == (
+        raw,
+        "completion",
+        "finish",
+    )
+    assert (
+        await ledger.conn.fetchval("SELECT status FROM native_transfer_lifecycle")
+        == "completed"
+    )
+    assert await ledger.conn.fetchval("SELECT count(*) FROM transfers") == 1
+
+
+@pytest.mark.asyncio
 async def test_rolled_back_completion_preserves_pending_call(ledger):
     events = payment(12)
     await ledger.add(1, "origin", [("start", report(events[:1]))])

@@ -125,6 +125,23 @@ def test_dead_branch_and_deploy_rollback_have_no_movements():
     assert transfer_results(r) == []
 
 
+def test_successful_noop_without_user_segment_has_no_movements():
+    r = report([])
+    del r["report"][1]
+    assert transfer_results(r) == []
+
+
+@pytest.mark.parametrize(
+    "phases",
+    [[], ["REPORT_PHASE_UNSPECIFIED"], [None], ["REPORT_PHASE_UNKNOWN"]],
+)
+def test_empty_unmarked_and_unknown_reports_remain_unavailable(phases):
+    r = report([])
+    r["report"] = [{"phase": phase, "events": []} for phase in phases]
+    with pytest.raises(ReportUnavailable, match="phase-marked"):
+        transfer_results(r)
+
+
 def test_unanswered_call_is_pending_not_success():
     assert transfer_results(report(payment()[:1])) == []
 

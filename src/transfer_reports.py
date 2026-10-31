@@ -62,11 +62,8 @@ def deploy_events(deploy_report):
         "REPORT_PHASE_REFUND",
         "REPORT_PHASE_UNSPECIFIED",
     }
-    if (
-        not phases <= known
-        or not phases - {"REPORT_PHASE_UNSPECIFIED"}
-        or (not failed and "REPORT_PHASE_USER" not in phases)
-    ):
+    # Replay reports omit phases without events, including an empty USER phase.
+    if not phases <= known or not phases - {"REPORT_PHASE_UNSPECIFIED"}:
         raise ReportUnavailable(
             "Native transfer indexing requires phase-marked replay reports"
         )
