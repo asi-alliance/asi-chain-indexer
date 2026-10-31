@@ -136,4 +136,4 @@ async def test_sync_retries_a_failed_sibling_before_advancing(
 
     assert fake_database.last_indexed == 12
     assert fake_database.set_calls == [12]
-    assert indexer._process_block.await_count == 7
+    assert indexer._process_block.await_count == 5
