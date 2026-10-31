@@ -46,6 +46,9 @@ def _to_dict(message) -> Dict[str, Any]:
             result[field.json_name] = [_field_value(field, item) for item in value]
         else:
             result[field.json_name] = _field_value(field, value)
+    if isinstance(message, common.TransferInfo):
+        raw = message.amountRaw or str(message.amount)
+        result.update(amount=raw, amountRaw=raw)
     return result
 
 
@@ -95,7 +98,9 @@ class GrpcNodeClient:
 
     async def get_last_finalized_block(self) -> Optional[Dict[str, Any]]:
         try:
-            response = await self.stub.lastFinalizedBlock(common.LastFinalizedBlockQuery(), timeout=self.timeout)
+            response = await self.stub.lastFinalizedBlock(
+                common.LastFinalizedBlockQuery(exactTransferAmounts=True), timeout=self.timeout
+            )
             wrapper = _unwrap(response, "blockInfo")
             return _to_dict(wrapper.blockInfo)
 
@@ -105,7 +110,9 @@ class GrpcNodeClient:
 
     async def get_bonds(self) -> Optional[Dict[str, Any]]:
         try:
-            response = await self.stub.lastFinalizedBlock(common.LastFinalizedBlockQuery(), timeout=self.timeout)
+            response = await self.stub.lastFinalizedBlock(
+                common.LastFinalizedBlockQuery(exactTransferAmounts=True), timeout=self.timeout
+            )
             wrapper = _unwrap(response, "blockInfo")
             return {"bonds": _to_dict(wrapper.blockInfo).get("bonds", [])}
 
@@ -133,7 +140,7 @@ class GrpcNodeClient:
 
     async def get_block_details(self, block_hash: str) -> Optional[Dict[str, Any]]:
         try:
-            query = common.BlockQuery(hash=block_hash)
+            query = common.BlockQuery(hash=block_hash, exactTransferAmounts=True)
             response = await self.stub.getBlock(query, timeout=self.timeout)
             return _to_dict(_unwrap(response, "blockInfo"))
 
@@ -199,7 +206,10 @@ class GrpcNodeClient:
             find_response = await self.stub.findDeploy(query, timeout=self.timeout)
             light_block = _unwrap(find_response, "blockInfo")
 
-            block_response = await self.stub.getBlock(common.BlockQuery(hash=light_block.blockHash), timeout=self.timeout)
+            block_response = await self.stub.getBlock(
+                common.BlockQuery(hash=light_block.blockHash, exactTransferAmounts=True),
+                timeout=self.timeout,
+            )
             full_block = _unwrap(block_response, "blockInfo")
 
             for deploy in full_block.deploys:

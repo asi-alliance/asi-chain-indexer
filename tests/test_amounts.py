@@ -61,9 +61,9 @@ def test_invalid_precision_rejected(decimals):
 def test_published_int64_protobuf_amounts_remain_exact():
     raw = 2**63 - 1
     assert _to_dict(common.BondInfo(stake=raw))["stake"] == raw
-    assert _to_dict(common.TransferInfo(amount=raw))["amount"] == raw
-    assert _to_dict(common.TransferInfo(amount=0))["amount"] == 0
-    # Widening storage does not invent new fields in the node's wire protocol.
+    assert _to_dict(common.TransferInfo(amount=raw))["amount"] == str(raw)
+    assert _to_dict(common.TransferInfo(amount=0))["amount"] == "0"
+    # The legacy field remains int64; wider values use amountRaw.
     with pytest.raises(ValueError):
         common.TransferInfo(amount=2**63)
 
