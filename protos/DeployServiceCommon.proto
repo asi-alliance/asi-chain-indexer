@@ -145,6 +145,7 @@ message DeployInfo{
   string systemDeployError    = 12;
   repeated TransferInfo transfers = 13;
   bool transfersAvailable         = 14; // true when transfers were extracted (readonly), false on validators
+  repeated DeployParameter parameters = 15;
 }
 
 message PendingDeploysQuery {
