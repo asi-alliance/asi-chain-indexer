@@ -24,6 +24,10 @@ Part of the [**Artificial Superintelligence Alliance**](https://superintelligenc
 
 A high-performance blockchain indexer for ASI-Chain that synchronizes data from ASI nodes using the node's native gRPC + HTTP API and stores it in PostgreSQL for efficient querying.
 
+For DAG identity, parent relationships, finality and transfer outcomes, see
+[DAG blocks, deploys, and transfers](DAG.md). Its revision/status table separates
+current dev from the unmerged exact-amount/native-transfer work in PRs #20/#22.
+
 ## Latest Version
 
 The indexer provides complete automation for blockchain data synchronization:

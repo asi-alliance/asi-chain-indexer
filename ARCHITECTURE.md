@@ -1,5 +1,9 @@
 # ASI Chain Explorer - Architecture Documentation
 
+See [DAG blocks, deploys, and transfers](DAG.md) for source-checked DAG semantics,
+synchronization limits and explorer guidance. Check its revision/status table:
+the exact-amount/native-transfer sections describe unmerged PRs #20/#22.
+
 ## System Architecture
 
 ### High-Level Design
