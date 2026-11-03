@@ -266,10 +266,16 @@ message Expr {
 
     // Extended numeric types (Rholang numeric types spec, 2025-11-13)
     // fixed64 (not protobuf double) to preserve bit-exact IEEE 754 semantics (-0.0 vs 0.0, NaN payloads)
-    fixed64 g_double = 34;         // IEEE 754 f64 stored as raw bits (covers f32 losslessly)
+    fixed64 g_double = 34;         // IEEE 754 f64 stored as raw bits (f64 suffix)
     bytes g_big_int = 35;          // Arbitrary-precision signed integer (big-endian two's complement)
     GBigRational g_big_rat = 36;   // Exact rational number
     GFixedPoint g_fixed_point = 37; // Fixed-point decimal
+    uint64 g_uint64 = 38;          // Unsigned 64-bit integer (u64 suffix)
+    fixed32 g_float32 = 39;        // IEEE 754 f32 stored as raw bits (f32 suffix)
+    int32 g_int32 = 40;            // Signed 32-bit integer (i32 suffix)
+    uint32 g_uint32 = 41;          // Unsigned 32-bit integer (u32 suffix)
+    uint32 g_uint16 = 42;          // Unsigned 16-bit integer (u16 suffix), always <= u16::MAX
+    uint32 g_uint8 = 43;           // Unsigned 8-bit integer (u8 suffix), always <= u8::MAX
   }
 }
 
