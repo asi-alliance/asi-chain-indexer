@@ -15,6 +15,8 @@ import pytest
 
 from src.amounts import MAX_AMOUNT, token_decimal
 
+pytestmark = pytest.mark.integration
+
 
 async def next_message(websocket):
     # Bound the whole wait, including any keep-alive frames.
