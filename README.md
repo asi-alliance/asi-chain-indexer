@@ -24,12 +24,16 @@ Part of the [**Artificial Superintelligence Alliance**](https://superintelligenc
 
 A high-performance blockchain indexer for ASI-Chain that synchronizes data from ASI nodes using the node's native gRPC + HTTP API and stores it in PostgreSQL for efficient querying.
 
+For DAG identity, parent relationships, finality and transfer outcomes, see
+[DAG blocks, deploys, and transfers](DAG.md). Its revision/status table separates
+current dev from the unmerged exact-amount/native-transfer work in PRs #20/#22.
+
 ## Latest Version
 
 The indexer provides complete automation for blockchain data synchronization:
 - Full blockchain sync from genesis (block 0) via the node gRPC/HTTP API
 - Automatic Hasura GraphQL relationships setup
-- Enhanced ASI transfer detection with Rholang pattern matching
+- Execution-backed ASI transfer detection from observer replay traces
 - Comprehensive database schema with single migration
 - Balance tracking with bonded/unbonded separation
 - DAG-aware block storage (multi-parent support via `block_parents`)
@@ -40,14 +44,14 @@ The indexer provides complete automation for blockchain data synchronization:
 ✅ **Working Features:**
 - **Genesis block processing** with automatic extraction of validator bonds and initial allocations
 - **Full blockchain synchronization from block 0** via the node gRPC/HTTP API
-- **Enhanced ASI transfer detection** - now supports match-based Rholang patterns
+- **Executed ASI transfers** - exact Int/BigInt amounts and per-operation results from native replay traces
 - **Balance state tracking** - separate bonded and unbonded balances per address
 - **GraphQL API** via Hasura with automatic bash-based configuration
 - Enhanced block metadata extraction (state roots, bonds, validators, justifications)
 - PostgreSQL storage with 150-char address fields (supports both ASI addresses and validator keys)
 - Deployment extraction with full Rholang code
 - Smart contract type classification (ASI transfers, validator ops, etc.)
-- ASI transfer extraction with both variable-based and match-based pattern matching
+- ASI transfer extraction from native USER-phase events; rejected calls and dead branches produce no successful transfers
 - Address validation supporting 52-56 character ASI addresses
 - Validator tracking with full public keys (130+ characters)
 - Network consensus monitoring
@@ -173,10 +177,15 @@ The indexer talks to the node directly via gRPC (primary) and HTTP (fallback for
 ## Requirements
 
 - Docker and Docker Compose (recommended)
-- OR Python 3.9+ and PostgreSQL 14+
+- OR Python 3.11+ and PostgreSQL 18.6 (the tested database version)
 - Running node (gRPC port & HTTP port)
 
 ## Installation
+
+**Existing installations:** read [PostgreSQL and Hasura upgrade](POSTGRES_UPGRADE.md)
+before starting this version. PostgreSQL 14 data requires a dump/restore into the
+new `postgres18_data` volume. Keep the old volume for rollback. The installation
+commands below initialize a fresh database; they do not migrate existing data.
 
 ### Recommended Installation
 
@@ -228,13 +237,13 @@ After running `./deploy.sh` (which calls `scripts/full-init-hasura.sh`):
 1. **docker-compose.yml** (Production)
    - Uses the standard `Dockerfile`
    - Services included:
-     - `postgres`: PostgreSQL 14 Alpine (port 5432)
+     - `postgres`: PostgreSQL 18.6 Alpine (port 5432)
      - `indexer`: Python indexer with gRPC node client (port 9090)
-     - `metrics-cron`: Alpine sidecar refreshing `network_metrics_buckets` every 3 min
-     - `hasura`: Hasura GraphQL Engine (port 8080)
+     - `metrics-cron`: Alpine 3.24 with PostgreSQL 18 client, refreshing `network_metrics_buckets` every 3 min
+     - `hasura`: Hasura GraphQL Engine v2.51.4 (port 8080)
    - Network: Custom bridge network `indexer-network`
    - Volumes: 
-     - `postgres_data`: Persistent database storage
+     - `postgres18_data`: Persistent database storage mounted at `/var/lib/postgresql`
      - `./migrations/000_comprehensive_initial_schema.sql`: Auto-run SQL migrations
    - Health checks configured for all services
 
@@ -514,6 +523,32 @@ building a complete chain history.
 
 ## Development
 
+### Automated tests
+
+Pull requests targeting `dev` or `main`, and pushes to either branch, run:
+
+- **Python tests / Unit tests (Python 3.11):** tests without external services,
+  using the same Python minor version as the Docker runtime. The job generates
+  gRPC stubs and reports coverage, excluding generated code. Coverage XML and
+  JUnit reports are uploaded as `unit-test-reports` artifacts for seven days.
+- **Database compatibility / postgres-hasura:** the full test suite against a
+  disposable PostgreSQL/Hasura stack, including migrations, ORM round trips,
+  native transfer lifecycle, GraphQL subscriptions and SQL amount boundaries.
+
+Run the unit suite locally from the repository root:
+
+```bash
+python -m pip install -r requirements-test.txt
+make protos PYTHON=python
+python -m pytest tests/ -m "not integration" --strict-markers \
+  --cov=src --cov-report=term-missing
+```
+
+Mark tests that need PostgreSQL or Hasura with `@pytest.mark.integration`.
+`python -m pytest tests/` still runs the whole suite; integration tests skip
+when their `TEST_DATABASE_URL` / `TEST_HASURA_*` settings are absent. Use only
+disposable test services for these tests (see `tests/test_hasura_stack.py`).
+
 ### Project Structure
 
 ```
@@ -531,7 +566,7 @@ indexer/
 │   └── grpc_stubs/            # Generated gRPC client (from protos/)
 ├── migrations/
 │   ├── 000_comprehensive_initial_schema.sql  # Current complete schema
-│   └── backup_old_migrations/
+│   └── README.md                           # Migration instructions
 ├── scripts/
 │   ├── full-init-hasura.sh               # FULL Hasura setup (recommended)
 │   ├── refresh-network-metrics-once.sh   # Sidecar entrypoint for metrics-cron
@@ -577,3 +612,45 @@ If you need to call a new node RPC, add a method to `GrpcNodeClient` in
 ## License
 
 This project is licensed under the Apache License 2.0. See LICENSE file for details.
+
+## Exact token amounts
+
+Token transfers, balances and validator stakes use exact Python integers and
+PostgreSQL `NUMERIC(78,0)` storage, with a uint256 range check. Human-readable
+amounts use exact decimal strings, including in monitoring responses. Hasura
+must keep `HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES=true`.
+
+`NATIVE_TOKEN_DECIMALS` defaults to **8** for existing networks. Set it to **18**
+for a node whose native token metadata declares 18 decimals. Startup verifies
+this against the node's status; legacy nodes without metadata support only the
+8-decimal profile. This setting describes the chain's units; changing it does
+not rescale balances or perform a chain denomination upgrade.
+
+Apply migration `001_bigint_amounts.sql` before running this version. It widens
+storage without changing existing values and records historical precision as 8.
+Each newly indexed block, transfer, bond and balance records its configured
+precision. See [migration instructions](migrations/README.md).
+
+The published node transfer and bond RPC fields remain `int64`; this change does
+not extend that wire format. Rholang BigInt transfer literals (`123n`) and exact
+HTTP validator amounts can use the wider storage where exposed by the node.
+
+For storage boundary verification after migrations 000 and 001:
+
+```bash
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/bigint-storage.sql
+```
+
+The check rolls back its writes and verifies uint256 bounds and decimal precision.
+Run `make protos` and `python -m pytest tests/ -q` for regression tests. Set
+`TEST_DATABASE_URL` to a test PostgreSQL server with `CREATEDB` permission to also
+exercise migrations 000–003, ORM round trips, delayed transfers, legacy precision and notifications.
+That integration test creates and removes only its own randomly named database.
+
+Existing indexer installations must apply migrations through 003 and repair transfer history before rollout. See [migration and repair instructions](migrations/README.md#repair-source-inferred-transfer-history).
+
+Unanswered native calls remain pending without stopping block indexing. A later
+committed reply records delivery under the completion deploy and block. The
+read-only `native_transfer_lifecycle` GraphQL view links initiation and completion;
+pending and rejected calls do not contribute to transfer totals. Reload Hasura
+metadata after migration. Explorer rendering of these lifecycle fields is separate.

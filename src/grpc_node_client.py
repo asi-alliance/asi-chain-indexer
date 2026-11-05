@@ -16,6 +16,7 @@ from google.protobuf import empty_pb2
 from google.protobuf.descriptor import FieldDescriptor
 
 from src.config import settings
+from src.amounts import amount
 
 logger = structlog.get_logger(__name__)
 
@@ -62,6 +63,18 @@ class GrpcNodeClient:
 
         self.channel = grpc.aio.insecure_channel(f"{self.node_host}:{self.grpc_port}")
         self.stub = svc.DeployServiceStub(self.channel)
+
+    async def require_native_precision(self, expected: int) -> None:
+        response = await self.stub.status(empty_pb2.Empty(), timeout=self.timeout)
+        status = _unwrap(response, "status")
+        # Old nodes omit all metadata (proto3 scalar defaults). Their units are 8 decimals.
+        has_metadata = bool(status.nativeTokenName or status.nativeTokenSymbol)
+        actual = status.nativeTokenDecimals if has_metadata else 8
+        if actual != expected:
+            raise ValueError(
+                f"Node native token decimals ({actual}) do not match "
+                f"NATIVE_TOKEN_DECIMALS ({expected})"
+            )
 
     async def close(self):
         await self.channel.close()
@@ -110,7 +123,7 @@ class GrpcNodeClient:
                     data = await resp.json()
 
             return [
-                {"validator": v["publicKey"], "stake": v["stake"]}
+                {"validator": v["publicKey"], "stake": amount(v["stake"])}
                 for v in data.get("validators", [])
             ]
 
@@ -127,6 +140,17 @@ class GrpcNodeClient:
         except grpc.RpcError as e:
             logger.error(f"Failed to get block details for {block_hash}: {e}")
             return None
+
+    async def get_block_report(self, block_hash: str) -> Dict[str, Any]:
+        """Read the full BigInt-capable report; failures must retry the block."""
+        url = f"http://{self.node_host}:{self.http_port}/reporting/trace"
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout)) as session:
+            async with session.get(url, params={"blockHash": block_hash}) as response:
+                response.raise_for_status()
+                data = await response.json()
+        if data.get("type") != "block-traces-report" or not isinstance(data.get("report"), dict):
+            raise ValueError("Observer did not return a replay trace")
+        return data["report"]
 
     async def get_pending_deploys(self, deployer_pubkey: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Fetch the node's pending deploy snapshot via the getPendingDeploys RPC.

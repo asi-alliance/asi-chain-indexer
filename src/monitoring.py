@@ -74,7 +74,7 @@ class MonitoringServer:
             if hasattr(obj, 'isoformat'):
                 return obj.isoformat()
             elif isinstance(obj, Decimal):
-                return float(obj)
+                return format(obj, "f")
             raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
         return web.Response(
@@ -87,22 +87,15 @@ class MonitoringServer:
         """Convert database results to JSON-serializable format."""
         if isinstance(data, list):
             return [self._serialize_result(item) for item in data]
-        elif isinstance(data, dict):
-            result = {}
-            for key, value in data.items():
-                if hasattr(value, 'isoformat'):
-                    result[key] = value.isoformat()
-                elif isinstance(value, Decimal):
-                    result[key] = float(value)
-                elif isinstance(value, (dict, list)):
-                    result[key] = self._serialize_result(value)
-                else:
-                    result[key] = value
-            return result
-        elif isinstance(data, Decimal):
-            return float(data)
-        else:
-            return data
+        if isinstance(data, dict):
+            return {key: self._serialize_result(value) for key, value in data.items()}
+        if isinstance(data, Decimal):
+            return format(data, "f")
+        if isinstance(data, int) and abs(data) > 2**53 - 1:
+            return str(data)
+        if hasattr(data, "isoformat"):
+            return data.isoformat()
+        return data
 
     def _setup_routes(self):
         """Setup HTTP routes."""
@@ -358,7 +351,7 @@ class MonitoringServer:
 
             # Get validator bonds for this block
             bonds_query = """
-                SELECT vb.validator_public_key, vb.stake, v.name
+                SELECT vb.validator_public_key, vb.stake, vb.token_decimals, v.name
                 FROM validator_bonds vb
                 JOIN validators v ON vb.validator_public_key = v.public_key
                 WHERE vb.block_number = $1
@@ -474,7 +467,7 @@ class MonitoringServer:
             query = """
                 SELECT 
                     t.id, t.deploy_id, t.block_number, t.from_address, t.to_address,
-                    t.amount_dust, t.amount_asi::FLOAT as amount_asi, t.status, t.created_at,
+                    t.amount_dust, t.amount_asi, t.token_decimals, t.status, t.created_at,
                     d.timestamp
                 FROM transfers t
                 JOIN deployments d ON t.deploy_id = d.deploy_id
@@ -706,7 +699,7 @@ class MonitoringServer:
             query = """
                 SELECT 
                     id, deploy_id, block_number, from_address, to_address,
-                    amount_dust, amount_asi::FLOAT as amount_asi, status, created_at
+                    amount_dust, amount_asi, token_decimals, status, created_at
                 FROM transfers
                 WHERE from_address = $1 OR to_address = $1
                 ORDER BY block_number DESC
