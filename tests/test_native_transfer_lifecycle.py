@@ -88,6 +88,7 @@ async def ledger(monkeypatch, request):
         await admin.close()
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 @pytest.mark.parametrize("raw", [1, 2**53 + 1, 2**63, 2**64, 2**150, MAX_AMOUNT])
 async def test_pending_restart_and_later_completion(ledger, raw):
@@ -135,6 +136,7 @@ async def test_pending_restart_and_later_completion(ledger, raw):
     )
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_rejected_empty_target_and_unanswered_call_do_not_pin_cursor(
     ledger, monkeypatch
@@ -173,6 +175,7 @@ async def test_rejected_empty_target_and_unanswered_call_do_not_pin_cursor(
     assert await ledger.db.get_last_indexed_block() == 3
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_same_block_late_rejection_and_identical_successes(ledger):
     pending = payment(5, False)
@@ -204,6 +207,7 @@ async def test_same_block_late_rejection_and_identical_successes(ledger):
     )
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_successful_noop_without_user_segment_advances_cursor(
     ledger, monkeypatch
@@ -254,6 +258,7 @@ async def test_successful_noop_without_user_segment_advances_cursor(
     assert await ledger.conn.fetchval("SELECT count(*) FROM transfers") == 0
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", [0, 1])
 async def test_fee_phase_without_user_segment_completes_pending_call(ledger, phase):
@@ -277,6 +282,7 @@ async def test_fee_phase_without_user_segment_completes_pending_call(ledger, pha
     assert await ledger.conn.fetchval("SELECT count(*) FROM transfers") == 1
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_rolled_back_completion_preserves_pending_call(ledger):
     events = payment(12)
@@ -292,6 +298,7 @@ async def test_rolled_back_completion_preserves_pending_call(ledger):
     assert await ledger.conn.fetchval("SELECT count(*) FROM transfers") == 1
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", [0, 2])
 async def test_committed_fee_phase_can_complete_user_call_after_user_rollback(
@@ -306,6 +313,7 @@ async def test_committed_fee_phase_can_complete_user_call_after_user_rollback(
     assert await ledger.conn.fetchval("SELECT amount_dust FROM transfers") == 12
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_sibling_response_cannot_complete_an_unrelated_call(ledger):
     events = payment(12)
@@ -317,6 +325,7 @@ async def test_sibling_response_cannot_complete_an_unrelated_call(ledger):
     assert await ledger.conn.fetchval("SELECT count(*) FROM transfers") == 1
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_invalid_success_rolls_back_block_and_observations(ledger):
     with pytest.raises(ValueError):
@@ -333,6 +342,7 @@ async def test_invalid_success_rolls_back_block_and_observations(ledger):
         assert await ledger.conn.fetchval(f"SELECT count(*) FROM {table}") == 0
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_partial_history_can_index_new_calls_and_later_completion(
     ledger, monkeypatch
@@ -346,6 +356,7 @@ async def test_partial_history_can_index_new_calls_and_later_completion(
     assert await ledger.conn.fetchval("SELECT amount_dust FROM transfers") == 23
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 @pytest.mark.parametrize("older_height", [98, 100])
 async def test_partial_history_verifies_unseen_parent_height(
@@ -373,6 +384,7 @@ async def test_partial_history_verifies_unseen_parent_height(
     ledger.indexer.client.get_block_details.assert_awaited_once_with("lagging")
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 @pytest.mark.parametrize("empty", [False, True])
 async def test_missing_parent_rolls_back_and_retry_preserves_completion(ledger, empty):
@@ -388,6 +400,7 @@ async def test_missing_parent_rolls_back_and_retry_preserves_completion(ledger, 
     assert await ledger.conn.fetchval("SELECT amount_dust FROM transfers") == 23
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_repairing_origin_does_not_erase_later_completion(ledger):
     events = payment(15)
@@ -412,6 +425,7 @@ async def test_repairing_origin_does_not_erase_later_completion(ledger):
     )
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_interrupted_historical_repair_resumes_without_moving_cursor(
     ledger, monkeypatch
@@ -498,6 +512,7 @@ def test_migration_entrypoints_include_the_same_ordered_schema():
     assert all(f"/docker-entrypoint-initdb.d/{name}" in compose for name in migrations)
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ledger", ["002"], indirect=True)
 async def test_upgrade_from_002_preserves_ledger_and_requires_backfill(
@@ -535,6 +550,7 @@ async def test_upgrade_from_002_preserves_ledger_and_requires_backfill(
             await ledger.indexer.start()
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_lifecycle_uses_execution_times_not_signed_deploy_times(ledger):
     events = payment(17)
@@ -558,6 +574,7 @@ async def test_lifecycle_uses_execution_times_not_signed_deploy_times(ledger):
     )
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_repeated_deploy_keeps_each_invocation_block_visible(ledger):
     events = payment(19)
@@ -578,6 +595,7 @@ async def test_repeated_deploy_keeps_each_invocation_block_visible(ledger):
     assert await ledger.conn.fetchval("SELECT count(*) FROM transfers") == 1
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 @pytest.mark.parametrize("right_precision", [18, 8])
 async def test_merge_coalesces_identical_invocations_and_repair_is_idempotent(
@@ -624,6 +642,7 @@ async def test_merge_coalesces_identical_invocations_and_repair_is_idempotent(
     )
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_merge_rejects_conflicting_duplicate_invocations(ledger):
     await ledger.add(1, "root", [("root", report([]))])
@@ -644,6 +663,7 @@ async def test_merge_rejects_conflicting_duplicate_invocations(ledger):
     )
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_completion_after_more_than_32767_ancestor_blocks(ledger):
     events = payment(2**150)
@@ -668,6 +688,7 @@ async def test_completion_after_more_than_32767_ancestor_blocks(ledger):
     )
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_completed_before_merge_and_third_copy_link_existing_result(ledger):
     events = payment(31)
@@ -695,6 +716,7 @@ async def test_completed_before_merge_and_third_copy_link_existing_result(ledger
     )
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_repair_preserves_live_owner_of_immediate_sibling_transfers(
     ledger, monkeypatch

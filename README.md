@@ -187,10 +187,15 @@ The indexer talks to the node directly via gRPC (primary) and HTTP (fallback for
 ## Requirements
 
 - Docker and Docker Compose (recommended)
-- OR Python 3.9+ and PostgreSQL 14+
+- OR Python 3.11+ and PostgreSQL 18.6 (the tested database version)
 - Running node (gRPC port & HTTP port)
 
 ## Installation
+
+**Existing installations:** read [PostgreSQL and Hasura upgrade](POSTGRES_UPGRADE.md)
+before starting this version. PostgreSQL 14 data requires a dump/restore into the
+new `postgres18_data` volume. Keep the old volume for rollback. The installation
+commands below initialize a fresh database; they do not migrate existing data.
 
 ### Recommended Installation
 
@@ -242,13 +247,13 @@ After running `./deploy.sh` (which calls `scripts/full-init-hasura.sh`):
 1. **docker-compose.yml** (Production)
    - Uses the standard `Dockerfile`
    - Services included:
-     - `postgres`: PostgreSQL 14 Alpine (port 5432)
+     - `postgres`: PostgreSQL 18.6 Alpine (port 5432)
      - `indexer`: Python indexer with gRPC node client (port 9090)
-     - `metrics-cron`: Alpine sidecar refreshing `network_metrics_buckets` every 3 min
-     - `hasura`: Hasura GraphQL Engine (port 8080)
+     - `metrics-cron`: Alpine 3.24 with PostgreSQL 18 client, refreshing `network_metrics_buckets` every 3 min
+     - `hasura`: Hasura GraphQL Engine v2.51.4 (port 8080)
    - Network: Custom bridge network `indexer-network`
    - Volumes: 
-     - `postgres_data`: Persistent database storage
+     - `postgres18_data`: Persistent database storage mounted at `/var/lib/postgresql`
      - `./migrations/000_comprehensive_initial_schema.sql`: Auto-run SQL migrations
    - Health checks configured for all services
 
@@ -527,6 +532,32 @@ The indexer will start syncing from block 0 by default (`START_FROM_BLOCK=0`),
 building a complete chain history.
 
 ## Development
+
+### Automated tests
+
+Pull requests targeting `dev` or `main`, and pushes to either branch, run:
+
+- **Python tests / Unit tests (Python 3.11):** tests without external services,
+  using the same Python minor version as the Docker runtime. The job generates
+  gRPC stubs and reports coverage, excluding generated code. Coverage XML and
+  JUnit reports are uploaded as `unit-test-reports` artifacts for seven days.
+- **Database compatibility / postgres-hasura:** the full test suite against a
+  disposable PostgreSQL/Hasura stack, including migrations, ORM round trips,
+  native transfer lifecycle, GraphQL subscriptions and SQL amount boundaries.
+
+Run the unit suite locally from the repository root:
+
+```bash
+python -m pip install -r requirements-test.txt
+make protos PYTHON=python
+python -m pytest tests/ -m "not integration" --strict-markers \
+  --cov=src --cov-report=term-missing
+```
+
+Mark tests that need PostgreSQL or Hasura with `@pytest.mark.integration`.
+`python -m pytest tests/` still runs the whole suite; integration tests skip
+when their `TEST_DATABASE_URL` / `TEST_HASURA_*` settings are absent. Use only
+disposable test services for these tests (see `tests/test_hasura_stack.py`).
 
 ### Project Structure
 

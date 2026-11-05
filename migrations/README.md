@@ -2,6 +2,10 @@
 
 ## Current schema
 
+PostgreSQL engine upgrades are separate from these schema migrations. See
+[PostgreSQL 14 to 18.6 and Hasura upgrade](../POSTGRES_UPGRADE.md) before changing
+an existing installation's images or volumes.
+
 Apply these migrations in order to a new database:
 
 1. `000_comprehensive_initial_schema.sql`: original tables, views and functions.

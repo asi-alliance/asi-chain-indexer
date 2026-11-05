@@ -10,7 +10,7 @@ This guide provides detailed information for developers working on the ASI Chain
 - Docker Desktop 20.10+
 - Python 3.11+
 - Node.js 20+
-- PostgreSQL 14+ (for local development without Docker)
+- PostgreSQL 18.6 (the tested version, for local development without Docker)
 - Git
 
 ### IDE Recommendations
