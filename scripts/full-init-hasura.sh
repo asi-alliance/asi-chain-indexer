@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ============================================================
-# FULL HASURA INITIALIZATION FOR ASI-CHAIN INDEXER (v2.36.x)
+# FULL HASURA INITIALIZATION FOR ASI-CHAIN INDEXER (v2.51.4)
 # Goals:
 #  - Track all tables/views/functions
 #  - Create relationships

@@ -2,6 +2,10 @@
 
 **Version**: 2.2.0 (dag_support) | **Updated**: August 2026
 
+**Database baseline (2026-11-05):** PostgreSQL 18.6 and Hasura v2.51.4.
+For an existing database, follow [the upgrade runbook](POSTGRES_UPGRADE.md)
+before starting this Compose version; a new volume does not migrate old data.
+
 > **Note.** This is a quick-reference companion to the full
 > [`DEPLOYMENT.md`](./DEPLOYMENT.md). For complete scenarios (production
 > overrides, Kubernetes, ECS, Cloud Run, monitoring, backup, security, hardening),
@@ -233,8 +237,8 @@ docker run -d \
   -e POSTGRES_USER=indexer \
   -e POSTGRES_PASSWORD=indexer_pass \
   -p 5432:5432 \
-  -v "$(pwd)/migrations/000_comprehensive_initial_schema.sql:/docker-entrypoint-initdb.d/000_comprehensive_initial_schema.sql" \
-  postgres:14-alpine
+  -v "$(pwd)/migrations:/docker-entrypoint-initdb.d:ro" \
+  postgres:18.6-alpine
 
 # 4. Configure environment
 export NODE_HOST=13.251.66.61
