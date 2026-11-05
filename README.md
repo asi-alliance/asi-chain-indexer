@@ -633,16 +633,24 @@ precision. See [migration instructions](migrations/README.md).
 
 The client supports the exact-amount contract in
 [Rust node PR #896](https://github.com/F1R3FLY-io/f1r3node-rust/pull/896), pinned at
-`b3fef2de9708d54b560d1a9b262c4aff997e65d4`. Every `getBlock` and
+`92903a1d81c49fa0a035fb7ee729002e38428280`. Every `getBlock` and
 `lastFinalizedBlock` request sets `exactTransferAmounts=true`, including bond
 refreshes and deploy lookups, so wide transfers do not reject the whole block.
-Transfer dictionaries expose both `amount` and `amountRaw` as exact base-unit
-decimal strings, preferring `amountRaw` over the legacy int64 field. Failed
-attempts retain their signed requested amount. Bond and phlo fields retain
-their existing integer types.
+Transfer dictionaries preserve `amount` as the legacy Python int64 integer.
+Use `amountRaw` for the exact base-unit amount. It is a validated canonical
+decimal string and retains signed, out-of-range failed attempts without a
+uint256 clamp. For wide amounts, the legacy `amount` can contain the node's
+`-1` sentinel and must not be used as the transfer amount. Bond and phlo fields
+retain their existing integer types. Network consensus reads height and bonds
+from one finalized-block response; active membership is a separate HTTP read.
 
 Older nodes ignore the added request fields. When their response omits
-`amountRaw`, the client converts the legacy int64 directly to a decimal string.
+`amountRaw`, the client converts the legacy int64 directly to a decimal string,
+except for `-1`. Without `amountRaw`, that value is ambiguous: it can be a real
+failed attempt or a wide-amount sentinel whose exact field was dropped. The
+client raises `ValueError` instead of inventing an exact amount. Malformed
+`amountRaw` values also raise `ValueError`; deploy lookup returns `None` through
+its existing error handler. Neither case becomes an empty or zero transfer.
 Old nodes can still omit BigInt transfers from their compact summaries; the
 indexer continues to derive ledger movements from full phase-marked replay
 traces, including delayed completion, rather than from those summaries.
@@ -650,6 +658,22 @@ traces, including delayed completion, rather than from those summaries.
 Deploy this indexer before upgrading nodes to #896. Rebuild the Docker image to
 regenerate the protobuf stubs, or run `make protos` for a local installation.
 This API adaptation requires no additional database migration beyond 000–003.
+
+The local protocol-server tests verify request negotiation and client decoding.
+They do not establish acceptance of a running #896 node. Live acceptance remains
+pending against the exact node revision above and this indexer working tree.
+Use an isolated observer with a known funded transfer above int64. Verify that
+the same block returns `TRANSFER_AMOUNT_OUT_OF_RANGE` without the exact flag
+and the full block with canonical `amountRaw` values with the flag. Compare
+deploy lookup, replay-derived ledger rows, database values and GraphQL strings.
+Record the node source/image digest, block/deploy IDs and indexer revision or
+working-tree diff. Recheck against a new node head before release.
+
+[Node #947](https://github.com/F1R3FLY-io/f1r3node-rust/pull/947) changes HTTP phlo
+prices to strings, while gRPC prices remain int64. This client uses gRPC for
+deploy/block prices and HTTP for validator stakes and replay reports. That
+follow-up requires no phlo-price decoder change here. Cost-accounting in
+indexer #21/node #216 and the wider node #881 profile need separate reconciliation.
 
 For storage boundary verification after migrations 000 and 001:
 

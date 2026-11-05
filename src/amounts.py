@@ -5,6 +5,21 @@ from decimal import Decimal
 MAX_AMOUNT = (1 << 256) - 1
 
 
+def signed_integer(value: str) -> int:
+    """Parse an exact signed integer, including out-of-range failed attempts."""
+    if not isinstance(value, str):
+        raise ValueError("amount must be a canonical signed integer")
+    digits = value[1:] if value.startswith("-") else value
+    if (
+        not digits.isascii()
+        or not digits.isdigit()
+        or (len(digits) > 1 and digits[0] == "0")
+        or value == "-0"
+    ):
+        raise ValueError("amount must be a canonical signed integer")
+    return int(value)
+
+
 def amount(value: int | str | Decimal) -> int:
     if isinstance(value, bool) or isinstance(value, float):
         raise ValueError("amount must be an exact integer")

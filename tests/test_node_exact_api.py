@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import grpc
 import pytest
@@ -43,7 +44,7 @@ def legacy_queries():
 
 
 @asynccontextmanager
-async def node_api(raw, *, legacy=False, available=True, error=None):
+async def node_api(raw, *, legacy=False, available=True, error=None, amount_raw=None):
     queries = legacy_queries() if legacy else common
     representable = -(2**63) <= raw <= MAX_INT64
     transfer = common.TransferInfo(
@@ -54,7 +55,7 @@ async def node_api(raw, *, legacy=False, available=True, error=None):
         failReason="" if 0 < raw <= MAX_AMOUNT else "Rejected amount",
     )
     if not legacy:
-        transfer.amountRaw = str(raw)
+        transfer.amountRaw = str(raw) if amount_raw is None else amount_raw
     block = common.BlockInfo(
         blockInfo=common.LightBlockInfo(
             blockHash=BLOCK_HASH,
@@ -151,14 +152,17 @@ async def node_api(raw, *, legacy=False, available=True, error=None):
 async def test_exact_block_reads_and_deploy_lookup_keep_all_amounts(raw):
     async with node_api(raw) as node:
         if not -(2**63) <= raw <= MAX_INT64:
-            legacy = await node.client.stub.getBlock(common.BlockQuery(hash=BLOCK_HASH))
+            legacy = await node.client.stub.getBlock(
+                common.BlockQuery(hash=BLOCK_HASH), timeout=node.client.timeout
+            )
             assert legacy.WhichOneof("message") == "error"
             assert legacy.error.messages[0].startswith("TRANSFER_AMOUNT_OUT_OF_RANGE:")
             node.requests.clear()
 
         details = await node.client.get_block_details(BLOCK_HASH)
         transfer = details["deploys"][0]["transfers"][0]
-        assert (transfer["amount"], transfer["amountRaw"]) == (str(raw), str(raw))
+        legacy_amount = raw if -(2**63) <= raw <= MAX_INT64 else -1
+        assert (transfer["amount"], transfer["amountRaw"]) == (legacy_amount, str(raw))
         assert transfer["success"] == (0 < raw <= MAX_AMOUNT)
         assert transfer["failReason"] == (
             "" if 0 < raw <= MAX_AMOUNT else "Rejected amount"
@@ -178,12 +182,12 @@ async def test_exact_block_reads_and_deploy_lookup_keep_all_amounts(raw):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("raw", [0, 2**53 + 1, MAX_INT64, -1, -(2**63)])
+@pytest.mark.parametrize("raw", [0, 2**53 + 1, MAX_INT64, -2, -(2**63)])
 async def test_old_node_ignores_query_extensions_and_preserves_int64(raw):
     async with node_api(raw, legacy=True) as node:
         details = await node.client.get_block_details(BLOCK_HASH)
         transfer = details["deploys"][0]["transfers"][0]
-        assert (transfer["amount"], transfer["amountRaw"]) == (str(raw), str(raw))
+        assert (transfer["amount"], transfer["amountRaw"]) == (raw, str(raw))
         assert (await node.client.get_last_finalized_block())["blockNumber"] == 12
         assert (await node.client.get_bonds())["bonds"][0]["stake"] == MAX_INT64
         assert (await node.client.get_deploy_info(DEPLOY_ID))["transfers"][
@@ -198,8 +202,56 @@ async def test_old_node_ignores_query_extensions_and_preserves_int64(raw):
 @pytest.mark.parametrize("legacy_amount", [-1, 7])
 def test_exact_field_takes_precedence_over_legacy_amount(legacy_amount):
     raw = str(MAX_AMOUNT)
-    transfer = _to_dict(common.TransferInfo(amount=legacy_amount, amountRaw=raw))
-    assert transfer["amount"] == transfer["amountRaw"] == raw
+    deploy = common.DeployInfo(
+        transfers=[common.TransferInfo(amount=legacy_amount, amountRaw=raw)]
+    )
+    transfer = _to_dict(deploy)["transfers"][0]
+    assert transfer["amount"] == legacy_amount
+    assert transfer["amountRaw"] == raw
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_missing_exact_amount_rejects_ambiguous_sentinel(legacy):
+    async with node_api(-1, legacy=legacy, amount_raw="") as node:
+        with pytest.raises(ValueError, match="ambiguous"):
+            await node.client.get_block_details(BLOCK_HASH)
+        # A deploy lookup fails closed through its existing ValueError handler.
+        assert await node.client.get_deploy_info(DEPLOY_ID) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw", ["1e5", " 12", "12 ", "0x10", "+1", "01", "-01", "-0", "1.0", "١"]
+)
+async def test_malformed_exact_amount_does_not_escape_in_block_or_deploy(raw):
+    async with node_api(1, amount_raw=raw) as node:
+        with pytest.raises(ValueError, match="canonical signed integer"):
+            await node.client.get_block_details(BLOCK_HASH)
+        assert await node.client.get_deploy_info(DEPLOY_ID) is None
+
+
+@pytest.mark.asyncio
+async def test_network_consensus_reuses_one_finalized_block():
+    async with node_api(MAX_AMOUNT) as node:
+        node.client.get_active_validators = AsyncMock(
+            return_value=[{"validator": "validator", "stake": 1}]
+        )
+        consensus = await node.client.get_network_consensus()
+        assert consensus["current_block"] == 12
+        assert consensus["total_bonded_validators"] == 1
+        assert consensus["active_validators"] == 1
+        assert consensus["participation_rate"] == 100
+        assert len(node.requests) == 1
+        assert node.requests[0].exactTransferAmounts is True
+
+
+@pytest.mark.asyncio
+async def test_network_consensus_does_not_invent_missing_finalized_state():
+    async with node_api(1, error="Finalized block unavailable") as node:
+        node.client.get_active_validators = AsyncMock(return_value=[])
+        assert await node.client.get_network_consensus() is None
+        assert len(node.requests) == 1
 
 
 @pytest.mark.asyncio

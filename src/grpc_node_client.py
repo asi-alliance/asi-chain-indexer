@@ -16,7 +16,7 @@ from google.protobuf import empty_pb2
 from google.protobuf.descriptor import FieldDescriptor
 
 from src.config import settings
-from src.amounts import amount
+from src.amounts import amount, signed_integer
 
 logger = structlog.get_logger(__name__)
 
@@ -28,9 +28,27 @@ def _unwrap(response, field_name: str):
     return getattr(response, field_name)
 
 
+def _transfer_to_dict(message) -> Dict[str, Any]:
+    if message.amountRaw:
+        signed_integer(message.amountRaw)
+        raw = message.amountRaw
+    elif message.amount == -1:
+        # This may be either a failed -1 attempt or a stripped wide-amount sentinel.
+        raise ValueError("Transfer amount is ambiguous: legacy -1 without amountRaw")
+    else:
+        raw = str(message.amount)
+    result = _to_dict(message)
+    result["amountRaw"] = raw
+    return result
+
+
+_MESSAGE_DECODERS = {common.TransferInfo.DESCRIPTOR.full_name: _transfer_to_dict}
+
+
 def _field_value(field, value):
     if field.type == FieldDescriptor.TYPE_MESSAGE:
-        return _to_dict(value)
+        decode = _MESSAGE_DECODERS.get(field.message_type.full_name, _to_dict)
+        return decode(value)
     if field.type == FieldDescriptor.TYPE_BYTES:
         return base64.b64encode(value).decode()
     return value
@@ -46,9 +64,6 @@ def _to_dict(message) -> Dict[str, Any]:
             result[field.json_name] = [_field_value(field, item) for item in value]
         else:
             result[field.json_name] = _field_value(field, value)
-    if isinstance(message, common.TransferInfo):
-        raw = message.amountRaw or str(message.amount)
-        result.update(amount=raw, amountRaw=raw)
     return result
 
 
@@ -276,20 +291,24 @@ class GrpcNodeClient:
     async def get_network_consensus(self) -> Optional[Dict[str, Any]]:
         try:
             lfb = await self.get_last_finalized_block()
-            bonds_data = await self.get_bonds()
+            if lfb is None:
+                return None
             active = await self.get_active_validators()
 
-            if lfb is None or bonds_data is None or active is None:
+            if active is None:
                 return None
 
-            total_bonded = len(bonds_data["bonds"])
+            bonds = lfb["bonds"]
+            total_bonded = len(bonds)
             active_count = len(active)
             in_quarantine = max(0, total_bonded - active_count)
 
-            # stake from bonds_data only: get_bonds/get_active_validators aren't one atomic call
+            # Height and bonds share one finalized snapshot; active membership is separate.
             active_keys = {v["validator"] for v in active}
-            total_stake = sum(b["stake"] for b in bonds_data["bonds"])
-            active_stake = sum(b["stake"] for b in bonds_data["bonds"] if b["validator"] in active_keys)
+            total_stake = sum(b["stake"] for b in bonds)
+            active_stake = sum(
+                b["stake"] for b in bonds if b["validator"] in active_keys
+            )
             participation = (active_stake / total_stake) if total_stake else 0.0
 
             # mirrors the node's own casper.fault-tolerance-threshold (settings.fault_tolerance_threshold)

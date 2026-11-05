@@ -61,8 +61,15 @@ def test_invalid_precision_rejected(decimals):
 def test_published_int64_protobuf_amounts_remain_exact():
     raw = 2**63 - 1
     assert _to_dict(common.BondInfo(stake=raw))["stake"] == raw
-    assert _to_dict(common.TransferInfo(amount=raw))["amount"] == str(raw)
-    assert _to_dict(common.TransferInfo(amount=0))["amount"] == "0"
+    deploy = _to_dict(
+        common.DeployInfo(
+            transfers=[common.TransferInfo(amount=raw), common.TransferInfo(amount=0)]
+        )
+    )
+    assert [(t["amount"], t["amountRaw"]) for t in deploy["transfers"]] == [
+        (raw, str(raw)),
+        (0, "0"),
+    ]
     # The legacy field remains int64; wider values use amountRaw.
     with pytest.raises(ValueError):
         common.TransferInfo(amount=2**63)
