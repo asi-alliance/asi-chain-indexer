@@ -1,0 +1,61 @@
+name: Database compatibility
+
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-hasura:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NODE_HOST: unused.invalid
+      GRPC_PORT: '40401'
+      HTTP_PORT: '40403'
+      DATABASE_URL: postgresql://indexer:indexer_pass@postgres:5432/asichain
+      HASURA_ADMIN_SECRET: isolated-ci-only
+      HASURA_BASE: http://localhost:8080
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose and build test runtime
+        run: |
+          docker compose config --quiet
+          docker compose build indexer
+      - name: Start isolated database stack
+        run: docker compose up -d --wait --wait-timeout 180 postgres hasura metrics-cron
+      - name: Initialize fresh Hasura metadata and verify permissions
+        run: bash scripts/full-init-hasura.sh
+      - name: Test migrations, ORM, native transfers and GraphQL subscriptions
+        run: |
+          docker compose run --rm --no-deps \
+            -e TEST_DATABASE_URL="$DATABASE_URL" \
+            -e TEST_HASURA_URL=http://hasura:8080 \
+            -e TEST_HASURA_ADMIN_SECRET="$HASURA_ADMIN_SECRET" \
+            indexer python -m pytest tests/ -q
+      - name: Verify SQL boundaries and metrics client
+        run: |
+          docker compose exec -T postgres psql -U indexer -d asichain \
+            -v ON_ERROR_STOP=1 < tests/bigint-storage.sql
+          for attempt in $(seq 1 30); do
+            if docker compose exec -T metrics-cron psql --version; then
+              break
+            fi
+            sleep 2
+          done
+          docker compose exec -T metrics-cron sh -ec '
+            psql --version | grep "(PostgreSQL) 18\."
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c \
+              "SELECT public.refresh_network_metrics_buckets(168, 300);"
+          '
+      - name: Diagnostics
+        if: failure()
+        run: docker compose logs --no-color --tail=100
+      - name: Remove isolated stack
+        if: always()
+        run: docker compose down -v --remove-orphans
