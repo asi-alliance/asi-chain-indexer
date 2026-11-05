@@ -523,6 +523,32 @@ building a complete chain history.
 
 ## Development
 
+### Automated tests
+
+Pull requests targeting `dev` or `main`, and pushes to either branch, run:
+
+- **Python tests / Unit tests (Python 3.11):** tests without external services,
+  using the same Python minor version as the Docker runtime. The job generates
+  gRPC stubs and reports coverage, excluding generated code. Coverage XML and
+  JUnit reports are uploaded as `unit-test-reports` artifacts for seven days.
+- **Database compatibility / postgres-hasura:** the full test suite against a
+  disposable PostgreSQL/Hasura stack, including migrations, ORM round trips,
+  native transfer lifecycle, GraphQL subscriptions and SQL amount boundaries.
+
+Run the unit suite locally from the repository root:
+
+```bash
+python -m pip install -r requirements-test.txt
+make protos PYTHON=python
+python -m pytest tests/ -m "not integration" --strict-markers \
+  --cov=src --cov-report=term-missing
+```
+
+Mark tests that need PostgreSQL or Hasura with `@pytest.mark.integration`.
+`python -m pytest tests/` still runs the whole suite; integration tests skip
+when their `TEST_DATABASE_URL` / `TEST_HASURA_*` settings are absent. Use only
+disposable test services for these tests (see `tests/test_hasura_stack.py`).
+
 ### Project Structure
 
 ```

@@ -21,6 +21,7 @@ from src.database import Database
 from src.models import BalanceState, Block, Deployment, Transfer, Validator
 
 ROOT = Path(__file__).resolve().parents[1]
+pytestmark = pytest.mark.integration
 
 
 @pytest.mark.asyncio
