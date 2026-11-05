@@ -177,10 +177,15 @@ The indexer talks to the node directly via gRPC (primary) and HTTP (fallback for
 ## Requirements
 
 - Docker and Docker Compose (recommended)
-- OR Python 3.9+ and PostgreSQL 14+
+- OR Python 3.11+ and PostgreSQL 18.6 (the tested database version)
 - Running node (gRPC port & HTTP port)
 
 ## Installation
+
+**Existing installations:** read [PostgreSQL and Hasura upgrade](POSTGRES_UPGRADE.md)
+before starting this version. PostgreSQL 14 data requires a dump/restore into the
+new `postgres18_data` volume. Keep the old volume for rollback. The installation
+commands below initialize a fresh database; they do not migrate existing data.
 
 ### Recommended Installation
 
@@ -232,13 +237,13 @@ After running `./deploy.sh` (which calls `scripts/full-init-hasura.sh`):
 1. **docker-compose.yml** (Production)
    - Uses the standard `Dockerfile`
    - Services included:
-     - `postgres`: PostgreSQL 14 Alpine (port 5432)
+     - `postgres`: PostgreSQL 18.6 Alpine (port 5432)
      - `indexer`: Python indexer with gRPC node client (port 9090)
-     - `metrics-cron`: Alpine sidecar refreshing `network_metrics_buckets` every 3 min
-     - `hasura`: Hasura GraphQL Engine (port 8080)
+     - `metrics-cron`: Alpine 3.24 with PostgreSQL 18 client, refreshing `network_metrics_buckets` every 3 min
+     - `hasura`: Hasura GraphQL Engine v2.51.4 (port 8080)
    - Network: Custom bridge network `indexer-network`
    - Volumes: 
-     - `postgres_data`: Persistent database storage
+     - `postgres18_data`: Persistent database storage mounted at `/var/lib/postgresql`
      - `./migrations/000_comprehensive_initial_schema.sql`: Auto-run SQL migrations
    - Health checks configured for all services
 

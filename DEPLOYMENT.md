@@ -2,6 +2,10 @@
 
 **Version**: 2.2.0 (dag_support) | **Updated**: August 2026
 
+**Database baseline (2026-11-05):** PostgreSQL 18.6 and Hasura v2.51.4.
+Existing installations must follow [the upgrade runbook](POSTGRES_UPGRADE.md)
+before running deployment commands. The examples below are for fresh databases.
+
 This guide covers deployment scenarios for the ASI-Chain Indexer. The indexer
 talks to an ASI Chain node **over gRPC** (the previous Rust-CLI based client has
 been removed — `feat: remove rust-cli`) and follows the **DAG-aware** schema:
@@ -145,7 +149,7 @@ docker run -d \
   -e POSTGRES_DB=asichain \
   -p 5432:5432 \
   -v $(pwd)/migrations:/docker-entrypoint-initdb.d \
-  postgres:14-alpine
+  postgres:18.6-alpine
 
 # Configure environment for remote node
 export NODE_HOST=13.251.66.61   # observer host
@@ -189,14 +193,17 @@ services:
       retries: 3
 
   postgres:
-    image: postgres:14-alpine
+    image: postgres:18.6-alpine
     environment:
       - POSTGRES_USER=indexer
       - POSTGRES_PASSWORD=${DB_PASSWORD}
       - POSTGRES_DB=asichain
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres18_data:/var/lib/postgresql
       - ./migrations/000_comprehensive_initial_schema.sql:/docker-entrypoint-initdb.d/000_comprehensive_initial_schema.sql
+      - ./migrations/001_bigint_amounts.sql:/docker-entrypoint-initdb.d/001_bigint_amounts.sql
+      - ./migrations/002_executed_transfers.sql:/docker-entrypoint-initdb.d/002_executed_transfers.sql
+      - ./migrations/003_native_transfer_calls.sql:/docker-entrypoint-initdb.d/003_native_transfer_calls.sql
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U indexer"]
@@ -205,7 +212,7 @@ services:
       retries: 5
 
   metrics-cron:
-    image: alpine:3.19
+    image: alpine:3.24
     environment:
       DATABASE_URL: postgresql://indexer:${DB_PASSWORD}@postgres:5432/asichain
       LOOKBACK_HOURS: 168
@@ -216,13 +223,13 @@ services:
     entrypoint: >
       sh -c '
         set -e
-        apk add --no-cache postgresql-client dcron >/dev/null 2>&1
+        apk add --no-cache postgresql18-client dcron >/dev/null 2>&1
         echo "*/3 * * * * /scripts/refresh-network-metrics-once.sh >> /proc/1/fd/1 2>&1" | crontab -
         crond -f -l 2
       '
 
   hasura:
-    image: hasura/graphql-engine:v2.36.0
+    image: hasura/graphql-engine:v2.51.4
     ports:
       - "8080:8080"
     depends_on:
@@ -237,7 +244,7 @@ services:
     restart: unless-stopped
 
 volumes:
-  postgres_data:
+  postgres18_data:
 ```
 
 Deploy:
