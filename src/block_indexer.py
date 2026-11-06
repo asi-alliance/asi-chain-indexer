@@ -748,14 +748,16 @@ class BlockIndexer:
             # Get active validators
             active_validators = await self.client.get_active_validators()
             if active_validators is None:
-                active_validators = []
+                logger.warning("Could not refresh validator states: active validators unavailable")
+                return
+            active_keys = {validator["validator"] for validator in active_validators}
 
             async with db.session() as session:
                 # Update validator records
                 for bond in bonds:
                     validator_key = bond["validator"]
                     stake = bond["stake"]
-                    is_active = validator_key in active_validators
+                    is_active = validator_key in active_keys
 
                     # Get current block number for tracking
                     current_block = await db.get_last_indexed_block()

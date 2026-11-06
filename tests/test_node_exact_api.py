@@ -7,6 +7,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
+from structlog.testing import capture_logs
 
 from src.amounts import MAX_AMOUNT
 from src.grpc_node_client import GrpcNodeClient, _to_dict, common
@@ -44,7 +45,9 @@ def legacy_queries():
 
 
 @asynccontextmanager
-async def node_api(raw, *, legacy=False, available=True, error=None, amount_raw=None):
+async def node_api(
+    raw, *, legacy=False, available=True, error=None, amount_raw=None, term=""
+):
     queries = legacy_queries() if legacy else common
     representable = -(2**63) <= raw <= MAX_INT64
     transfer = common.TransferInfo(
@@ -65,6 +68,7 @@ async def node_api(raw, *, legacy=False, available=True, error=None, amount_raw=
         deploys=[
             common.DeployInfo(
                 sig=DEPLOY_ID,
+                term=term,
                 phloLimit=MAX_INT64,
                 phloPrice=7,
                 cost=2**53 + 1,
@@ -246,11 +250,24 @@ async def test_failed_attempt_preserves_exact_amount_above_python_digit_limit(si
 @pytest.mark.parametrize(
     "raw", ["1e5", " 12", "12 ", "0x10", "+1", "01", "-01", "-0", "1.0", "١"]
 )
-async def test_malformed_exact_amount_does_not_escape_in_block_or_deploy(raw):
+async def test_malformed_exact_amount_preserves_summary_and_warns(raw):
     async with node_api(1, amount_raw=raw) as node:
-        with pytest.raises(ValueError, match="canonical signed integer"):
-            await node.client.get_block_details(BLOCK_HASH)
-        assert await node.client.get_deploy_info(DEPLOY_ID) is None
+        with capture_logs() as logs:
+            details = await node.client.get_block_details(BLOCK_HASH)
+            transfer = details["deploys"][0]["transfers"][0]
+            assert transfer["amountRaw"] is None
+            assert transfer["amount"] == 1
+            assert transfer["success"] is True
+            assert details["deploys"][0]["transfersAvailable"] is True
+            assert (await node.client.get_deploy_info(DEPLOY_ID))["transfers"] == [
+                transfer
+            ]
+            assert (await node.client.get_last_finalized_block())["blockNumber"] == 12
+            assert (await node.client.get_bonds())["bonds"][0]["stake"] == MAX_INT64
+        warnings = [entry for entry in logs if entry["log_level"] == "warning"]
+        assert len(warnings) == 2
+        assert all(entry["amount_raw_length"] == len(raw) for entry in warnings)
+        assert all("amount_raw" not in entry for entry in warnings)
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,7 @@ from src.database import Database
 from src.native_transfers import reconcile_block, reconcile_completed_duplicates
 from src.transfer_reports import ReportUnavailable, block_events
 from test_transfer_reports import expr, payment, report
+from test_node_exact_api import BLOCK_HASH, DEPLOY_ID, node_api
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -86,6 +87,64 @@ async def ledger(monkeypatch, request):
         await conn.close()
         await admin.execute(f'DROP DATABASE "{name}"')
         await admin.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("amount_raw", ["", "1e5"], ids=["missing", "malformed"])
+@pytest.mark.parametrize("replay_state", ["available", "unavailable", "malformed"])
+async def test_unknown_summary_requires_real_replay_before_persisting_or_advancing(
+    ledger, monkeypatch, amount_raw, replay_state
+):
+    raw = 2**63
+    monkeypatch.setattr("src.block_indexer.settings.start_from_block", 12)
+    monkeypatch.setattr("src.block_indexer.settings.delay_before_node", 0)
+    await ledger.db.set_last_indexed_block(11)
+    replay_deploy = report(payment(raw))
+    replay_deploy["deployInfo"]["sig"] = DEPLOY_ID
+    replay = {"blockInfo": {"blockHash": BLOCK_HASH}, "deploys": [replay_deploy]}
+    if replay_state == "malformed":
+        replay["blockInfo"]["blockHash"] = "different-block"
+    async with node_api(raw, amount_raw=amount_raw) as node:
+        node.client.get_blocks_by_height = AsyncMock(
+            return_value=[{"blockNumber": 12, "blockHash": BLOCK_HASH}]
+        )
+        node.client.get_block_report = AsyncMock(
+            return_value=replay,
+            side_effect=(
+                ReportUnavailable("Replay unavailable")
+                if replay_state == "unavailable"
+                else None
+            ),
+        )
+        ledger.indexer.client = node.client
+        await ledger.indexer._sync_blocks()
+        await ledger.indexer._sync_blocks()
+
+        if replay_state == "available":
+            assert await ledger.db.get_last_indexed_block() == 12
+            assert node.client.get_block_report.await_count == 1
+            assert await ledger.conn.fetchval("SELECT count(*) FROM blocks") == 1
+            row = await ledger.conn.fetchrow("SELECT * FROM transfers")
+            assert row["amount_dust"] == raw
+            assert row["block_hash"] == BLOCK_HASH
+            assert row["deploy_id"] == DEPLOY_ID
+            assert (
+                await ledger.conn.fetchval(
+                    "SELECT count(*) FROM native_transfer_results WHERE success"
+                )
+                == 1
+            )
+        else:
+            assert await ledger.db.get_last_indexed_block() == 11
+            assert node.client.get_block_report.await_count == 2
+            for table in (
+                "blocks",
+                "deployments",
+                "transfers",
+                "native_transfer_calls",
+            ):
+                assert await ledger.conn.fetchval(f"SELECT count(*) FROM {table}") == 0
 
 
 @pytest.mark.integration

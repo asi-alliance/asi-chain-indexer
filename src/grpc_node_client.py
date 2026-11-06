@@ -31,7 +31,14 @@ def _unwrap(response, field_name: str):
 def _transfer_to_dict(message) -> Dict[str, Any]:
     raw: Optional[str]
     if message.amountRaw:
-        raw = canonical_signed_decimal(message.amountRaw)
+        try:
+            raw = canonical_signed_decimal(message.amountRaw)
+        except ValueError:
+            logger.warning(
+                "Invalid transfer amountRaw; keeping unknown amount",
+                amount_raw_length=len(message.amountRaw),
+            )
+            raw = None
     elif message.amount == -1:
         # This may be either a failed -1 attempt or a stripped wide-amount sentinel.
         raw = None
@@ -79,7 +86,10 @@ class GrpcNodeClient:
         self.http_port = http_port or settings.http_port or 40453
         self.timeout = settings.node_timeout
 
-        self.channel = grpc.aio.insecure_channel(f"{self.node_host}:{self.grpc_port}")
+        self.channel = grpc.aio.insecure_channel(
+            f"{self.node_host}:{self.grpc_port}",
+            options=[("grpc.max_receive_message_length", settings.grpc_max_receive_message_bytes)],
+        )
         self.stub = svc.DeployServiceStub(self.channel)
 
     async def require_native_precision(self, expected: int) -> None:
@@ -124,16 +134,8 @@ class GrpcNodeClient:
             return None
 
     async def get_bonds(self) -> Optional[Dict[str, Any]]:
-        try:
-            response = await self.stub.lastFinalizedBlock(
-                common.LastFinalizedBlockQuery(exactTransferAmounts=True), timeout=self.timeout
-            )
-            wrapper = _unwrap(response, "blockInfo")
-            return {"bonds": _to_dict(wrapper.blockInfo).get("bonds", [])}
-
-        except grpc.RpcError as e:
-            logger.error(f"Failed to get bonds: {e}")
-            return None
+        block = await self.get_last_finalized_block()
+        return {"bonds": block.get("bonds", [])} if block is not None else None
 
     async def get_active_validators(self) -> Optional[List[Dict[str, Any]]]:
         # activeValidators is PoS contract state, no gRPC RPC exposes it

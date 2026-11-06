@@ -5,17 +5,16 @@ from decimal import Decimal
 MAX_AMOUNT = (1 << 256) - 1
 
 
+def _canonical_digits(value: str) -> bool:
+    return value.isascii() and value.isdigit() and (len(value) == 1 or value[0] != "0")
+
+
 def canonical_signed_decimal(value: str) -> str:
     """Validate a signed decimal string, including out-of-range failed attempts."""
     if not isinstance(value, str):
         raise ValueError("amount must be a canonical signed integer")
     digits = value[1:] if value.startswith("-") else value
-    if (
-        not digits.isascii()
-        or not digits.isdigit()
-        or (len(digits) > 1 and digits[0] == "0")
-        or value == "-0"
-    ):
+    if not _canonical_digits(digits) or value == "-0":
         raise ValueError("amount must be a canonical signed integer")
     return value
 
@@ -28,7 +27,7 @@ def amount(value: int | str | Decimal) -> int:
             raise ValueError("amount must be an integer")
         value = int(value)
     text = str(value)
-    if not text.isascii() or not text.isdigit() or (len(text) > 1 and text[0] == "0"):
+    if not _canonical_digits(text):
         raise ValueError("amount must be a canonical unsigned integer")
     result = int(text)
     if result > MAX_AMOUNT:

@@ -296,6 +296,7 @@ docker compose -f docker-compose.yml build
 | `GRPC_PORT` | Node gRPC port for blockchain operations  | `40452` |
 | `HTTP_PORT` | Node HTTP port for status queries         | `40453` |
 | `NODE_TIMEOUT` | HTTP/gRPC request timeout in seconds      | `30` |
+| `GRPC_MAX_RECEIVE_MESSAGE_BYTES` | Maximum gRPC response message size in bytes | `67108864` (64 MiB) |
 | `DATABASE_URL` | PostgreSQL connection URL                 | `postgresql://indexer:indexer_pass@localhost:5432/asichain` |
 | `DATABASE_POOL_SIZE` | Database connection pool size             | `20` |
 | `DATABASE_POOL_TIMEOUT` | Database pool timeout in seconds          | `10` |
@@ -652,10 +653,12 @@ except for `-1`. Without `amountRaw`, that value is ambiguous: it can be a real
 failed attempt or a wide-amount sentinel whose exact field was dropped. The
 client preserves the summary with `amountRaw=None` and the original legacy
 `amount`, `success` and `failReason`. Block reads and deploy lookups remain
-available. Malformed nonempty `amountRaw` values still raise `ValueError`;
-deploy lookup returns `None` through its existing error handler. An unknown
-amount does not become an empty or zero transfer, and it does not bypass the
-required replay processing before the sync cursor advances.
+available. A malformed nonempty `amountRaw` also becomes `None` and emits a
+warning with its character count. The warning does not include the raw value.
+An invalid exact field never falls back to the legacy amount. An unknown amount
+does not become an empty or zero transfer. With transfer extraction enabled,
+non-genesis blocks containing deploys still require valid replay reports before
+the sync cursor advances.
 Old nodes can still omit BigInt transfers from their compact summaries; the
 indexer continues to derive ledger movements from full phase-marked replay
 traces, including delayed completion, rather than from those summaries.
@@ -663,6 +666,17 @@ traces, including delayed completion, rather than from those summaries.
 Deploy this indexer before upgrading nodes to #896. Rebuild the Docker image to
 regenerate the protobuf stubs, or run `make protos` for a local installation.
 This API adaptation requires no additional database migration beyond 000–003.
+
+Full blocks can exceed Python gRPC's default 4 MiB receive limit. The client
+uses a bounded 64 MiB limit by default. Set `GRPC_MAX_RECEIVE_MESSAGE_BYTES`
+to a positive byte count up to 2147483647 for the selected network's block
+responses. Responses above that limit remain RPC errors and must be retried.
+This client response limit is independent of the node's request size limit.
+
+Periodic validator refreshes match the public keys in the HTTP validator
+records against the finalized bond set. If the active-validator read is
+unavailable, the refresh preserves stored stakes and statuses. A successful
+empty active set marks the bonded validators as `bonded`.
 
 The local protocol-server tests verify request negotiation and client decoding.
 They do not establish acceptance of a running #896 node. Live acceptance remains

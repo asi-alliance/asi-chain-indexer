@@ -251,12 +251,16 @@ async def test_periodic_validator_refresh_updates_precision_after_migration(
         indexer = BlockIndexer()
         indexer.client = SimpleNamespace(
             get_bonds=AsyncMock(),
-            get_active_validators=AsyncMock(return_value=["validator"]),
+            get_active_validators=AsyncMock(),
         )
 
         # Refresh at the same indexed height, without processing another block.
         for increment in (0, 1):
             stake = 10**decimals + increment
+            active_key = "validator" if increment == 0 else "new-validator"
+            indexer.client.get_active_validators.return_value = [
+                {"validator": active_key, "stake": stake}
+            ]
             indexer.client.get_bonds.return_value = {
                 "bonds": [
                     {"validator": key, "stake": stake}
@@ -266,16 +270,38 @@ async def test_periodic_validator_refresh_updates_precision_after_migration(
             await indexer._update_validator_states()
             assert indexer._cycle_error is None
             rows = await connection.fetch(
-                "SELECT total_stake, token_decimals FROM validators"
+                "SELECT public_key, total_stake, token_decimals, status FROM validators "
+                "ORDER BY public_key"
             )
             assert len(rows) == 2
             for row in rows:
                 assert (row["total_stake"], row["token_decimals"]) == (stake, decimals)
+                assert row["status"] == (
+                    "active" if row["public_key"] == active_key else "bonded"
+                )
                 assert token_decimal(
                     int(row["total_stake"]), row["token_decimals"]
                 ) == (Decimal(1) + Decimal(increment).scaleb(-decimals))
             assert await database.get_last_indexed_block() == 0
             assert await connection.fetchval("SELECT COUNT(*) FROM blocks") == 1
+
+        indexer.client.get_active_validators.return_value = None
+        await indexer._update_validator_states()
+        assert (
+            await connection.fetch(
+                "SELECT public_key, total_stake, token_decimals, status FROM validators "
+                "ORDER BY public_key"
+            )
+            == rows
+        )
+        indexer.client.get_active_validators.return_value = []
+        await indexer._update_validator_states()
+        assert (
+            await connection.fetchval(
+                "SELECT count(*) FROM validators WHERE status='bonded'"
+            )
+            == 2
+        )
 
         historical = await connection.fetchrow(
             "SELECT stake, token_decimals FROM validator_bonds WHERE block_hash='legacy'"
