@@ -984,15 +984,14 @@ class BlockIndexer:
             result = await session.execute(
                 text("""
                      INSERT INTO validators (public_key, name, total_stake, token_decimals, status, first_seen_block, last_seen_block)
-                     VALUES (:public_key, :name, :stake, :token_decimals, 'active', :block_number,
+                     VALUES (:public_key, :name, :stake, :token_decimals, 'bonded', :block_number,
                              :block_number)
                      ON CONFLICT (public_key) DO UPDATE SET total_stake = CASE
                          WHEN validators.token_decimals = EXCLUDED.token_decimals
                          THEN GREATEST(validators.total_stake, EXCLUDED.total_stake)
                          ELSE EXCLUDED.total_stake END,
                                                             token_decimals = EXCLUDED.token_decimals,
-                                                            last_seen_block = :block_number,
-                                                            status          = 'active'
+                                                            last_seen_block = :block_number
                      """),
                 {
                     "public_key": validator_key,

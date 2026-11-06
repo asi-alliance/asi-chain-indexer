@@ -19,6 +19,18 @@ def canonical_signed_decimal(value: str) -> str:
     return value
 
 
+def signed_integer_text(value: int) -> str:
+    """Format a signed integer without Python's decimal digit limit."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("amount must be an exact integer")
+    return format(Decimal(value), "f")
+
+
+def parse_signed_integer(value: str) -> int:
+    """Restore a canonical signed integer without Python's decimal digit limit."""
+    return int(Decimal(canonical_signed_decimal(value)))
+
+
 def amount(value: int | str | Decimal) -> int:
     if isinstance(value, bool) or isinstance(value, float):
         raise ValueError("amount must be an exact integer")

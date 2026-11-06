@@ -663,6 +663,12 @@ Old nodes can still omit BigInt transfers from their compact summaries; the
 indexer continues to derive ledger movements from full phase-marked replay
 traces, including delayed completion, rather than from those summaries.
 
+Replay call history also preserves signed requested amounts above 4,300 digits.
+Exact conversions through `Decimal` write and restore the integer text without
+decimal arithmetic, context rounding or changes to Python's global digit limit.
+Rejected attempts remain call/result history and never become ledger movements.
+Successful movements still require a positive uint256 amount.
+
 Deploy this indexer before upgrading nodes to #896. Rebuild the Docker image to
 regenerate the protobuf stubs, or run `make protos` for a local installation.
 This API adaptation requires no additional database migration beyond 000–003.
@@ -677,6 +683,9 @@ Periodic validator refreshes match the public keys in the HTTP validator
 records against the finalized bond set. If the active-validator read is
 unavailable, the refresh preserves stored stakes and statuses. A successful
 empty active set marks the bonded validators as `bonded`.
+New validators discovered in block bonds start as `bonded`. Later block upserts
+preserve the stored status. Only the HTTP membership refresh marks a validator
+as `active`.
 
 The local protocol-server tests verify request negotiation and client decoding.
 They do not establish acceptance of a running #896 node. Live acceptance remains

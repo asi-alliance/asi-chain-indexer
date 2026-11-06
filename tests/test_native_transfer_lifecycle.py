@@ -49,14 +49,16 @@ async def ledger(monkeypatch, request):
         indexer = BlockIndexer()
         indexer.client = SimpleNamespace(get_block_report=AsyncMock())
 
-        async def add(height, block_hash, entries, parents=()):
+        async def add(
+            height, block_hash, entries, parents=(), *, bonds=(), process=True
+        ):
             details = {
                 "blockInfo": {
                     "blockHash": block_hash,
                     "blockNumber": height,
                     "timestamp": height * 1000,
                     "sender": "validator",
-                    "bonds": [],
+                    "bonds": list(bonds),
                     "parentsHashList": list(parents),
                 },
                 "deploys": [],
@@ -78,7 +80,8 @@ async def ledger(monkeypatch, request):
                 )
             replay = {"blockInfo": {"blockHash": block_hash}, "deploys": reports}
             indexer.client.get_block_report.return_value = replay
-            await indexer._process_block(details)
+            if process:
+                await indexer._process_block(details)
             return details, replay
 
         yield SimpleNamespace(db=database, conn=conn, indexer=indexer, add=add)
@@ -87,6 +90,99 @@ async def ledger(monkeypatch, request):
         await conn.close()
         await admin.execute(f'DROP DATABASE "{name}"')
         await admin.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_block_bonds_preserve_observed_activity_when_http_is_unavailable(ledger):
+    bonds = [{"validator": key, "stake": 10} for key in ("active", "inactive")]
+    await ledger.add(1, "origin", [], bonds=bonds)
+    assert dict(
+        await ledger.conn.fetch("SELECT public_key, status FROM validators")
+    ) == {
+        "active": "bonded",
+        "inactive": "bonded",
+    }
+    ledger.indexer.client.get_bonds = AsyncMock(return_value={"bonds": bonds})
+    ledger.indexer.client.get_active_validators = AsyncMock(
+        return_value=[{"validator": "active", "stake": 10}]
+    )
+    await ledger.indexer._update_validator_states()
+    assert (
+        await ledger.conn.fetchval(
+            "SELECT status FROM validators WHERE public_key='active'"
+        )
+        == "active"
+    )
+
+    bonds.append({"validator": "new-validator", "stake": 10})
+    await ledger.add(2, "next", [], ["origin"], bonds=bonds)
+    ledger.indexer.client.get_active_validators.return_value = None
+    await ledger.indexer._update_validator_states()
+    assert dict(
+        await ledger.conn.fetch("SELECT public_key, status FROM validators")
+    ) == {
+        "active": "active",
+        "inactive": "bonded",
+        "new-validator": "bonded",
+    }
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sign", [1, -1], ids=["positive", "negative"])
+@pytest.mark.parametrize("delayed", [False, True], ids=["immediate", "after-restart"])
+async def test_huge_rejected_attempt_preserves_replay_history_and_advances_cursor(
+    ledger, monkeypatch, sign, delayed
+):
+    raw = sign * 10**4300
+    exact = ("-" if sign < 0 else "") + "1" + "0" * 4300
+    events = payment(raw, success=False)
+    monkeypatch.setattr("src.block_indexer.settings.start_from_block", 1)
+    monkeypatch.setattr("src.block_indexer.settings.delay_before_node", 0)
+    if delayed:
+        await ledger.add(1, "origin", [("start", report(events[:1]))])
+        assert (
+            await ledger.conn.fetchval(
+                "SELECT requested_amount FROM native_transfer_calls"
+            )
+            == exact
+        )
+        assert (
+            await ledger.conn.fetchval("SELECT status FROM native_transfer_lifecycle")
+            == "pending"
+        )
+        ledger.indexer.__dict__.update(BlockIndexer().__dict__)
+        ledger.indexer.client = SimpleNamespace(get_block_report=AsyncMock())
+    height = 2 if delayed else 1
+    details, _ = await ledger.add(
+        height,
+        "completion",
+        [("finish", report(events[1:] if delayed else events))],
+        ["origin"] if delayed else [],
+        process=False,
+    )
+    await ledger.db.set_last_indexed_block(height - 1)
+    ledger.indexer.client.get_last_finalized_block = AsyncMock(
+        return_value={"blockNumber": height}
+    )
+    ledger.indexer.client.get_blocks_by_height = AsyncMock(
+        return_value=[{"blockNumber": height, "blockHash": "completion"}]
+    )
+    ledger.indexer.client.get_block_details = AsyncMock(return_value=details)
+    await ledger.indexer._sync_blocks()
+    await ledger.indexer._sync_blocks()
+
+    assert await ledger.db.get_last_indexed_block() == height
+    ledger.indexer.client.get_block_report.assert_awaited_once_with("completion")
+    lifecycle = await ledger.conn.fetchrow("SELECT * FROM native_transfer_lifecycle")
+    assert lifecycle["requested_amount"] == exact
+    assert lifecycle["status"] == "rejected"
+    assert lifecycle["completion_deploy_id"] == "finish"
+    assert await ledger.conn.fetchval("SELECT count(*) FROM transfers") == 0
+    assert (
+        await ledger.conn.fetchval("SELECT count(*) FROM native_transfer_results") == 1
+    )
 
 
 @pytest.mark.integration
