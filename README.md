@@ -296,6 +296,7 @@ docker compose -f docker-compose.yml build
 | `GRPC_PORT` | Node gRPC port for blockchain operations  | `40452` |
 | `HTTP_PORT` | Node HTTP port for status queries         | `40453` |
 | `NODE_TIMEOUT` | HTTP/gRPC request timeout in seconds      | `30` |
+| `GRPC_MAX_RECEIVE_MESSAGE_BYTES` | Maximum gRPC response message size in bytes | `67108864` (64 MiB) |
 | `DATABASE_URL` | PostgreSQL connection URL                 | `postgresql://indexer:indexer_pass@localhost:5432/asichain` |
 | `DATABASE_POOL_SIZE` | Database connection pool size             | `20` |
 | `DATABASE_POOL_TIMEOUT` | Database pool timeout in seconds          | `10` |
@@ -631,9 +632,76 @@ storage without changing existing values and records historical precision as 8.
 Each newly indexed block, transfer, bond and balance records its configured
 precision. See [migration instructions](migrations/README.md).
 
-The published node transfer and bond RPC fields remain `int64`; this change does
-not extend that wire format. Rholang BigInt transfer literals (`123n`) and exact
-HTTP validator amounts can use the wider storage where exposed by the node.
+The client supports the exact-amount contract in
+[Rust node PR #896](https://github.com/F1R3FLY-io/f1r3node-rust/pull/896), pinned at
+`92903a1d81c49fa0a035fb7ee729002e38428280`. Every `getBlock` and
+`lastFinalizedBlock` request sets `exactTransferAmounts=true`, including bond
+refreshes and deploy lookups, so wide transfers do not reject the whole block.
+Transfer dictionaries preserve `amount` as the legacy Python int64 integer.
+Use `amountRaw` for the exact base-unit amount when it is not `None`. A known
+amount is a validated canonical decimal string. Validation does not convert
+the string to a Python integer, so signed, out-of-range failed attempts retain
+all digits without a uint256 clamp or Python's decimal conversion limit.
+For wide amounts, the legacy `amount` can contain the node's
+`-1` sentinel and must not be used as the transfer amount. Bond and phlo fields
+retain their existing integer types. Network consensus reads height and bonds
+from one finalized-block response; active membership is a separate HTTP read.
+
+Older nodes ignore the added request fields. When their response omits
+`amountRaw`, the client converts the legacy int64 directly to a decimal string,
+except for `-1`. Without `amountRaw`, that value is ambiguous: it can be a real
+failed attempt or a wide-amount sentinel whose exact field was dropped. The
+client preserves the summary with `amountRaw=None` and the original legacy
+`amount`, `success` and `failReason`. Block reads and deploy lookups remain
+available. A malformed nonempty `amountRaw` also becomes `None` and emits a
+warning with its character count. The warning does not include the raw value.
+An invalid exact field never falls back to the legacy amount. An unknown amount
+does not become an empty or zero transfer. With transfer extraction enabled,
+non-genesis blocks containing deploys still require valid replay reports before
+the sync cursor advances.
+Old nodes can still omit BigInt transfers from their compact summaries; the
+indexer continues to derive ledger movements from full phase-marked replay
+traces, including delayed completion, rather than from those summaries.
+
+Replay call history also preserves signed requested amounts above 4,300 digits.
+Exact conversions through `Decimal` write and restore the integer text without
+decimal arithmetic, context rounding or changes to Python's global digit limit.
+Rejected attempts remain call/result history and never become ledger movements.
+Successful movements still require a positive uint256 amount.
+
+Deploy this indexer before upgrading nodes to #896. Rebuild the Docker image to
+regenerate the protobuf stubs, or run `make protos` for a local installation.
+This API adaptation requires no additional database migration beyond 000–003.
+
+Full blocks can exceed Python gRPC's default 4 MiB receive limit. The client
+uses a bounded 64 MiB limit by default. Set `GRPC_MAX_RECEIVE_MESSAGE_BYTES`
+to a positive byte count up to 2147483647 for the selected network's block
+responses. Responses above that limit remain RPC errors and must be retried.
+This client response limit is independent of the node's request size limit.
+
+Periodic validator refreshes match the public keys in the HTTP validator
+records against the finalized bond set. If the active-validator read is
+unavailable, the refresh preserves stored stakes and statuses. A successful
+empty active set marks the bonded validators as `bonded`.
+New validators discovered in block bonds start as `bonded`. Later block upserts
+preserve the stored status. Only the HTTP membership refresh marks a validator
+as `active`.
+
+The local protocol-server tests verify request negotiation and client decoding.
+They do not establish acceptance of a running #896 node. Live acceptance remains
+pending against the exact node revision above and this indexer working tree.
+Use an isolated observer with a known funded transfer above int64. Verify that
+the same block returns `TRANSFER_AMOUNT_OUT_OF_RANGE` without the exact flag
+and the full block with canonical `amountRaw` values with the flag. Compare
+deploy lookup, replay-derived ledger rows, database values and GraphQL strings.
+Record the node source/image digest, block/deploy IDs and indexer revision or
+working-tree diff. Recheck against a new node head before release.
+
+[Node #947](https://github.com/F1R3FLY-io/f1r3node-rust/pull/947) changes HTTP phlo
+prices to strings, while gRPC prices remain int64. This client uses gRPC for
+deploy/block prices and HTTP for validator stakes and replay reports. That
+follow-up requires no phlo-price decoder change here. Cost-accounting in
+indexer #21/node #216 and the wider node #881 profile need separate reconciliation.
 
 For storage boundary verification after migrations 000 and 001:
 

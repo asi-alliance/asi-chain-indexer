@@ -29,6 +29,13 @@ class Settings(BaseSettings):
         description="GRPC port for status queries"
     )
 
+    grpc_max_receive_message_bytes: int = Field(
+        default=64 * 1024 * 1024,
+        ge=1,
+        le=2**31 - 1,
+        description="Maximum size of a gRPC response message in bytes"
+    )
+
     node_host: str = Field(
         default="localhost",
         description="host port for status queries"

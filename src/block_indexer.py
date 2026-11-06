@@ -748,14 +748,16 @@ class BlockIndexer:
             # Get active validators
             active_validators = await self.client.get_active_validators()
             if active_validators is None:
-                active_validators = []
+                logger.warning("Could not refresh validator states: active validators unavailable")
+                return
+            active_keys = {validator["validator"] for validator in active_validators}
 
             async with db.session() as session:
                 # Update validator records
                 for bond in bonds:
                     validator_key = bond["validator"]
                     stake = bond["stake"]
-                    is_active = validator_key in active_validators
+                    is_active = validator_key in active_keys
 
                     # Get current block number for tracking
                     current_block = await db.get_last_indexed_block()
@@ -982,15 +984,14 @@ class BlockIndexer:
             result = await session.execute(
                 text("""
                      INSERT INTO validators (public_key, name, total_stake, token_decimals, status, first_seen_block, last_seen_block)
-                     VALUES (:public_key, :name, :stake, :token_decimals, 'active', :block_number,
+                     VALUES (:public_key, :name, :stake, :token_decimals, 'bonded', :block_number,
                              :block_number)
                      ON CONFLICT (public_key) DO UPDATE SET total_stake = CASE
                          WHEN validators.token_decimals = EXCLUDED.token_decimals
                          THEN GREATEST(validators.total_stake, EXCLUDED.total_stake)
                          ELSE EXCLUDED.total_stake END,
                                                             token_decimals = EXCLUDED.token_decimals,
-                                                            last_seen_block = :block_number,
-                                                            status          = 'active'
+                                                            last_seen_block = :block_number
                      """),
                 {
                     "public_key": validator_key,

@@ -16,7 +16,7 @@ from google.protobuf import empty_pb2
 from google.protobuf.descriptor import FieldDescriptor
 
 from src.config import settings
-from src.amounts import amount
+from src.amounts import amount, canonical_signed_decimal
 
 logger = structlog.get_logger(__name__)
 
@@ -28,9 +28,34 @@ def _unwrap(response, field_name: str):
     return getattr(response, field_name)
 
 
+def _transfer_to_dict(message) -> Dict[str, Any]:
+    raw: Optional[str]
+    if message.amountRaw:
+        try:
+            raw = canonical_signed_decimal(message.amountRaw)
+        except ValueError:
+            logger.warning(
+                "Invalid transfer amountRaw; keeping unknown amount",
+                amount_raw_length=len(message.amountRaw),
+            )
+            raw = None
+    elif message.amount == -1:
+        # This may be either a failed -1 attempt or a stripped wide-amount sentinel.
+        raw = None
+    else:
+        raw = str(message.amount)
+    result = _to_dict(message)
+    result["amountRaw"] = raw
+    return result
+
+
+_MESSAGE_DECODERS = {common.TransferInfo.DESCRIPTOR.full_name: _transfer_to_dict}
+
+
 def _field_value(field, value):
     if field.type == FieldDescriptor.TYPE_MESSAGE:
-        return _to_dict(value)
+        decode = _MESSAGE_DECODERS.get(field.message_type.full_name, _to_dict)
+        return decode(value)
     if field.type == FieldDescriptor.TYPE_BYTES:
         return base64.b64encode(value).decode()
     return value
@@ -61,7 +86,10 @@ class GrpcNodeClient:
         self.http_port = http_port or settings.http_port or 40453
         self.timeout = settings.node_timeout
 
-        self.channel = grpc.aio.insecure_channel(f"{self.node_host}:{self.grpc_port}")
+        self.channel = grpc.aio.insecure_channel(
+            f"{self.node_host}:{self.grpc_port}",
+            options=[("grpc.max_receive_message_length", settings.grpc_max_receive_message_bytes)],
+        )
         self.stub = svc.DeployServiceStub(self.channel)
 
     async def require_native_precision(self, expected: int) -> None:
@@ -95,7 +123,9 @@ class GrpcNodeClient:
 
     async def get_last_finalized_block(self) -> Optional[Dict[str, Any]]:
         try:
-            response = await self.stub.lastFinalizedBlock(common.LastFinalizedBlockQuery(), timeout=self.timeout)
+            response = await self.stub.lastFinalizedBlock(
+                common.LastFinalizedBlockQuery(exactTransferAmounts=True), timeout=self.timeout
+            )
             wrapper = _unwrap(response, "blockInfo")
             return _to_dict(wrapper.blockInfo)
 
@@ -104,14 +134,8 @@ class GrpcNodeClient:
             return None
 
     async def get_bonds(self) -> Optional[Dict[str, Any]]:
-        try:
-            response = await self.stub.lastFinalizedBlock(common.LastFinalizedBlockQuery(), timeout=self.timeout)
-            wrapper = _unwrap(response, "blockInfo")
-            return {"bonds": _to_dict(wrapper.blockInfo).get("bonds", [])}
-
-        except grpc.RpcError as e:
-            logger.error(f"Failed to get bonds: {e}")
-            return None
+        block = await self.get_last_finalized_block()
+        return {"bonds": block.get("bonds", [])} if block is not None else None
 
     async def get_active_validators(self) -> Optional[List[Dict[str, Any]]]:
         # activeValidators is PoS contract state, no gRPC RPC exposes it
@@ -133,7 +157,7 @@ class GrpcNodeClient:
 
     async def get_block_details(self, block_hash: str) -> Optional[Dict[str, Any]]:
         try:
-            query = common.BlockQuery(hash=block_hash)
+            query = common.BlockQuery(hash=block_hash, exactTransferAmounts=True)
             response = await self.stub.getBlock(query, timeout=self.timeout)
             return _to_dict(_unwrap(response, "blockInfo"))
 
@@ -199,7 +223,10 @@ class GrpcNodeClient:
             find_response = await self.stub.findDeploy(query, timeout=self.timeout)
             light_block = _unwrap(find_response, "blockInfo")
 
-            block_response = await self.stub.getBlock(common.BlockQuery(hash=light_block.blockHash), timeout=self.timeout)
+            block_response = await self.stub.getBlock(
+                common.BlockQuery(hash=light_block.blockHash, exactTransferAmounts=True),
+                timeout=self.timeout,
+            )
             full_block = _unwrap(block_response, "blockInfo")
 
             for deploy in full_block.deploys:
@@ -266,20 +293,24 @@ class GrpcNodeClient:
     async def get_network_consensus(self) -> Optional[Dict[str, Any]]:
         try:
             lfb = await self.get_last_finalized_block()
-            bonds_data = await self.get_bonds()
+            if lfb is None:
+                return None
             active = await self.get_active_validators()
 
-            if lfb is None or bonds_data is None or active is None:
+            if active is None:
                 return None
 
-            total_bonded = len(bonds_data["bonds"])
+            bonds = lfb["bonds"]
+            total_bonded = len(bonds)
             active_count = len(active)
             in_quarantine = max(0, total_bonded - active_count)
 
-            # stake from bonds_data only: get_bonds/get_active_validators aren't one atomic call
+            # Height and bonds share one finalized snapshot; active membership is separate.
             active_keys = {v["validator"] for v in active}
-            total_stake = sum(b["stake"] for b in bonds_data["bonds"])
-            active_stake = sum(b["stake"] for b in bonds_data["bonds"] if b["validator"] in active_keys)
+            total_stake = sum(b["stake"] for b in bonds)
+            active_stake = sum(
+                b["stake"] for b in bonds if b["validator"] in active_keys
+            )
             participation = (active_stake / total_stake) if total_stake else 0.0
 
             # mirrors the node's own casper.fault-tolerance-threshold (settings.fault_tolerance_threshold)
