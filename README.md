@@ -637,9 +637,11 @@ The client supports the exact-amount contract in
 `lastFinalizedBlock` request sets `exactTransferAmounts=true`, including bond
 refreshes and deploy lookups, so wide transfers do not reject the whole block.
 Transfer dictionaries preserve `amount` as the legacy Python int64 integer.
-Use `amountRaw` for the exact base-unit amount. It is a validated canonical
-decimal string and retains signed, out-of-range failed attempts without a
-uint256 clamp. For wide amounts, the legacy `amount` can contain the node's
+Use `amountRaw` for the exact base-unit amount when it is not `None`. A known
+amount is a validated canonical decimal string. Validation does not convert
+the string to a Python integer, so signed, out-of-range failed attempts retain
+all digits without a uint256 clamp or Python's decimal conversion limit.
+For wide amounts, the legacy `amount` can contain the node's
 `-1` sentinel and must not be used as the transfer amount. Bond and phlo fields
 retain their existing integer types. Network consensus reads height and bonds
 from one finalized-block response; active membership is a separate HTTP read.
@@ -648,9 +650,12 @@ Older nodes ignore the added request fields. When their response omits
 `amountRaw`, the client converts the legacy int64 directly to a decimal string,
 except for `-1`. Without `amountRaw`, that value is ambiguous: it can be a real
 failed attempt or a wide-amount sentinel whose exact field was dropped. The
-client raises `ValueError` instead of inventing an exact amount. Malformed
-`amountRaw` values also raise `ValueError`; deploy lookup returns `None` through
-its existing error handler. Neither case becomes an empty or zero transfer.
+client preserves the summary with `amountRaw=None` and the original legacy
+`amount`, `success` and `failReason`. Block reads and deploy lookups remain
+available. Malformed nonempty `amountRaw` values still raise `ValueError`;
+deploy lookup returns `None` through its existing error handler. An unknown
+amount does not become an empty or zero transfer, and it does not bypass the
+required replay processing before the sync cursor advances.
 Old nodes can still omit BigInt transfers from their compact summaries; the
 indexer continues to derive ledger movements from full phase-marked replay
 traces, including delayed completion, rather than from those summaries.

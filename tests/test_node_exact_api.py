@@ -211,13 +211,35 @@ def test_exact_field_takes_precedence_over_legacy_amount(legacy_amount):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("legacy", [False, True])
-async def test_missing_exact_amount_rejects_ambiguous_sentinel(legacy):
-    async with node_api(-1, legacy=legacy, amount_raw="") as node:
-        with pytest.raises(ValueError, match="ambiguous"):
-            await node.client.get_block_details(BLOCK_HASH)
-        # A deploy lookup fails closed through its existing ValueError handler.
-        assert await node.client.get_deploy_info(DEPLOY_ID) is None
+@pytest.mark.parametrize("legacy,raw", [(False, -1), (True, -1), (False, 2**63)])
+async def test_missing_exact_amount_preserves_ambiguous_summary(legacy, raw):
+    async with node_api(raw, legacy=legacy, amount_raw="") as node:
+        details = await node.client.get_block_details(BLOCK_HASH)
+        deploy = details["deploys"][0]
+        transfer = deploy["transfers"][0]
+        assert transfer["amount"] == -1
+        assert transfer["amountRaw"] is None
+        assert transfer["success"] == (raw > 0)
+        assert transfer["failReason"] == ("" if raw > 0 else "Rejected amount")
+        assert deploy["transfersAvailable"] is True
+        assert (await node.client.get_deploy_info(DEPLOY_ID))["transfers"] == [transfer]
+        assert (await node.client.get_last_finalized_block())["blockNumber"] == 12
+        assert (await node.client.get_bonds())["bonds"][0]["stake"] == MAX_INT64
+        assert len(node.requests) == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sign", ["", "-"], ids=["positive", "negative"])
+async def test_failed_attempt_preserves_exact_amount_above_python_digit_limit(sign):
+    raw = sign + "1" + "0" * 4300
+    async with node_api(-1, amount_raw=raw) as node:
+        details = await node.client.get_block_details(BLOCK_HASH)
+        transfer = details["deploys"][0]["transfers"][0]
+        assert transfer["amount"] == -1
+        assert transfer["amountRaw"] == raw
+        assert transfer["success"] is False
+        assert transfer["failReason"] == "Rejected amount"
+        assert (await node.client.get_deploy_info(DEPLOY_ID))["transfers"] == [transfer]
 
 
 @pytest.mark.asyncio

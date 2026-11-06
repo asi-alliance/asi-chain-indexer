@@ -16,7 +16,7 @@ from google.protobuf import empty_pb2
 from google.protobuf.descriptor import FieldDescriptor
 
 from src.config import settings
-from src.amounts import amount, signed_integer
+from src.amounts import amount, canonical_signed_decimal
 
 logger = structlog.get_logger(__name__)
 
@@ -29,12 +29,12 @@ def _unwrap(response, field_name: str):
 
 
 def _transfer_to_dict(message) -> Dict[str, Any]:
+    raw: Optional[str]
     if message.amountRaw:
-        signed_integer(message.amountRaw)
-        raw = message.amountRaw
+        raw = canonical_signed_decimal(message.amountRaw)
     elif message.amount == -1:
         # This may be either a failed -1 attempt or a stripped wide-amount sentinel.
-        raise ValueError("Transfer amount is ambiguous: legacy -1 without amountRaw")
+        raw = None
     else:
         raw = str(message.amount)
     result = _to_dict(message)
