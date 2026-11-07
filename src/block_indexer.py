@@ -4,6 +4,8 @@ import asyncio
 import re
 import statistics
 from datetime import datetime
+
+from src.time_utils import utc_now
 from typing import Dict, List, Optional
 
 import aiohttp
@@ -768,7 +770,7 @@ class BlockIndexer:
                         first_seen_block=current_block,
                         last_seen_block=current_block,
                         status="active" if is_active else "bonded",
-                        updated_at=datetime.utcnow()
+                        updated_at=utc_now()
                     )
                     stmt = stmt.on_conflict_do_update(
                         index_elements=["public_key"],
@@ -777,7 +779,7 @@ class BlockIndexer:
                             "token_decimals": stmt.excluded.token_decimals,
                             "last_seen_block": current_block,
                             "status": "active" if is_active else "bonded",
-                            "updated_at": datetime.utcnow()
+                            "updated_at": utc_now()
                         }
                     )
                     await session.execute(stmt)
@@ -843,7 +845,7 @@ class BlockIndexer:
                         end_block=epoch_end,
                         active_validators=active_count,
                         quarantine_length=quarantine_length,
-                        timestamp=datetime.utcnow()
+                        timestamp=utc_now()
                     )
                     session.add(epoch_transition)
                     await session.commit()
@@ -883,7 +885,7 @@ class BlockIndexer:
                     validators_in_quarantine=consensus.get("validators_in_quarantine", 0),
                     consensus_participation=consensus.get("participation_rate", 0.0),
                     consensus_status=consensus.get("status", "unknown"),
-                    timestamp=datetime.utcnow()
+                    timestamp=utc_now()
                 )
                 session.add(network_stat)
                 await session.commit()

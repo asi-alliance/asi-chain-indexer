@@ -14,11 +14,10 @@ help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*##"; printf "\033[36m%-20s\033[0m %s\n", "Command", "Description"} /^[a-zA-Z_-]+:.*?##/ { printf "\033[36m%-20s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 install: ## Install production dependencies
-	$(PIP) install -r requirements.txt
+	$(PYTHON) -m pip install --require-hashes -r requirements.lock
 
 dev-install: ## Install development dependencies
-	$(PIP) install -r requirements.txt
-	$(PIP) install pytest pytest-asyncio pytest-cov black flake8 mypy
+	$(PYTHON) -m pip install --require-hashes -r requirements-dev.lock
 
 test: ## Run tests
 	pytest tests/ -v --cov=src --cov-report=term-missing

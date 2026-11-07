@@ -1,6 +1,6 @@
 """Database models for the indexer."""
 
-from datetime import datetime
+from src.time_utils import utc_now
 
 from sqlalchemy import (
     BigInteger, Boolean, Column, DateTime, ForeignKey, Index, Integer,
@@ -56,7 +56,7 @@ class Block(Base):
     extra_bytes = Column(Text)
     version = Column(Integer)
     deployment_count = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
 
     # Relationships
     deployments = relationship("Deployment", back_populates="block", cascade="all, delete-orphan",
@@ -80,7 +80,7 @@ class BlockParent(Base):
     block_hash = Column(String(64), ForeignKey("blocks.block_hash", ondelete="CASCADE"), primary_key=True)
     parent_hash = Column(String(64), primary_key=True)
     parent_index = Column(Integer, nullable=False, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
 
     # Relationships
     block = relationship("Block", back_populates="parents", foreign_keys=[block_hash])
@@ -114,7 +114,7 @@ class Deployment(Base):
     seq_num = Column(Integer)  # New field
     shard_id = Column(String(20))  # New field
     status = Column(String(20), default="included", index=True)  # New field
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
 
     # Relationships
     block = relationship("Block", back_populates="deployments", foreign_keys=[block_hash])
@@ -153,7 +153,7 @@ class Transfer(Base):
     amount_asi = Column(Numeric(155, 77), nullable=False)
     status = Column(String(20), default="success", index=True)
     timestamp = Column(BigInteger, nullable=False, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
 
     # Relationships
     deployment = relationship("Deployment", back_populates="transfers")
@@ -238,7 +238,7 @@ class PendingDeploy(Base):
     expiration_timestamp = Column(BigInteger)
     # true = from rejected_deploy_buffer (recovering after merge conflict)
     is_rejected = Column(Boolean, default=False, index=True)
-    fetched_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    fetched_at = Column(DateTime, default=utc_now, nullable=False)
 
     __table_args__ = (
         Index("idx_pending_deploys_deployer", "deployer"),
@@ -266,8 +266,8 @@ class Validator(Base):
     first_seen_block = Column(BigInteger)
     last_seen_block = Column(BigInteger)
     status = Column(String(20), default="bonded", index=True)  # New field: active/bonded/quarantine/inactive
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
     # Relationships
     bonds = relationship("ValidatorBond", back_populates="validator")
@@ -322,7 +322,7 @@ class IndexerState(Base):
 
     key = Column(String(50), primary_key=True)
     value = Column(Text, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
 
     # Common keys:
     # - last_indexed_block: Last successfully indexed block number
@@ -355,7 +355,7 @@ class BalanceState(Base):
         nullable=False, default=0,
     )
     bonded_balance_asi = Column(Numeric(155, 77), nullable=False, default=0)
-    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, nullable=False)
 
     # Relationships
     block = relationship("Block", backref="balance_states")
@@ -390,7 +390,7 @@ class EpochTransition(Base):
     end_block = Column(BigInteger, nullable=False, index=True)
     active_validators = Column(Integer, nullable=False)
     quarantine_length = Column(Integer, nullable=False)
-    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
+    timestamp = Column(DateTime, default=utc_now, nullable=False)
 
     __table_args__ = (
         Index("idx_epoch_blocks", "start_block", "end_block"),
@@ -409,7 +409,7 @@ class NetworkStats(Base):
     validators_in_quarantine = Column(Integer, default=0)
     consensus_participation = Column(Numeric(5, 2), nullable=False)  # Percentage
     consensus_status = Column(String(20), nullable=False)  # healthy/degraded/critical
-    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    timestamp = Column(DateTime, default=utc_now, nullable=False, index=True)
 
     __table_args__ = (
         Index("idx_network_stats_timestamp", "timestamp"),
