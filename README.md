@@ -100,7 +100,7 @@ The indexer provides complete automation for blockchain data synchronization:
 - **structlog 26.1.0**: Structured logging
 - **prometheus-client 0.26.0**: Metrics exposure
 - **aiohttp 3.14.5**: HTTP client and monitoring server
-- **click 8.1.7**: CLI interface
+- **click 8.5.1**: CLI interface
 
 
 ## Architecture
