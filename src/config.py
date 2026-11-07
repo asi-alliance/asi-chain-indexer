@@ -3,7 +3,7 @@
 from typing import Optional
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
@@ -222,11 +222,12 @@ class Settings(BaseSettings):
             raise ValueError("ALERTS_ENABLED is true but MATTERMOST_WEBHOOK_URL is empty")
         return self
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
-        extra = "allow"  # allow extra fields in .env
-        hide_input_in_errors = True
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=False,
+        extra="allow",  # allow extra fields in .env
+        hide_input_in_errors=True,
+    )
 
 
 # Global settings instance

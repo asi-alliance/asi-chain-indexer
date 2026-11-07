@@ -93,15 +93,14 @@ The indexer provides complete automation for blockchain data synchronization:
 
 - **Python 3.11**: Core programming language
 - **asyncio**: Asynchronous processing framework
-- **SQLAlchemy 2.0.31**: ORM and database abstraction
-- **asyncpg 0.29.0**: PostgreSQL async driver
-- **Pydantic 2.7.4**: Configuration and data validation
+- **SQLAlchemy 2.1.8**: ORM and database abstraction
+- **asyncpg 0.32.0**: PostgreSQL async driver
+- **Pydantic 2.14.3**: Configuration and data validation
 - **pydantic-settings 2.3.4**: Settings management
 - **structlog 24.2.0**: Structured logging
 - **prometheus-client 0.20.0**: Metrics exposure
-- **aiohttp 3.9.5**: HTTP client
+- **aiohttp 3.14.5**: HTTP client and monitoring server
 - **click 8.1.7**: CLI interface
-- **tenacity 8.5.0**: Retry logic
 
 
 ## Architecture
@@ -563,7 +562,7 @@ indexer/
 │   ├── monitoring.py          # REST API + Prometheus metrics
 │   ├── config.py              # Pydantic settings
 │   ├── addr.py                # ASI address derivation
-│   ├── cache.py / resilience.py
+│   ├── resilience.py          # Retry, circuit breaker and timeout helpers
 │   └── grpc_stubs/            # Generated gRPC client (from protos/)
 ├── migrations/
 │   ├── 000_comprehensive_initial_schema.sql  # Current complete schema
@@ -603,7 +602,7 @@ indexer/
 The gRPC stubs are generated at Docker build time from `protos/`. To regenerate
 them locally (e.g. after editing a `.proto`):
 
-1. `pip install grpcio-tools==1.83.0`
+1. `python -m pip install -r requirements-test.txt`
 2. `make protos` (regenerates stubs into `src/grpc_stubs/`)
 3. Restart the indexer
 

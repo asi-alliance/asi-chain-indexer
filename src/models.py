@@ -7,8 +7,7 @@ from sqlalchemy import (
     CheckConstraint, Numeric, String, Text, UniqueConstraint
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.types import TypeDecorator
 
 from src.amounts import MAX_AMOUNT, amount, token_decimal

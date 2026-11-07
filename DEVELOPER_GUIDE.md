@@ -71,8 +71,7 @@ indexer/src/
 ├── alerts.py            # AlertService - Mattermost alerts for critical failures
 ├── sync_progress.py     # BlockBatchProgress - per-batch sync cursor tracking
 ├── addr.py              # ASI address conversion helpers
-├── resilience.py        # Error recovery mechanisms
-└── cache.py             # Caching utilities
+└── resilience.py        # Error recovery mechanisms
 ```
 
 ### Frontend Module Organization
