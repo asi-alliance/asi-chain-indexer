@@ -50,10 +50,11 @@ async def test_hasura_exact_amounts_relationships_and_subscription():
         await connection.execute(
             """
             INSERT INTO deployments(deploy_id, block_hash, block_number, deployer,
-                                    deployer_address, term, timestamp, sig)
-            VALUES ($1, $1, 0, 'sender', 'sender', 'Nil', 1, $1);
+                                    deployer_address, term, timestamp, sig, phlo_price)
+            VALUES ($1, $1, 0, 'sender', 'sender', 'Nil', 1, $1, $2);
             """,
             key,
+            MAX_AMOUNT,
         )
         await connection.execute(
             """
@@ -68,7 +69,7 @@ async def test_hasura_exact_amounts_relationships_and_subscription():
         )
         selection = """
           blocks(where: {block_hash: {_eq: $hash}}) {
-            deployments { transfers { amount_dust amount_asi token_decimals } }
+            deployments { phlo_price transfers { amount_dust amount_asi token_decimals } }
           }
         """
         async with aiohttp.ClientSession(
@@ -94,6 +95,9 @@ async def test_hasura_exact_amounts_relationships_and_subscription():
                 response.raise_for_status()
                 result = await response.json()
                 assert "errors" not in result, result
+                assert result["data"]["blocks"][0]["deployments"][0][
+                    "phlo_price"
+                ] == str(MAX_AMOUNT)
                 transfer = result["data"]["blocks"][0]["deployments"][0]["transfers"][0]
                 assert transfer["amount_dust"] == str(MAX_AMOUNT)
                 assert isinstance(transfer["amount_asi"], str)

@@ -1,15 +1,54 @@
-from decimal import Decimal, localcontext
+from decimal import Decimal, Inexact, Rounded, localcontext
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from src.amounts import MAX_AMOUNT, amount, integer_json, token_decimal
+from src.amounts import (
+    MAX_AMOUNT,
+    amount,
+    integer_json,
+    parse_signed_integer,
+    signed_integer_text,
+    token_decimal,
+)
 from src.block_indexer import BlockIndexer
-from src.grpc_node_client import GrpcNodeClient, _to_dict, common
+from src.grpc_node_client import PROFILE, GrpcNodeClient, _to_dict, common
 from src.models import Amount
 from src.monitoring import MonitoringServer
 import DeployServiceV1_pb2 as service
+
+
+@pytest.mark.parametrize("digits", [4300, 4301, 10000])
+@pytest.mark.parametrize("sign", [1, -1], ids=["positive", "negative"])
+def test_signed_persistence_conversions_ignore_context_precision_and_digit_limit(
+    digits, sign
+):
+    raw = sign * (10 ** (digits - 1) + 7)
+    text = ("-" if sign < 0 else "") + "1" + "0" * (digits - 2) + "7"
+    digit_limit = sys.get_int_max_str_digits()
+    with localcontext() as context:
+        context.prec = 2
+        context.traps[Inexact] = True
+        context.traps[Rounded] = True
+        assert signed_integer_text(raw) == text
+        assert parse_signed_integer(text) == raw
+    assert sys.get_int_max_str_digits() == digit_limit
+
+
+@pytest.mark.parametrize(
+    "text", ["1e5", "01", "-0", "+1", "NaN", "Infinity", "1.2", " 1"]
+)
+def test_persisted_signed_amounts_require_canonical_integer_text(text):
+    with pytest.raises(ValueError, match="canonical signed integer"):
+        parse_signed_integer(text)
+
+
+@pytest.mark.parametrize("value", [True, 1.0, Decimal(1)])
+def test_signed_integer_text_rejects_non_integer_inputs(value):
+    with pytest.raises(ValueError, match="exact integer"):
+        signed_integer_text(value)
 
 
 @pytest.mark.parametrize("raw", [0, 2**53 + 1, 2**63, 2**64, 2**128, MAX_AMOUNT])
@@ -58,12 +97,20 @@ def test_invalid_precision_rejected(decimals):
         token_decimal(1, decimals)
 
 
+@pytest.mark.skipif(PROFILE != "classic", reason="classic wire fields")
 def test_published_int64_protobuf_amounts_remain_exact():
     raw = 2**63 - 1
     assert _to_dict(common.BondInfo(stake=raw))["stake"] == raw
-    assert _to_dict(common.TransferInfo(amount=raw))["amount"] == raw
-    assert _to_dict(common.TransferInfo(amount=0))["amount"] == 0
-    # Widening storage does not invent new fields in the node's wire protocol.
+    deploy = _to_dict(
+        common.DeployInfo(
+            transfers=[common.TransferInfo(amount=raw), common.TransferInfo(amount=0)]
+        )
+    )
+    assert [(t["amount"], t["amountRaw"]) for t in deploy["transfers"]] == [
+        (raw, str(raw)),
+        (0, "0"),
+    ]
+    # The legacy field remains int64; wider values use amountRaw.
     with pytest.raises(ValueError):
         common.TransferInfo(amount=2**63)
 
@@ -86,6 +133,8 @@ async def test_precision_checked_against_node_metadata(actual, expected, valid):
         if actual is None
         else {"nativeTokenSymbol": "ASI", "nativeTokenDecimals": actual}
     )
+    if PROFILE == "uint256":
+        metadata["minPhloPrice"] = "1"
     response = service.StatusResponse(status=common.Status(**metadata))
     client = GrpcNodeClient.__new__(GrpcNodeClient)
     client.timeout = 1

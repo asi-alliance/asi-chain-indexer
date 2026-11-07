@@ -5,6 +5,32 @@ from decimal import Decimal
 MAX_AMOUNT = (1 << 256) - 1
 
 
+def _canonical_digits(value: str) -> bool:
+    return value.isascii() and value.isdigit() and (len(value) == 1 or value[0] != "0")
+
+
+def canonical_signed_decimal(value: str) -> str:
+    """Validate a signed decimal string, including out-of-range failed attempts."""
+    if not isinstance(value, str):
+        raise ValueError("amount must be a canonical signed integer")
+    digits = value[1:] if value.startswith("-") else value
+    if not _canonical_digits(digits) or value == "-0":
+        raise ValueError("amount must be a canonical signed integer")
+    return value
+
+
+def signed_integer_text(value: int) -> str:
+    """Format a signed integer without Python's decimal digit limit."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("amount must be an exact integer")
+    return format(Decimal(value), "f")
+
+
+def parse_signed_integer(value: str) -> int:
+    """Restore a canonical signed integer without Python's decimal digit limit."""
+    return int(Decimal(canonical_signed_decimal(value)))
+
+
 def amount(value: int | str | Decimal) -> int:
     if isinstance(value, bool) or isinstance(value, float):
         raise ValueError("amount must be an exact integer")
@@ -13,7 +39,7 @@ def amount(value: int | str | Decimal) -> int:
             raise ValueError("amount must be an integer")
         value = int(value)
     text = str(value)
-    if not text.isascii() or not text.isdigit() or (len(text) > 1 and text[0] == "0"):
+    if not _canonical_digits(text):
         raise ValueError("amount must be a canonical unsigned integer")
     result = int(text)
     if result > MAX_AMOUNT:

@@ -16,6 +16,7 @@ from src.database import Database
 from src.native_transfers import reconcile_block, reconcile_completed_duplicates
 from src.transfer_reports import ReportUnavailable, block_events
 from test_transfer_reports import expr, payment, report
+from test_node_exact_api import BLOCK_HASH, DEPLOY_ID, node_api
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -48,14 +49,16 @@ async def ledger(monkeypatch, request):
         indexer = BlockIndexer()
         indexer.client = SimpleNamespace(get_block_report=AsyncMock())
 
-        async def add(height, block_hash, entries, parents=()):
+        async def add(
+            height, block_hash, entries, parents=(), *, bonds=(), process=True
+        ):
             details = {
                 "blockInfo": {
                     "blockHash": block_hash,
                     "blockNumber": height,
                     "timestamp": height * 1000,
                     "sender": "validator",
-                    "bonds": [],
+                    "bonds": list(bonds),
                     "parentsHashList": list(parents),
                 },
                 "deploys": [],
@@ -77,7 +80,8 @@ async def ledger(monkeypatch, request):
                 )
             replay = {"blockInfo": {"blockHash": block_hash}, "deploys": reports}
             indexer.client.get_block_report.return_value = replay
-            await indexer._process_block(details)
+            if process:
+                await indexer._process_block(details)
             return details, replay
 
         yield SimpleNamespace(db=database, conn=conn, indexer=indexer, add=add)
@@ -86,6 +90,157 @@ async def ledger(monkeypatch, request):
         await conn.close()
         await admin.execute(f'DROP DATABASE "{name}"')
         await admin.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_block_bonds_preserve_observed_activity_when_http_is_unavailable(ledger):
+    bonds = [{"validator": key, "stake": 10} for key in ("active", "inactive")]
+    await ledger.add(1, "origin", [], bonds=bonds)
+    assert dict(
+        await ledger.conn.fetch("SELECT public_key, status FROM validators")
+    ) == {
+        "active": "bonded",
+        "inactive": "bonded",
+    }
+    ledger.indexer.client.get_bonds = AsyncMock(return_value={"bonds": bonds})
+    ledger.indexer.client.get_active_validators = AsyncMock(
+        return_value=[{"validator": "active", "stake": 10}]
+    )
+    await ledger.indexer._update_validator_states()
+    assert (
+        await ledger.conn.fetchval(
+            "SELECT status FROM validators WHERE public_key='active'"
+        )
+        == "active"
+    )
+
+    bonds.append({"validator": "new-validator", "stake": 10})
+    await ledger.add(2, "next", [], ["origin"], bonds=bonds)
+    ledger.indexer.client.get_active_validators.return_value = None
+    await ledger.indexer._update_validator_states()
+    assert dict(
+        await ledger.conn.fetch("SELECT public_key, status FROM validators")
+    ) == {
+        "active": "active",
+        "inactive": "bonded",
+        "new-validator": "bonded",
+    }
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sign", [1, -1], ids=["positive", "negative"])
+@pytest.mark.parametrize("delayed", [False, True], ids=["immediate", "after-restart"])
+async def test_huge_rejected_attempt_preserves_replay_history_and_advances_cursor(
+    ledger, monkeypatch, sign, delayed
+):
+    raw = sign * 10**4300
+    exact = ("-" if sign < 0 else "") + "1" + "0" * 4300
+    events = payment(raw, success=False)
+    monkeypatch.setattr("src.block_indexer.settings.start_from_block", 1)
+    monkeypatch.setattr("src.block_indexer.settings.delay_before_node", 0)
+    if delayed:
+        await ledger.add(1, "origin", [("start", report(events[:1]))])
+        assert (
+            await ledger.conn.fetchval(
+                "SELECT requested_amount FROM native_transfer_calls"
+            )
+            == exact
+        )
+        assert (
+            await ledger.conn.fetchval("SELECT status FROM native_transfer_lifecycle")
+            == "pending"
+        )
+        ledger.indexer.__dict__.update(BlockIndexer().__dict__)
+        ledger.indexer.client = SimpleNamespace(get_block_report=AsyncMock())
+    height = 2 if delayed else 1
+    details, _ = await ledger.add(
+        height,
+        "completion",
+        [("finish", report(events[1:] if delayed else events))],
+        ["origin"] if delayed else [],
+        process=False,
+    )
+    await ledger.db.set_last_indexed_block(height - 1)
+    ledger.indexer.client.get_last_finalized_block = AsyncMock(
+        return_value={"blockNumber": height}
+    )
+    ledger.indexer.client.get_blocks_by_height = AsyncMock(
+        return_value=[{"blockNumber": height, "blockHash": "completion"}]
+    )
+    ledger.indexer.client.get_block_details = AsyncMock(return_value=details)
+    await ledger.indexer._sync_blocks()
+    await ledger.indexer._sync_blocks()
+
+    assert await ledger.db.get_last_indexed_block() == height
+    ledger.indexer.client.get_block_report.assert_awaited_once_with("completion")
+    lifecycle = await ledger.conn.fetchrow("SELECT * FROM native_transfer_lifecycle")
+    assert lifecycle["requested_amount"] == exact
+    assert lifecycle["status"] == "rejected"
+    assert lifecycle["completion_deploy_id"] == "finish"
+    assert await ledger.conn.fetchval("SELECT count(*) FROM transfers") == 0
+    assert (
+        await ledger.conn.fetchval("SELECT count(*) FROM native_transfer_results") == 1
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("amount_raw", ["", "1e5"], ids=["missing", "malformed"])
+@pytest.mark.parametrize("replay_state", ["available", "unavailable", "malformed"])
+async def test_unknown_summary_requires_real_replay_before_persisting_or_advancing(
+    ledger, monkeypatch, amount_raw, replay_state
+):
+    raw = 2**63
+    monkeypatch.setattr("src.block_indexer.settings.start_from_block", 12)
+    monkeypatch.setattr("src.block_indexer.settings.delay_before_node", 0)
+    await ledger.db.set_last_indexed_block(11)
+    replay_deploy = report(payment(raw))
+    replay_deploy["deployInfo"]["sig"] = DEPLOY_ID
+    replay = {"blockInfo": {"blockHash": BLOCK_HASH}, "deploys": [replay_deploy]}
+    if replay_state == "malformed":
+        replay["blockInfo"]["blockHash"] = "different-block"
+    async with node_api(raw, amount_raw=amount_raw) as node:
+        node.client.get_blocks_by_height = AsyncMock(
+            return_value=[{"blockNumber": 12, "blockHash": BLOCK_HASH}]
+        )
+        node.client.get_block_report = AsyncMock(
+            return_value=replay,
+            side_effect=(
+                ReportUnavailable("Replay unavailable")
+                if replay_state == "unavailable"
+                else None
+            ),
+        )
+        ledger.indexer.client = node.client
+        await ledger.indexer._sync_blocks()
+        await ledger.indexer._sync_blocks()
+
+        if replay_state == "available":
+            assert await ledger.db.get_last_indexed_block() == 12
+            assert node.client.get_block_report.await_count == 1
+            assert await ledger.conn.fetchval("SELECT count(*) FROM blocks") == 1
+            row = await ledger.conn.fetchrow("SELECT * FROM transfers")
+            assert row["amount_dust"] == raw
+            assert row["block_hash"] == BLOCK_HASH
+            assert row["deploy_id"] == DEPLOY_ID
+            assert (
+                await ledger.conn.fetchval(
+                    "SELECT count(*) FROM native_transfer_results WHERE success"
+                )
+                == 1
+            )
+        else:
+            assert await ledger.db.get_last_indexed_block() == 11
+            assert node.client.get_block_report.await_count == 2
+            for table in (
+                "blocks",
+                "deployments",
+                "transfers",
+                "native_transfer_calls",
+            ):
+                assert await ledger.conn.fetchval(f"SELECT count(*) FROM {table}") == 0
 
 
 @pytest.mark.integration
@@ -440,14 +595,12 @@ async def test_interrupted_historical_repair_resumes_without_moving_cursor(
         2, "completion", [("finish", report(events[1:]))], ["origin"]
     )
     await ledger.db.set_last_indexed_block(2)
-    await ledger.conn.execute(
-        """
+    await ledger.conn.execute("""
         DELETE FROM transfers;
         DELETE FROM native_transfer_results;
         DELETE FROM native_transfer_calls;
         UPDATE indexer_state SET value='1' WHERE key='native_transfer_backfill_required';
-    """
-    )
+    """)
     client = SimpleNamespace(
         get_block_details=AsyncMock(
             side_effect=lambda h: {"origin": origin, "completion": completion}[h]
@@ -456,6 +609,7 @@ async def test_interrupted_historical_repair_resumes_without_moving_cursor(
             side_effect=[origin_report, ReportUnavailable("busy")]
         ),
         close=AsyncMock(),
+        require_native_precision=AsyncMock(),
     )
     with monkeypatch.context() as patch:
         patch.setattr("src.reindex_transfers.GrpcNodeClient", lambda: client)
@@ -518,8 +672,7 @@ def test_migration_entrypoints_include_the_same_ordered_schema():
 async def test_upgrade_from_002_preserves_ledger_and_requires_backfill(
     ledger, monkeypatch
 ):
-    await ledger.conn.execute(
-        """
+    await ledger.conn.execute("""
         INSERT INTO blocks(block_hash,block_number,timestamp,proposer,finalization_status)
         VALUES ('old',1,1000,'validator','finalized');
         INSERT INTO deployments(deploy_id,block_hash,block_number,deployer,
@@ -528,8 +681,7 @@ async def test_upgrade_from_002_preserves_ledger_and_requires_backfill(
         INSERT INTO transfers(deploy_id,block_hash,block_number,from_address,
                               to_address,amount_dust,amount_asi,timestamp,event_index)
         VALUES ('old','old',1,'sender','receiver',100,1,1000,0);
-    """
-    )
+    """)
     before = dict(await ledger.conn.fetchrow("SELECT * FROM transfers"))
     await ledger.conn.execute(
         (ROOT / "migrations/003_native_transfer_calls.sql").read_text()
@@ -582,12 +734,10 @@ async def test_repeated_deploy_keeps_each_invocation_block_visible(ledger):
     await ledger.add(2, "left", [("same-deploy", report(events[:1]))], ["root"])
     await ledger.add(2, "right", [("same-deploy", report(events[:1]))], ["root"])
     await ledger.add(3, "child", [("finish", report(events[1:]))], ["left"])
-    rows = await ledger.conn.fetch(
-        """
+    rows = await ledger.conn.fetch("""
         SELECT initiation_block_hash, completion_block_hash, status
         FROM native_transfer_lifecycle ORDER BY initiation_block_hash
-    """
-    )
+    """)
     assert [tuple(row) for row in rows] == [
         ("left", "child", "completed"),
         ("right", None, "pending"),
@@ -668,8 +818,7 @@ async def test_merge_rejects_conflicting_duplicate_invocations(ledger):
 async def test_completion_after_more_than_32767_ancestor_blocks(ledger):
     events = payment(2**150)
     await ledger.add(1, "origin", [("start", report(events[:1]))])
-    await ledger.conn.execute(
-        """
+    await ledger.conn.execute("""
         INSERT INTO blocks(block_hash,block_number,timestamp,proposer,finalization_status)
         SELECT 'depth-' || n, n, n * 1000, 'validator', 'finalized'
         FROM generate_series(2,33000) n;
@@ -677,8 +826,7 @@ async def test_completion_after_more_than_32767_ancestor_blocks(ledger):
         SELECT 'depth-' || n,
                CASE WHEN n=2 THEN 'origin' ELSE 'depth-' || (n-1) END, 0
         FROM generate_series(2,33000) n;
-    """
-    )
+    """)
     await ledger.add(
         33001, "completion", [("finish", report(events[1:]))], ["depth-33000"]
     )
@@ -739,6 +887,7 @@ async def test_repair_preserves_live_owner_of_immediate_sibling_transfers(
         get_block_details=AsyncMock(side_effect=lambda h: blocks[h]),
         get_block_report=AsyncMock(side_effect=lambda h: reports[h]),
         close=AsyncMock(),
+        require_native_precision=AsyncMock(),
     )
     with monkeypatch.context() as patch:
         patch.setattr("src.reindex_transfers.GrpcNodeClient", lambda: client)

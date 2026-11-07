@@ -104,7 +104,10 @@ class Deployment(Base):
     timestamp = Column(BigInteger, nullable=False, index=True)
     sig = Column(String(160), nullable=False)  # Increased size
     sig_algorithm = Column(String(20), default="secp256k1")
-    phlo_price = Column(BigInteger, default=1)
+    phlo_price = Column(
+        Amount(), CheckConstraint(f"phlo_price >= 0 AND phlo_price <= {MAX_AMOUNT}"),
+        default=1,
+    )
     phlo_limit = Column(BigInteger, default=1000000)
     phlo_cost = Column(BigInteger, default=0)
     valid_after_block_number = Column(BigInteger)
@@ -228,7 +231,10 @@ class PendingDeploy(Base):
     deployer_address = Column(String(150), nullable=False, index=True)
     term = Column(Text, nullable=False)
     timestamp = Column(BigInteger, nullable=False, index=True)
-    phlo_price = Column(BigInteger, default=1)
+    phlo_price = Column(
+        Amount(), CheckConstraint(f"phlo_price >= 0 AND phlo_price <= {MAX_AMOUNT}"),
+        default=1,
+    )
     phlo_limit = Column(BigInteger, default=1000000)
     valid_after_block_number = Column(BigInteger)
     shard_id = Column(String(20))

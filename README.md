@@ -89,8 +89,47 @@ Raw token amounts are checked Python integers stored as uint256-range
 Set **18** only for a chain declaring 18 decimals. Startup checks this setting;
 legacy nodes without token metadata support the eight-decimal profile. Each row
 retains its recorded precision; changing the setting does not rescale historical
-balances or change the chain denomination. Node gRPC bond/transfer fields remain
-bounded by their vendored wire types; wider storage does not widen those APIs.
+balances or change the chain denomination.
+
+Select the wire contract explicitly with `NODE_PROTOCOL_PROFILE`:
+
+| Profile | Pinned node schema | Monetary wire fields |
+|---|---|---|
+| `classic` (default) | [#896 at 92903a1](https://github.com/F1R3FLY-io/f1r3node-rust/commit/92903a1d81c49fa0a035fb7ee729002e38428280) | Legacy int64 stakes/prices; exact transfer negotiation and authoritative `amountRaw` |
+| `uint256` | [merged #881 at 6233501](https://github.com/F1R3FLY-io/f1r3node-rust/commit/6233501064492d0cac9c7ebc598daf70c501a215) | Decimal-string stakes/prices/`amountRaw`; 32-byte big-endian pending deploy prices; no exact-transfer flags |
+
+This includes the exact-transfer and replay-history hardening from
+[#22](https://github.com/asi-alliance/asi-chain-indexer/pull/22). Missing or malformed
+compact transfer amounts stay unknown; replay remains authoritative for the ledger.
+Signed rejected attempts are preserved, including requests outside uint256.
+`GRPC_MAX_RECEIVE_MESSAGE_BYTES` bounds responses (default 64 MiB, range 1–2147483647).
+
+For a uint256 image and local Compose installation:
+
+```bash
+# Set NODE_PROTOCOL_PROFILE=uint256 in .env alongside the node's actual precision.
+docker compose build indexer
+# After the reviewed database/metadata upgrade:
+docker compose up -d --force-recreate indexer
+```
+
+For a standalone build use `docker build --build-arg NODE_PROTOCOL_PROFILE=uint256 .`.
+For local Python use `NODE_PROTOCOL_PROFILE=uint256 make protos PYTHON=python` and
+run with the same environment setting. The image retains its build profile as the
+runtime default. An environment/binding mismatch fails immediately; node status
+also rejects the other monetary schema at startup. Select by source revision,
+not by a guessed version or token precision. See [schema provenance](protos/README.md).
+
+Migration 004 widens included and pending `phlo_price` to checked `NUMERIC(78,0)`.
+Apply it once with writers stopped; then reload Hasura metadata so prices become
+`numeric` GraphQL strings. Consumers with typed `bigint` price filters must adapt.
+The migration preserves historical values and per-row precision. Heights, timestamps,
+phlo limits and gas counts retain their existing bounded types.
+
+Before release, validate a pinned fresh-state #881 observer with a funded wide
+transfer through ingestion, SQL and GraphQL. Protocol fixtures and database tests
+do not replace that live acceptance. Switching this setting does not migrate node
+state, authorize a chain reset, or select the cost-accounting protocol.
 
 A pending deploy disappearing from a node buffer is not proof of successful
 execution or finality. Block heights can have multiple DAG siblings; preserve every
@@ -146,7 +185,7 @@ docker compose ps
 curl -fsS http://localhost:9090/status
 ```
 
-PostgreSQL runs SQL migrations 000–003 only when initializing an empty volume.
+PostgreSQL runs SQL migrations 000–004 only when initializing an empty volume.
 The Hasura script changes metadata and permissions; use it for a fresh installation,
 not as a read-only probe or a replacement for reviewing existing custom metadata.
 [deploy.sh](deploy.sh) wraps startup and metadata initialization, but currently
@@ -173,8 +212,8 @@ Read [POSTGRES_UPGRADE.md](POSTGRES_UPGRADE.md) and the
 - Back up the actual database and Hasura metadata, stop writers and rehearse
   the upgrade. PostgreSQL 14 data requires dump/restore into a new PostgreSQL 18.6
   cluster; retain the old volume and matching images for rollback.
-- Apply only missing SQL migrations, in order. A new database needs 000–003;
-  an existing version-000 database needs 001–003 **once each**. Compose restarts
+- Apply only missing SQL migrations, in order. A new database needs 000–004;
+  an existing version-000 database needs 001–004 **once each**. Compose restarts
   and SQLAlchemy `create_all()` do not upgrade existing schemas. There is
   currently no Alembic environment or revision-tracked migration runner.
 - Populated databases marked for native-transfer backfill must complete
