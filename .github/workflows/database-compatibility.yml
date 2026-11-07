@@ -2,7 +2,7 @@ name: Database compatibility
 
 on:
   pull_request:
-    branches: [dev, main]
+    branches: [dev, main, "chore/deps-*"]
   push:
     branches: [dev, main]
   workflow_dispatch:
@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
+      COMPOSE_PROJECT_NAME: indexer-dependency-ci
       NODE_HOST: unused.invalid
       GRPC_PORT: '40401'
       HTTP_PORT: '40403'
@@ -22,22 +23,29 @@ jobs:
       HASURA_ADMIN_SECRET: isolated-ci-only
       HASURA_BASE: http://localhost:8080
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Validate Compose and build test runtime
         run: |
           docker compose config --quiet
           docker compose build indexer
+          docker build --target test -t asi-indexer-tests:ci .
+      - name: Verify production dependency isolation
+        run: |
+          docker compose run --rm --no-deps indexer python -m pip check
+          docker compose run --rm --no-deps indexer python -c 'import importlib.util; import src.main; assert all(importlib.util.find_spec(p) is None for p in ("pytest", "black", "flake8", "mypy", "grpc_tools"))'
       - name: Start isolated database stack
         run: docker compose up -d --wait --wait-timeout 180 postgres hasura metrics-cron
       - name: Initialize fresh Hasura metadata and verify permissions
         run: bash scripts/full-init-hasura.sh
       - name: Test migrations, ORM, native transfers and GraphQL subscriptions
         run: |
-          docker compose run --rm --no-deps \
+          docker run --rm --network "${COMPOSE_PROJECT_NAME:-asi-chain-indexer}_indexer-network" \
             -e TEST_DATABASE_URL="$DATABASE_URL" \
             -e TEST_HASURA_URL=http://hasura:8080 \
             -e TEST_HASURA_ADMIN_SECRET="$HASURA_ADMIN_SECRET" \
-            indexer python -m pytest tests/ -q
+            asi-indexer-tests:ci python -W error::DeprecationWarning -m pytest tests/ -q
       - name: Verify SQL boundaries and metrics client
         run: |
           docker compose exec -T postgres psql -U indexer -d asichain \
