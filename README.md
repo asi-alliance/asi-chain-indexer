@@ -93,9 +93,9 @@ The indexer provides complete automation for blockchain data synchronization:
 
 - **Python 3.11**: Core programming language
 - **asyncio**: Asynchronous processing framework
-- **SQLAlchemy 2.0.31**: ORM and database abstraction
+- **SQLAlchemy 2.1.8**: ORM and database abstraction
 - **asyncpg 0.32.0**: PostgreSQL async driver
-- **Pydantic 2.7.4**: Configuration and data validation
+- **Pydantic 2.14.3**: Configuration and data validation
 - **pydantic-settings 2.3.4**: Settings management
 - **structlog 24.2.0**: Structured logging
 - **prometheus-client 0.20.0**: Metrics exposure
@@ -601,7 +601,7 @@ indexer/
 The gRPC stubs are generated at Docker build time from `protos/`. To regenerate
 them locally (e.g. after editing a `.proto`):
 
-1. `pip install grpcio-tools==1.83.0`
+1. `python -m pip install -r requirements-test.txt`
 2. `make protos` (regenerates stubs into `src/grpc_stubs/`)
 3. Restart the indexer
 
