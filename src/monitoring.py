@@ -1,6 +1,6 @@
 """Monitoring and health check endpoints."""
 
-from datetime import datetime
+from src.time_utils import utc_now
 from typing import Dict, Any, List
 from decimal import Decimal
 import json
@@ -123,7 +123,7 @@ class MonitoringServer:
         """Basic health check endpoint."""
         return web.json_response({
             "status": "healthy",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utc_now().isoformat(),
             "version": "1.0.0"
         })
 
@@ -163,7 +163,7 @@ class MonitoringServer:
         return web.json_response({
             "ready": all_healthy,
             "checks": checks,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": utc_now().isoformat()
         }, status=status_code)
 
     async def metrics(self, request):
@@ -283,13 +283,13 @@ class MonitoringServer:
                     # "http_port": settings.http_port,
                     "latest_block": node_status.get("latest_block")
                 },
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now().isoformat()
             }
         except Exception as e:
             logger.error("Failed to get status", error=str(e))
             return {
                 "error": INTERNAL_ERROR["error"],
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now().isoformat()
             }
 
     async def get_blocks(self, request):
@@ -681,7 +681,7 @@ class MonitoringServer:
                 "deployments": {
                     "by_type": [dict(d) for d in deployment_types]
                 },
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now().isoformat()
             })
         except Exception as e:
             logger.error("Failed to get network stats", error=str(e))

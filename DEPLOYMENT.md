@@ -94,7 +94,7 @@ curl -s http://localhost:8080/v1/graphql -H "Content-Type: application/json" \
 - `metrics-cron` — Alpine sidecar running
   `scripts/refresh-network-metrics-once.sh` every 3 min via `dcron` to upsert
   `network_metrics_buckets`
-- `hasura` (port 8080) — Hasura GraphQL Engine v2.36.0, unauthorized role `public`
+- `hasura` (port 8080) — Hasura GraphQL Engine v2.51.4, unauthorized role `public`
 
 **Note:** Step 2 (the `./deploy.sh` wrapper) is the recommended entrypoint.
 If you prefer to run `docker compose up -d` manually, you MUST afterwards run
@@ -126,7 +126,7 @@ python3 -m venv venv
 source venv/bin/activate
 
 # Install dependencies
-pip install -r requirements.txt
+python -m pip install --require-hashes -r requirements.lock
 
 # (Optional) Regenerate gRPC stubs from protos/ into src/grpc_stubs/
 pip install grpcio-tools==1.83.0
