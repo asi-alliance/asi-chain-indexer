@@ -91,14 +91,14 @@ The indexer provides complete automation for blockchain data synchronization:
 
 ### Stack
 
-- **Python 3.11**: Core programming language
+- **Python 3.13**: Core programming language
 - **asyncio**: Asynchronous processing framework
-- **SQLAlchemy 2.0.31**: ORM and database abstraction
+- **SQLAlchemy 2.1.8**: ORM and database abstraction
 - **asyncpg 0.32.0**: PostgreSQL async driver
-- **Pydantic 2.7.4**: Configuration and data validation
-- **pydantic-settings 2.3.4**: Settings management
-- **structlog 24.2.0**: Structured logging
-- **prometheus-client 0.20.0**: Metrics exposure
+- **Pydantic 2.14.3**: Configuration and data validation
+- **pydantic-settings 2.16.2**: Settings management
+- **structlog 26.1.0**: Structured logging
+- **prometheus-client 0.26.0**: Metrics exposure
 - **aiohttp 3.14.5**: HTTP client and monitoring server
 - **click 8.1.7**: CLI interface
 
@@ -176,7 +176,7 @@ The indexer talks to the node directly via gRPC (primary) and HTTP (fallback for
 ## Requirements
 
 - Docker and Docker Compose (recommended)
-- OR Python 3.11+ and PostgreSQL 18.6 (the tested database version)
+- OR Python 3.13+ and PostgreSQL 18.6 (the tested database version)
 - Running node (gRPC port & HTTP port)
 
 ## Installation
@@ -526,7 +526,7 @@ building a complete chain history.
 
 Pull requests targeting `dev` or `main`, and pushes to either branch, run:
 
-- **Python tests / Unit tests (Python 3.11):** tests without external services,
+- **Python tests / Unit tests (Python 3.13):** tests without external services,
   using the same Python minor version as the Docker runtime. The job generates
   gRPC stubs and reports coverage, excluding generated code. Coverage XML and
   JUnit reports are uploaded as `unit-test-reports` artifacts for seven days.
@@ -601,7 +601,7 @@ indexer/
 The gRPC stubs are generated at Docker build time from `protos/`. To regenerate
 them locally (e.g. after editing a `.proto`):
 
-1. `pip install grpcio-tools==1.83.0`
+1. `python -m pip install --require-hashes -r requirements-dev.lock`
 2. `make protos` (regenerates stubs into `src/grpc_stubs/`)
 3. Restart the indexer
 
@@ -653,3 +653,6 @@ committed reply records delivery under the completion deploy and block. The
 read-only `native_transfer_lifecycle` GraphQL view links initiation and completion;
 pending and rejected calls do not contribute to transfer totals. Reload Hasura
 metadata after migration. Explorer rendering of these lifecycle fields is separate.
+
+See [dependency maintenance](DEPENDENCIES.md) for locked installations, lock regeneration
+and the production/test Docker targets.

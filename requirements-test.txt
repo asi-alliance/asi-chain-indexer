@@ -1,2 +1,2 @@
--r requirements.txt
-grpcio-tools==1.85.1
+# Compatibility entry point for existing test setup commands.
+-r requirements-dev.lock
