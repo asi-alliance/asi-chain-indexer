@@ -14,7 +14,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 
 # regenerates the gRPC client from protos/; installed without --user so it never reaches runtime
-RUN pip install --no-cache-dir grpcio-tools==1.83.0
+RUN pip install --no-cache-dir grpcio-tools==1.85.1
 COPY protos/ /protos/
 RUN mkdir -p /stubs/scalapb && python -m grpc_tools.protoc \
     -I /protos \
