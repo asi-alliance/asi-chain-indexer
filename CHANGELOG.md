@@ -2,6 +2,17 @@
 
 All notable changes to the ASI-Chain Indexer project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- 🔄 **aiohttp 3.9.5 → 3.14.5** — picks up the DoS/CVE fixes accumulated since the 3.9 line and current CPython wheels. Used by the monitoring server and the Mattermost alert client; no API changes were required.
+- 🔄 **asyncpg 0.29.0 → 0.32.0** — PostgreSQL 18 compatibility fixes and current CPython wheels, consistent with the 18.6 Compose baseline.
+- 🔄 **python-dotenv 1.0.1 → 1.2.4** — required as a floor by the upcoming `pydantic-settings` 2.16 upgrade.
+
+### Removed
+- ❌ **`alembic`, `tenacity`, `aiohttp-cors`** — unused runtime pins; the schema is applied from `migrations/*.sql` and retries live in `src/resilience.py`.
+- ❌ **`src/cache.py`** — dead Redis module: nothing imported it, `redis` was never in `requirements.txt`, and `settings.redis_url` never existed. Remove it rather than add an unused dependency.
+
 ## [2.3.0] - 2026-09-08
 
 ### 🚀 Pending Deploys Tracking

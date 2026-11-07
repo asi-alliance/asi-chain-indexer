@@ -486,7 +486,7 @@ Health check includes:
 
 #### Indexer Error Recovery
 
-1. **Retry Logic**: tenacity library used for retry with exponential backoff
+1. **Retry Logic**: `src/resilience.py` implements retries with exponential backoff, jitter and circuit breaking
 2. **Transaction Rollback**: Failed block processing rolled back atomically
 3. **State Persistence**: Last indexed block persisted in indexer_state table for recovery
 4. **Health Monitoring**: Prometheus alerts on sustained errors
