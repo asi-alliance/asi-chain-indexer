@@ -8,22 +8,63 @@ This README describes the integration branch, `dev`. Use the files at your selec
 revision as the configuration and dependency references. A feature PR or a published
 image may contain different behavior; verify its source before deployment.
 
-## Stack and architecture
+## Architecture
 
-`Node gRPC/HTTP → Python indexer → PostgreSQL → Hasura → explorer/wallet`
+```text
+┌──────────────────────────────────────────────────────────────┐
+│ ASI Chain observer node                                      │
+│ Blocks, deploys, validator observations and replay reports   │
+└──────────────────────┬───────────────────────────────────────┘
+                       │
+                       │ gRPC + HTTP (configured node ports)
+                       ▼
+┌──────────────────────────────────────────────────────────────┐
+│ Node API client                                              │
+│ gRPC block/deploy reads; HTTP validators and replay traces   │
+└──────────────────────┬───────────────────────────────────────┘
+                       │
+                       │ in-process calls
+                       ▼
+┌──────────────────────────────────────────────────────────────┐
+│ Python indexer service                                       │
+│ Block synchronization and deploy processing                  │
+│ Native call/result correlation and successful transfers      │
+│ Validator observations, network statistics and sync cursor   │
+└──────────────────────┬───────────────────────────────────────┘
+                       │
+                       │ asyncpg / SQLAlchemy
+                       ▼
+┌──────────────────────────────────────────────────────────────┐
+│ PostgreSQL database                                          │
+│ blocks, block_parents, deployments, pending_deploys          │
+│ transfers, native_transfer_calls, native_transfer_results    │
+│ validators, validator_bonds, block_validators                │
+│ balance_states, network_stats, epoch_transitions             │
+│ indexer_state                                                │
+└──────────────────────┬───────────────────────────────────────┘
+                       │
+                       │ tracked tables, views and SQL functions
+                       ▼
+┌──────────────────────────────────────────────────────────────┐
+│ Hasura GraphQL engine                                        │
+│ DAG relationships, exact-amount queries and live updates     │
+└──────────────────────┬───────────────────────────────────────┘
+                       │
+                       │ GraphQL over HTTP / WebSocket
+                       ▼
+┌──────────────────────────────────────────────────────────────┐
+│ Client applications                                          │
+│ Explorer, wallet and other consumers                         │
+└──────────────────────────────────────────────────────────────┘
+```
 
-- CPython **3.13.18** on Linux, as pinned in [Dockerfile](Dockerfile) and
-  [unit-test CI](.github/workflows/tests.yml).
-- PostgreSQL **18.6**, Hasura **v2.51.4**, and an Alpine **3.24** metrics sidecar,
-  as configured in [docker-compose.yml](docker-compose.yml).
-- SQLAlchemy with its asyncio extra, asyncpg, aiohttp, Pydantic settings,
-  structlog, Prometheus client, gRPC/protobuf and Keccak address derivation.
-  Direct pins live in [requirements.txt](requirements.txt); resolved runtime and
-  development packages are hash-checked in [requirements.lock](requirements.lock)
-  and [requirements-dev.lock](requirements-dev.lock).
-- The default production image excludes development packages. The Docker
-  `test` target includes the generator and test tools. See
-  [dependency maintenance](DEPENDENCIES.md) before updating pins or locks.
+The indexer also exposes its own HTTP data, status and Prometheus endpoints on
+port 9090. The metrics sidecar refreshes PostgreSQL network metric buckets; it
+does not sit between the indexer and Hasura. See [API and monitoring](#api-and-monitoring)
+for these paths and the metadata requirements for lifecycle queries.
+
+For runtime versions, dependency pins and lock maintenance, see
+[DEPENDENCIES.md](DEPENDENCIES.md).
 
 The service stores blocks by hash and retains ordered parent edges, deploys,
 validator observations, pending deploy snapshots, exact amounts, native call/result

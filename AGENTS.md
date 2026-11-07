@@ -82,6 +82,9 @@
 - Integration settings `TEST_DATABASE_URL` and `TEST_HASURA_*` must never target
   retained application data. Tests create/drop databases or write Hasura fixtures.
   Give test projects unique resources; clean only the task's disposable resources.
+- Preserve the README architecture diagram when refreshing documentation. Keep detailed
+  dependency inventories and lock maintenance in DEPENDENCIES.md and the requirement
+  files, with links from README instead of duplicated package lists.
 - Validate documentation links and claims against configuration/routes/source.
   Do not launch a live network or run migrations merely to check documentation.
 - Check `git diff --check` and review the exact staged file list before committing.
