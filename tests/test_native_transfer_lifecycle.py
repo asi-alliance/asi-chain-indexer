@@ -506,9 +506,17 @@ def test_migration_entrypoints_include_the_same_ordered_schema():
         .split("\ndocker-build:", 1)[0]
     )
     compose = (ROOT / "docker-compose.yml").read_text()
-    positions = [recipe.index(name) for name in migrations]
-    assert positions == sorted(positions)
-    assert recipe.count("ON_ERROR_STOP=1") == len(migrations)
+    assert "$(PYTHON) -m src.migrate upgrade" in recipe
+    assert "ON_ERROR_STOP" not in recipe
+    from alembic.script import ScriptDirectory
+    from src.migration_support import alembic_config
+
+    revisions = list(
+        reversed(list(ScriptDirectory.from_config(alembic_config()).walk_revisions()))
+    )
+    assert [revision.revision for revision in revisions[:len(migrations)]] == [
+        name[:3] for name in migrations
+    ]
     assert all(f"/docker-entrypoint-initdb.d/{name}" in compose for name in migrations)
 
 

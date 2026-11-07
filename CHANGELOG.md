@@ -5,6 +5,7 @@ All notable changes to the ASI-Chain Indexer project will be documented in this 
 ## [Unreleased]
 
 ### Changed
+- Add explicit Alembic status/upgrade/adopt commands around existing SQL migrations, with revision tracking, schema validation, transactional rollback and concurrent-run protection.
 - Upgrade the Docker/CI baseline to Python 3.13.18, lock transitive Python dependencies with hashes, and separate production packages from test/development tools.
 - Refresh pytest, pytest-asyncio, coverage, Black, Flake8 and mypy; remove unused aiofiles typing stubs.
 

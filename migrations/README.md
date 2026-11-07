@@ -1,5 +1,72 @@
 # ASI Chain Indexer Database Migrations
 
+## Tracked migration commands
+
+Alembic wraps the unchanged SQL files 000–003 as forward-only revisions. Commands
+use the explicitly set DATABASE_URL and the installed runtime requirements; no
+psql executable or node connection is needed. They do not run on indexer startup.
+Back up the actual database, stop indexer writers and rehearse upgrades first.
+
+```bash
+python -m src.migrate status
+python -m src.migrate upgrade
+# Equivalent convenience targets:
+make migration-status PYTHON=python
+make migrate PYTHON=python
+```
+
+On an empty public schema, upgrade creates 000–003 and alembic_version. Subsequent
+runs apply only pending revisions. The whole command, including version updates,
+is transactional and holds a per-database advisory lock; a concurrent command is
+rejected. Lock waits are bounded to five seconds and each SQL statement defaults
+to a 300-second timeout. Set MIGRATION_STATEMENT_TIMEOUT_SECONDS (1–86400) deliberately
+for larger rehearsed upgrades.
+
+### Adopt a database initialized by existing SQL/Compose
+
+A pre-existing unversioned schema is never automatically stamped or replayed.
+Check the actual applied migration level and choose it explicitly:
+
+```bash
+# Example: this database already has SQL migrations 000 and 001.
+python -m src.migrate adopt --revision 001
+python -m src.migrate upgrade
+# Equivalent adoption target: make migration-adopt REVISION=001 PYTHON=python
+```
+
+Adoption checks columns/types/defaults, constraints, indexes, views, triggers and
+functions against committed profiles of the shipped SQL revisions. A wrong level,
+missing object or changed owned column is rejected before writing a version.
+Unrelated objects and additional indexes are retained. Review custom schemas and
+permissions separately; this structure check does not validate historical data,
+row-level permissions, Hasura metadata or whether history repair was performed.
+The profiles were generated and tested on PostgreSQL 18.6; verify other server
+versions in a disposable rehearsal before adopting them.
+
+Fresh Compose databases still initialize through the four SQL mounts. After that
+initialization, adopt revision 003 once to begin version tracking. Existing Compose
+volumes need adoption of their actual level and an explicit upgrade command, for
+example docker compose run --rm --no-deps indexer python -m src.migrate status
+(with PostgreSQL already running). Do not run native alembic stamp as a shortcut:
+it bypasses the adoption checks.
+
+Once tracked, use the CLI for future upgrades rather than applying SQL manually.
+The original SQL files remain available for historical/manual procedures below.
+Do not edit shipped migrations or their profiles to make a mismatched database pass.
+Add a reviewed forward Alembic revision for a new change (alembic revision -m ...),
+including SQL views/functions/triggers and data transitions. ORM autogeneration is
+not configured as an authority for this hand-written schema. Review the new revision
+and test both an empty database and upgrades with real historical fixtures.
+
+Downgrade is intentionally unsupported: widening exact amounts and changing native
+history do not have a safe generic reverse transformation. Restore a reviewed backup
+with matching application/Hasura versions instead. SQL execution failure leaves
+both schema/data and revision at the prior transaction state.
+
+History repair and Hasura metadata remain explicit steps after a schema upgrade.
+Adoption does not clear native_transfer_backfill_required; upgrading a populated
+legacy database sets the same repair marker as standalone migration 003.
+
 ## Current schema
 
 PostgreSQL engine upgrades are separate from these schema migrations. See

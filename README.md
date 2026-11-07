@@ -176,7 +176,9 @@ Read [POSTGRES_UPGRADE.md](POSTGRES_UPGRADE.md) and the
 - Apply only missing SQL migrations, in order. A new database needs 000–003;
   an existing version-000 database needs 001–003 **once each**. Compose restarts
   and SQLAlchemy `create_all()` do not upgrade existing schemas. There is
-  currently no Alembic environment or revision-tracked migration runner.
+  now an explicit Alembic runner: use `python -m src.migrate status`, adopt an
+  existing SQL revision once, and run `python -m src.migrate upgrade`. See the
+  migration guide for validation and backup requirements.
 - Populated databases marked for native-transfer backfill must complete
   `python -m src.reindex_transfers` with writes stopped. Do not manually clear
   the repair flag. Repair preserves blocks, the sync cursor and recorded precision.
