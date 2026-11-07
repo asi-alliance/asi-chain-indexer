@@ -2,8 +2,8 @@ pycryptodome==3.20.0
 
 base58==2.1.1
 
-grpcio==1.83.0
-protobuf==7.35.1
+grpcio==1.85.1
+protobuf==7.36.2
 
 # Core dependencies
 aiohttp==3.14.5
