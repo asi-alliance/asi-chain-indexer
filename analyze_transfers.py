@@ -12,7 +12,10 @@ from src.amounts import amount, token_decimal
 QUERY = """
 query($after: bigint!, $limit: Int!) {
   transfers(
-    where: {id: {_gt: $after}, status: {_eq: "success"}}
+    where: {
+      id: {_gt: $after}
+      status: {_in: ["success", "genesis_mint", "genesis_bond"]}
+    }
     order_by: {id: asc}, limit: $limit
   ) {
     id deploy_id block_number from_address to_address
