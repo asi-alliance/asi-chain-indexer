@@ -133,7 +133,8 @@ membership. When HTTP membership is unavailable, stakes and recorded precision
 still refresh while existing activity statuses are preserved. New validators
 start as `bonded`; a successful HTTP response can update their activity status.
 
-`python analyze_transfers.py` reads successful ledger transfers through Hasura
+`python analyze_transfers.py` reads successful ledger transfers, including
+`genesis_mint` and `genesis_bond` records, through Hasura
 using `HASURA_URL` (default `http://localhost:8080/v1/graphql`) and an optional
 `HASURA_ADMIN_SECRET`. It paginates by transfer ID, rejects GraphQL errors, and
 computes exact totals and net flows from `amount_dust` and each row's recorded
