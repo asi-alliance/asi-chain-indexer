@@ -13,6 +13,7 @@ import aiohttp
 import asyncpg
 import pytest
 
+from analyze_transfers import fetch_transfers, transfer_report
 from src.amounts import MAX_AMOUNT, token_decimal
 
 pytestmark = pytest.mark.integration
@@ -72,6 +73,13 @@ async def test_hasura_exact_amounts_relationships_and_subscription():
             deployments { phlo_price transfers { amount_dust amount_asi token_decimals } }
           }
         """
+        # Exercise the shipped reporting query and exact formatting through the
+        # public role, with the same recorded units as the persisted movement.
+        rows = await asyncio.to_thread(fetch_transfers, base + "/v1/graphql")
+        row = next(row for row in rows if row["deploy_id"] == key)
+        assert row["amount_dust"] == str(MAX_AMOUNT)
+        assert row["token_decimals"] == 18
+        assert f"{display_amount} ASI" in transfer_report([row])
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=30)
         ) as client:

@@ -50,6 +50,24 @@ from `bigint` to `numeric`. With `HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES=true`,
 price query results remain exact strings. No table/view recreation, history repair
 or chain reset is required by 004.
 
+### Integration with the separate Alembic candidate
+
+[PR #37](https://github.com/asi-alliance/asi-chain-indexer/pull/37) is a separate
+migration-runner candidate; this branch retains explicit SQL migrations. Do not
+replace this branch's five-step fresh initialization with an Alembic target that
+stops at 003. Before combining the candidates, add a tracked 004 revision and a
+validated 004 adoption profile/CLI choice. Verify fresh upgrades, tracked-003
+upgrades and adoption of manually initialized 004 databases, preserving historical
+prices and token precision.
+
+SQL 004 starts with a comment before its `BEGIN`/`COMMIT` wrapper. A runner must
+safely remove or reject that wrapper, including leading comments, so its schema
+changes, revision stamp and advisory lock remain in one transaction. Test an
+injected failure after SQL execution and before stamping: both schema and version
+must roll back. Recheck the runner's FK enforcement and owned-sequence adoption
+checks from its review before using the combined candidate. These are integration
+gates; this branch does not implement or validate Alembic adoption.
+
 Legacy migrations were consolidated into `000_comprehensive_initial_schema.sql`
 and removed from the active tree. Earlier versions remain available in Git history.
 

@@ -95,7 +95,7 @@ async def ledger(monkeypatch, request):
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_block_bonds_preserve_observed_activity_when_http_is_unavailable(ledger):
-    bonds = [{"validator": key, "stake": 10} for key in ("active", "inactive")]
+    bonds = [{"validator": key, "stake": 100} for key in ("active", "inactive")]
     await ledger.add(1, "origin", [], bonds=bonds)
     assert dict(
         await ledger.conn.fetch("SELECT public_key, status FROM validators")
@@ -105,7 +105,7 @@ async def test_block_bonds_preserve_observed_activity_when_http_is_unavailable(l
     }
     ledger.indexer.client.get_bonds = AsyncMock(return_value={"bonds": bonds})
     ledger.indexer.client.get_active_validators = AsyncMock(
-        return_value=[{"validator": "active", "stake": 10}]
+        return_value=[{"validator": "active", "stake": 100}]
     )
     await ledger.indexer._update_validator_states()
     assert (
@@ -115,8 +115,15 @@ async def test_block_bonds_preserve_observed_activity_when_http_is_unavailable(l
         == "active"
     )
 
-    bonds.append({"validator": "new-validator", "stake": 10})
+    bonds = [{"validator": key, "stake": 50} for key in ("active", "inactive")]
     await ledger.add(2, "next", [], ["origin"], bonds=bonds)
+    # The per-block historical upsert retains the maximum. Finalized bonds must
+    # independently replace it even when HTTP cannot refresh membership.
+    assert await ledger.conn.fetchval(
+        "SELECT total_stake FROM validators WHERE public_key='active'"
+    ) == 100
+    bonds.append({"validator": "new-validator", "stake": 50})
+    ledger.indexer.client.get_bonds.return_value = {"bonds": bonds}
     ledger.indexer.client.get_active_validators.return_value = None
     await ledger.indexer._update_validator_states()
     assert dict(
@@ -126,6 +133,14 @@ async def test_block_bonds_preserve_observed_activity_when_http_is_unavailable(l
         "inactive": "bonded",
         "new-validator": "bonded",
     }
+    rows = await ledger.conn.fetch("SELECT total_stake, token_decimals FROM validators")
+    assert all(row["total_stake"] == 50 and row["token_decimals"] == 18 for row in rows)
+    # A subsequent confirmed empty membership set can change statuses.
+    ledger.indexer.client.get_active_validators.return_value = []
+    await ledger.indexer._update_validator_states()
+    assert await ledger.conn.fetchval(
+        "SELECT count(*) FROM validators WHERE status='bonded' AND total_stake=50"
+    ) == 3
 
 
 @pytest.mark.integration

@@ -68,6 +68,27 @@ def _transfer_to_dict(message) -> Dict[str, Any]:
 
 
 _MESSAGE_DECODERS = {common.TransferInfo.DESCRIPTOR.full_name: _transfer_to_dict}
+_MONETARY_FIELD_NUMBERS = {
+    "casper.BondInfo": (2, 3),
+    "casper.DeployInfo": (7, 16),
+    "casper.Status": (7, 18),
+    "casper.DeployDataProto": (7, 15),
+    "casper.BondProto": (2, 3),
+    "casper.TransferInfo": (3, 6),
+}
+
+
+def _require_monetary_profile(message):
+    # Check every decoded monetary message, including nested data after reconnects.
+    # Opposite-profile fields survive parsing as unknown fields; otherwise classic
+    # scalar defaults would turn their missing values into plausible zeros.
+    field_numbers = _MONETARY_FIELD_NUMBERS.get(message.DESCRIPTOR.full_name)
+    if field_numbers is None:
+        return
+    # A monetary field of the wrong wire type is also unknown, even at a known
+    # number. Reject it rather than replacing it with the proto3 default.
+    if any(field.field_number in field_numbers for field in UnknownFieldSet(message)):
+        raise ValueError("Node monetary schema does not match NODE_PROTOCOL_PROFILE")
 
 
 def _field_value(field, value):
@@ -91,6 +112,7 @@ def _field_value(field, value):
 def _to_dict(message) -> Dict[str, Any]:
     # Not MessageToDict: it renders int64 as strings and only unquotes below 2^53,
     # so genesis deploys (phloLimit=2^63-1) would break the BIGINT insert.
+    _require_monetary_profile(message)
     result = {}
     for field in message.DESCRIPTOR.fields:
         value = getattr(message, field.name)
@@ -122,10 +144,6 @@ class GrpcNodeClient:
     async def require_native_precision(self, expected: int) -> None:
         response = await self.stub.status(empty_pb2.Empty(), timeout=self.timeout)
         status = _unwrap(response, "status")
-        # A mismatched schema must not silently default monetary fields to zero.
-        wrong_field = 7 if PROFILE == "uint256" else 18
-        if any(field.field_number == wrong_field for field in UnknownFieldSet(status)):
-            raise ValueError("Node monetary schema does not match NODE_PROTOCOL_PROFILE")
         _to_dict(status)
         # Old nodes omit all metadata (proto3 scalar defaults). Their units are 8 decimals.
         has_metadata = bool(status.nativeTokenName or status.nativeTokenSymbol)
@@ -253,25 +271,25 @@ class GrpcNodeClient:
         try:
             query = common.FindDeployQuery(deployId=bytes.fromhex(deploy_id))  # raises ValueError on a non-hex id
             find_response = await self.stub.findDeploy(query, timeout=self.timeout)
-            light_block = _unwrap(find_response, "blockInfo")
+            light_block = _to_dict(_unwrap(find_response, "blockInfo"))
 
             block_response = await self.stub.getBlock(
-                _block_query(light_block.blockHash),
+                _block_query(light_block["blockHash"]),
                 timeout=self.timeout,
             )
-            full_block = _unwrap(block_response, "blockInfo")
+            full_block = _to_dict(_unwrap(block_response, "blockInfo"))
 
-            for deploy in full_block.deploys:
-                if deploy.sig == deploy_id:
+            for deploy in full_block["deploys"]:
+                if deploy["sig"] == deploy_id:
                     return {
                         "deployId": deploy_id,
-                        "blockHash": light_block.blockHash,
-                        "blockNumber": light_block.blockNumber,
+                        "blockHash": light_block["blockHash"],
+                        "blockNumber": light_block["blockNumber"],
                         "status": "included",
-                        **_to_dict(deploy),
+                        **deploy,
                     }
 
-            logger.warning(f"Deploy {deploy_id} not found in resolved block {light_block.blockHash}")
+            logger.warning(f"Deploy {deploy_id} not found in resolved block {light_block['blockHash']}")
             return None
 
         except (grpc.RpcError, ValueError) as e:

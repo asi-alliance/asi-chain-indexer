@@ -116,15 +116,29 @@ docker compose up -d --force-recreate indexer
 For a standalone build use `docker build --build-arg NODE_PROTOCOL_PROFILE=uint256 .`.
 For local Python use `NODE_PROTOCOL_PROFILE=uint256 make protos PYTHON=python` and
 run with the same environment setting. The image retains its build profile as the
-runtime default. An environment/binding mismatch fails immediately; node status
-also rejects the other monetary schema at startup. Select by source revision,
-not by a guessed version or token precision. See [schema provenance](protos/README.md).
+runtime default. An environment/binding mismatch fails immediately. Monetary
+messages reject incompatible wire fields on every read, including after a node
+schema switch or reconnect; rejected blocks cannot advance the sync cursor.
+Select by source revision, not by a guessed version or token precision.
+See [schema provenance](protos/README.md).
 
 Migration 004 widens included and pending `phlo_price` to checked `NUMERIC(78,0)`.
 Apply it once with writers stopped; then reload Hasura metadata so prices become
 `numeric` GraphQL strings. Consumers with typed `bigint` price filters must adapt.
 The migration preserves historical values and per-row precision. Heights, timestamps,
 phlo limits and gas counts retain their existing bounded types.
+
+Validator refreshes read finalized stakes over gRPC independently of HTTP activity
+membership. When HTTP membership is unavailable, stakes and recorded precision
+still refresh while existing activity statuses are preserved. New validators
+start as `bonded`; a successful HTTP response can update their activity status.
+
+`python analyze_transfers.py` reads successful ledger transfers through Hasura
+using `HASURA_URL` (default `http://localhost:8080/v1/graphql`) and an optional
+`HASURA_ADMIN_SECRET`. It paginates by transfer ID, rejects GraphQL errors, and
+computes exact totals and net flows from `amount_dust` and each row's recorded
+`token_decimals`. Detailed output retains fractional units; averages use exact
+fractions. These net flows exclude fees and are not wallet balance snapshots.
 
 Before release, validate a pinned fresh-state #881 observer with a funded wide
 transfer through ingestion, SQL and GraphQL. Protocol fixtures and database tests
