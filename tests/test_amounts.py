@@ -14,7 +14,7 @@ from src.amounts import (
     token_decimal,
 )
 from src.block_indexer import BlockIndexer
-from src.grpc_node_client import GrpcNodeClient, _to_dict, common
+from src.grpc_node_client import PROFILE, GrpcNodeClient, _to_dict, common
 from src.models import Amount
 from src.monitoring import MonitoringServer
 import DeployServiceV1_pb2 as service
@@ -97,6 +97,7 @@ def test_invalid_precision_rejected(decimals):
         token_decimal(1, decimals)
 
 
+@pytest.mark.skipif(PROFILE != "classic", reason="classic wire fields")
 def test_published_int64_protobuf_amounts_remain_exact():
     raw = 2**63 - 1
     assert _to_dict(common.BondInfo(stake=raw))["stake"] == raw
@@ -132,6 +133,8 @@ async def test_precision_checked_against_node_metadata(actual, expected, valid):
         if actual is None
         else {"nativeTokenSymbol": "ASI", "nativeTokenDecimals": actual}
     )
+    if PROFILE == "uint256":
+        metadata["minPhloPrice"] = "1"
     response = service.StatusResponse(status=common.Status(**metadata))
     client = GrpcNodeClient.__new__(GrpcNodeClient)
     client.timeout = 1

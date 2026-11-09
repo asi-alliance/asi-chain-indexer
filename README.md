@@ -89,86 +89,91 @@ Raw token amounts are checked Python integers stored as uint256-range
 Set **18** only for a chain declaring 18 decimals. Startup checks this setting;
 legacy nodes without token metadata support the eight-decimal profile. Each row
 retains its recorded precision; changing the setting does not rescale historical
-balances or change the chain denomination. Node gRPC bond/transfer fields remain
-bounded by their vendored wire types; wider storage does not widen those APIs.
+balances or change the chain denomination.
+
+Select the wire contract explicitly with `NODE_PROTOCOL_PROFILE`:
+
+| Profile | Pinned node schema | Monetary wire fields |
+|---|---|---|
+| `classic` (default) | [#896 at 92903a1](https://github.com/F1R3FLY-io/f1r3node-rust/commit/92903a1d81c49fa0a035fb7ee729002e38428280) | Legacy int64 stakes/prices; exact transfer negotiation and authoritative `amountRaw` |
+| `uint256` | [merged #881 at 6233501](https://github.com/F1R3FLY-io/f1r3node-rust/commit/6233501064492d0cac9c7ebc598daf70c501a215) | Decimal-string stakes/prices/`amountRaw`; 32-byte big-endian pending deploy prices; no exact-transfer flags |
+
+This includes the exact-transfer and replay-history hardening from
+[#22](https://github.com/asi-alliance/asi-chain-indexer/pull/22). Missing or malformed
+compact transfer amounts stay unknown; replay remains authoritative for the ledger.
+Signed rejected attempts are preserved, including requests outside uint256.
+`GRPC_MAX_RECEIVE_MESSAGE_BYTES` bounds responses (default 64 MiB, range 1–2147483647).
+
+For a uint256 image and local Compose installation:
+
+```bash
+# Set NODE_PROTOCOL_PROFILE=uint256 in .env alongside the node's actual precision.
+docker compose build indexer
+# After the reviewed database/metadata upgrade:
+docker compose up -d --force-recreate indexer
+```
+
+For a standalone build use `docker build --build-arg NODE_PROTOCOL_PROFILE=uint256 .`.
+For local Python use `NODE_PROTOCOL_PROFILE=uint256 make protos PYTHON=python` and
+run with the same environment setting. The image retains its build profile as the
+runtime default. An environment/binding mismatch fails immediately. Monetary
+messages reject incompatible wire fields on every read, including after a node
+schema switch or reconnect; rejected blocks cannot advance the sync cursor.
+Select by source revision, not by a guessed version or token precision.
+See [schema provenance](protos/README.md).
+
+Migration 004 widens included and pending `phlo_price` to checked `NUMERIC(78,0)`.
+Apply it once with writers stopped; then reload Hasura metadata so prices become
+`numeric` GraphQL strings. Consumers with typed `bigint` price filters must adapt.
+The migration preserves historical values and per-row precision. Heights, timestamps,
+phlo limits and gas counts retain their existing bounded types.
+
+Validator refreshes read finalized stakes over gRPC independently of HTTP activity
+membership. When HTTP membership is unavailable, stakes and recorded precision
+still refresh while existing activity statuses are preserved. New validators
+start as `bonded`; a successful HTTP response can update their activity status.
+
+`python analyze_transfers.py` reads successful ledger transfers through Hasura
+using `HASURA_URL` (default `http://localhost:8080/v1/graphql`) and an optional
+`HASURA_ADMIN_SECRET`. It paginates by transfer ID, rejects GraphQL errors, and
+computes exact totals and net flows from `amount_dust` and each row's recorded
+`token_decimals`. Detailed output retains fractional units; averages use exact
+fractions. These net flows exclude fees and are not wallet balance snapshots.
+
+Before release, validate a pinned fresh-state #881 observer with a funded wide
+transfer through ingestion, SQL and GraphQL. Protocol fixtures and database tests
+do not replace that live acceptance. Switching this setting does not migrate node
+state, authorize a chain reset, or select the cost-accounting protocol.
 
 A pending deploy disappearing from a node buffer is not proof of successful
 execution or finality. Block heights can have multiple DAG siblings; preserve every
 block hash and ordered parent link. [DAG.md](DAG.md) contains a dated research
 snapshot: its old branch-status table is historical, not a current feature inventory.
 
-### Exact-amount API compatibility
+### Classic exact-transfer compatibility and replay history
 
-The client supports the exact-amount contract in
-[Rust node PR #896](https://github.com/F1R3FLY-io/f1r3node-rust/pull/896), pinned at
-`92903a1d81c49fa0a035fb7ee729002e38428280`. Every `getBlock` and
-`lastFinalizedBlock` request sets `exactTransferAmounts=true`, including bond
-refreshes and deploy lookups, so wide transfers do not reject the whole block.
-Transfer dictionaries preserve `amount` as the legacy Python int64 integer.
-Use `amountRaw` for the exact base-unit amount when it is not `None`. A known
-amount is a validated canonical decimal string. Validation does not convert
-the string to a Python integer, so signed, out-of-range failed attempts retain
-all digits without a uint256 clamp or Python's decimal conversion limit.
-For wide amounts, the legacy `amount` can contain the node's
-`-1` sentinel and must not be used as the transfer amount. Bond and phlo fields
-retain their existing integer types. Network consensus reads height and bonds
-from one finalized-block response; active membership is a separate HTTP read.
+The historical `classic` profile requests `exactTransferAmounts=true` on every
+full-block read, including finalized bonds and deploy lookup. It preserves the
+legacy integer `amount`; use canonical signed `amountRaw` text whenever known.
+Without `amountRaw`, legacy values convert directly to text except ambiguous `-1`,
+which remains unknown. A malformed exact field also becomes `None`, with a warning
+containing only its character count, and never falls back to the legacy amount.
+The `uint256` profile uses field 6 directly and sends no exact-transfer flags.
 
-Older nodes ignore the added request fields. When their response omits
-`amountRaw`, the client converts the legacy int64 directly to a decimal string,
-except for `-1`. Without `amountRaw`, that value is ambiguous: it can be a real
-failed attempt or a wide-amount sentinel whose exact field was dropped. The
-client preserves the summary with `amountRaw=None` and the original legacy
-`amount`, `success` and `failReason`. Block reads and deploy lookups remain
-available. A malformed nonempty `amountRaw` also becomes `None` and emits a
-warning with its character count. The warning does not include the raw value.
-An invalid exact field never falls back to the legacy amount. An unknown amount
-does not become an empty or zero transfer. With transfer extraction enabled,
-non-genesis blocks containing deploys still require valid replay reports before
-the sync cursor advances.
-Old nodes can still omit BigInt transfers from their compact summaries; the
-indexer continues to derive ledger movements from full phase-marked replay
-traces, including delayed completion, rather than from those summaries.
+Unknown compact amounts do not bypass replay processing. Non-genesis blocks with
+deploys still require valid phase-marked reports before ledger writes and cursor
+advancement. Old nodes can omit BigInt transfers from compact summaries; source
+terms and compact summaries never replace execution-derived ledger movements.
+Signed rejected requests retain every digit through persistence and later result
+correlation, including values above Python's 4,300-digit conversion limit, without
+changing that limit or rounding with the Decimal context. Successful movements
+still require a positive uint256 amount.
 
-Replay call history also preserves signed requested amounts above 4,300 digits.
-Exact conversions through `Decimal` write and restore the integer text without
-decimal arithmetic, context rounding or changes to Python's global digit limit.
-Rejected attempts remain call/result history and never become ledger movements.
-Successful movements still require a positive uint256 amount.
-
-Deploy this indexer before upgrading nodes to #896. Rebuild the Docker image to
-regenerate the protobuf stubs, or run `make protos` for a local installation.
-This API adaptation requires no additional database migration beyond 000–003.
-
-Full blocks can exceed Python gRPC's default 4 MiB receive limit. The client
-uses a bounded 64 MiB limit by default. Set `GRPC_MAX_RECEIVE_MESSAGE_BYTES`
-to a positive byte count up to 2147483647 for the selected network's block
-responses. Responses above that limit remain RPC errors and must be retried.
-This client response limit is independent of the node's request size limit.
-
-Periodic validator refreshes match the public keys in the HTTP validator
-records against the finalized bond set. If the active-validator read is
-unavailable, the refresh preserves stored stakes and statuses. A successful
-empty active set marks the bonded validators as `bonded`.
-New validators discovered in block bonds start as `bonded`. Later block upserts
-preserve the stored status. Only the HTTP membership refresh marks a validator
-as `active`.
-
-The local protocol-server tests verify request negotiation and client decoding.
-They do not establish acceptance of a running #896 node. Live acceptance remains
-pending against the exact node revision above and this indexer working tree.
-Use an isolated observer with a known funded transfer above int64. Verify that
-the same block returns `TRANSFER_AMOUNT_OUT_OF_RANGE` without the exact flag
-and the full block with canonical `amountRaw` values with the flag. Compare
-deploy lookup, replay-derived ledger rows, database values and GraphQL strings.
-Record the node source/image digest, block/deploy IDs and indexer revision or
-working-tree diff. Recheck against a new node head before release.
-
-[Node #947](https://github.com/F1R3FLY-io/f1r3node-rust/pull/947) changes HTTP phlo
-prices to strings, while gRPC prices remain int64. This client uses gRPC for
-deploy/block prices and HTTP for validator stakes and replay reports. That
-follow-up requires no phlo-price decoder change here. Cost-accounting in
-indexer #21/node #216 and the wider node #881 profile need separate reconciliation.
+Classic #896 acceptance must use its pinned historical node: compare the legacy
+range error with the exact response for the same wide transfer. Current #881
+acceptance uses the explicit `uint256` profile and migration 004 instead. Neither
+fixture suite establishes funded acceptance against a running node. The separate
+cost-accounting schema also requires its own selected source and reconciliation.
 
 ## Fresh local installation
 
@@ -219,7 +224,7 @@ docker compose ps
 curl -fsS http://localhost:9090/status
 ```
 
-PostgreSQL runs SQL migrations 000–003 only when initializing an empty volume.
+PostgreSQL runs SQL migrations 000–004 only when initializing an empty volume.
 The Hasura script changes metadata and permissions; use it for a fresh installation,
 not as a read-only probe or a replacement for reviewing existing custom metadata.
 [deploy.sh](deploy.sh) wraps startup and metadata initialization, but currently
@@ -246,8 +251,8 @@ Read [POSTGRES_UPGRADE.md](POSTGRES_UPGRADE.md) and the
 - Back up the actual database and Hasura metadata, stop writers and rehearse
   the upgrade. PostgreSQL 14 data requires dump/restore into a new PostgreSQL 18.6
   cluster; retain the old volume and matching images for rollback.
-- Apply only missing SQL migrations, in order. A new database needs 000–003;
-  an existing version-000 database needs 001–003 **once each**. Compose restarts
+- Apply only missing SQL migrations, in order. A new database needs 000–004;
+  an existing version-000 database needs 001–004 **once each**. Compose restarts
   and SQLAlchemy `create_all()` do not upgrade existing schemas. There is
   currently no Alembic environment or revision-tracked migration runner.
 - Populated databases marked for native-transfer backfill must complete

@@ -3,7 +3,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.config import Settings
-from src.grpc_node_client import GrpcNodeClient, common
+from src.grpc_node_client import GrpcNodeClient, _block_query, common
 from test_node_exact_api import BLOCK_HASH, DEPLOY_ID, node_api
 
 
@@ -23,7 +23,7 @@ async def test_large_block_reads_respect_the_configured_receive_limit(monkeypatc
         try:
             with pytest.raises(grpc.aio.AioRpcError) as error:
                 await limited.stub.getBlock(
-                    common.BlockQuery(hash=BLOCK_HASH, exactTransferAmounts=True),
+                    _block_query(BLOCK_HASH),
                     timeout=limited.timeout,
                 )
             assert error.value.code() == grpc.StatusCode.RESOURCE_EXHAUSTED

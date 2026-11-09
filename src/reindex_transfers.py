@@ -1,6 +1,6 @@
 """Repair indexed transfer history without resetting the node or chain data.
 
-Stop indexer writes, apply migrations through 003, then run python -m src.reindex_transfers.
+Stop indexer writes, apply migrations through 004, then run python -m src.reindex_transfers.
 Each block is atomic and a failed/missing report aborts; rerunning is safe.
 """
 
@@ -8,6 +8,7 @@ import asyncio
 from sqlalchemy import delete, select, text
 
 from src.block_indexer import BlockIndexer
+from src.config import settings
 from src.database import db
 from src.grpc_node_client import GrpcNodeClient
 from src.models import BalanceState, Block, Deployment, Transfer
@@ -23,6 +24,7 @@ async def repair():
     client = GrpcNodeClient()
     indexer.client = client
     try:
+        await client.require_native_precision(settings.native_token_decimals)
         async with db.session() as session:
             blocks = (
                 await session.scalars(

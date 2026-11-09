@@ -10,9 +10,13 @@ from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
 from structlog.testing import capture_logs
 
 from src.amounts import MAX_AMOUNT
-from src.grpc_node_client import GrpcNodeClient, _to_dict, common
+from src.grpc_node_client import PROFILE, GrpcNodeClient, _to_dict, common
 import DeployServiceV1_pb2 as service
 import ServiceError_pb2 as errors
+
+pytestmark = pytest.mark.skipif(
+    PROFILE != "classic", reason="classic wire profile fixture"
+)
 
 
 BLOCK_HASH = "ab" * 32
@@ -53,7 +57,7 @@ async def node_api(
     transfer = common.TransferInfo(
         fromAddr="sender",
         toAddr="receiver",
-        amount=raw if representable else -1,
+        **({"amount": raw if representable else -1} if PROFILE == "classic" else {}),
         success=0 < raw <= MAX_AMOUNT,
         failReason="" if 0 < raw <= MAX_AMOUNT else "Rejected amount",
     )
@@ -63,14 +67,19 @@ async def node_api(
         blockInfo=common.LightBlockInfo(
             blockHash=BLOCK_HASH,
             blockNumber=12,
-            bonds=[common.BondInfo(validator="validator", stake=MAX_INT64)],
+            bonds=[
+                common.BondInfo(
+                    validator="validator",
+                    stake=MAX_INT64 if PROFILE == "classic" else str(MAX_INT64),
+                )
+            ],
         ),
         deploys=[
             common.DeployInfo(
                 sig=DEPLOY_ID,
                 term=term,
                 phloLimit=MAX_INT64,
-                phloPrice=7,
+                phloPrice=7 if PROFILE == "classic" else "7",
                 cost=2**53 + 1,
                 transfersAvailable=available,
                 transfers=[transfer] if available else [],
@@ -83,7 +92,8 @@ async def node_api(
         requests.append(request)
         reason = error
         if (
-            not legacy
+            PROFILE == "classic"
+            and not legacy
             and not request.exactTransferAmounts
             and not representable
             and available

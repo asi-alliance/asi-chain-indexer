@@ -477,7 +477,7 @@ class BlockIndexer:
                         deployer_address=convert_to_asi_address(deployer, d),
                         term=d.get("term", ""),
                         timestamp=d.get("timestamp", 0),
-                        phlo_price=d.get("phloPrice", 1),
+                        phlo_price=amount(d.get("phloPrice", 1)),
                         phlo_limit=d.get("phloLimit", 1000000),
                         valid_after_block_number=d.get("validAfterBlockNumber"),
                         shard_id=d.get("shardId"),
@@ -679,7 +679,7 @@ class BlockIndexer:
             timestamp=deploy_data.get("timestamp", block_data.get("timestamp")),
             sig=deploy_data.get("sig"),
             sig_algorithm=deploy_data.get("sigAlgorithm", "secp256k1"),
-            phlo_price=deploy_data.get("phloPrice", 1),
+            phlo_price=amount(deploy_data.get("phloPrice", 1)),
             phlo_limit=deploy_data.get("phloLimit", 1000000),
             phlo_cost=deploy_data.get("cost", 0),
             valid_after_block_number=deploy_data.get("validAfterBlockNumber"),
@@ -750,19 +750,22 @@ class BlockIndexer:
             # Get active validators
             active_validators = await self.client.get_active_validators()
             if active_validators is None:
-                logger.warning("Could not refresh validator states: active validators unavailable")
-                return
-            active_keys = {validator["validator"] for validator in active_validators}
+                logger.warning("Refreshing stakes without active validator membership")
+            active_keys = (
+                {validator["validator"] for validator in active_validators}
+                if active_validators is not None else None
+            )
+            current_block = await db.get_last_indexed_block()
 
             async with db.session() as session:
                 # Update validator records
                 for bond in bonds:
                     validator_key = bond["validator"]
                     stake = bond["stake"]
-                    is_active = validator_key in active_keys
-
-                    # Get current block number for tracking
-                    current_block = await db.get_last_indexed_block()
+                    status = (
+                        "active" if active_keys is not None and validator_key in active_keys
+                        else "bonded"
+                    )
 
                     stmt = insert(Validator).values(
                         public_key=validator_key,
@@ -771,7 +774,7 @@ class BlockIndexer:
                         token_decimals=settings.native_token_decimals,
                         first_seen_block=current_block,
                         last_seen_block=current_block,
-                        status="active" if is_active else "bonded",
+                        status=status,
                         updated_at=utc_now()
                     )
                     stmt = stmt.on_conflict_do_update(
@@ -780,7 +783,7 @@ class BlockIndexer:
                             "total_stake": stake,
                             "token_decimals": stmt.excluded.token_decimals,
                             "last_seen_block": current_block,
-                            "status": "active" if is_active else "bonded",
+                            "status": status if active_keys is not None else Validator.status,
                             "updated_at": utc_now()
                         }
                     )
@@ -791,7 +794,7 @@ class BlockIndexer:
             logger.info(
                 "Updated validator states",
                 total_bonded=len(bonds),
-                active=len(active_validators)
+                active=len(active_validators) if active_validators is not None else None
             )
 
         except Exception as e:

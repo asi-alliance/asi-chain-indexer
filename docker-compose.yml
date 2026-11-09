@@ -16,6 +16,7 @@ services:
       - ./migrations/001_bigint_amounts.sql:/docker-entrypoint-initdb.d/001_bigint_amounts.sql
       - ./migrations/002_executed_transfers.sql:/docker-entrypoint-initdb.d/002_executed_transfers.sql
       - ./migrations/003_native_transfer_calls.sql:/docker-entrypoint-initdb.d/003_native_transfer_calls.sql
+      - ./migrations/004_uint256_phlo_prices.sql:/docker-entrypoint-initdb.d/004_uint256_phlo_prices.sql
     ports:
       - "5432:5432"
     healthcheck:
@@ -27,7 +28,10 @@ services:
       - indexer-network
 
   indexer:
-    build: .
+    build:
+      context: .
+      args:
+        NODE_PROTOCOL_PROFILE: ${NODE_PROTOCOL_PROFILE:-classic}
     container_name: asi-indexer
     depends_on:
       postgres:
@@ -37,6 +41,7 @@ services:
       NODE_HOST: ${NODE_HOST}
       GRPC_PORT: ${GRPC_PORT}
       HTTP_PORT: ${HTTP_PORT}
+      NODE_PROTOCOL_PROFILE: ${NODE_PROTOCOL_PROFILE:-classic}
       NODE_TIMEOUT: ${NODE_TIMEOUT:-30}
       GRPC_MAX_RECEIVE_MESSAGE_BYTES: ${GRPC_MAX_RECEIVE_MESSAGE_BYTES:-67108864}
       NATIVE_TOKEN_DECIMALS: ${NATIVE_TOKEN_DECIMALS:-8}
