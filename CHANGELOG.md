@@ -5,6 +5,7 @@ All notable changes to the ASI-Chain Indexer project will be documented in this 
 ## [Unreleased]
 
 ### Changed
+- Upgrade the supported Docker and CI interpreter to Python 3.14.10 after clean-image and PostgreSQL/Hasura compatibility validation.
 - Upgrade the Docker/CI baseline to Python 3.13.18, lock transitive Python dependencies with hashes, and separate production packages from test/development tools.
 - Refresh pytest, pytest-asyncio, coverage, Black, Flake8 and mypy; remove unused aiofiles typing stubs.
 
