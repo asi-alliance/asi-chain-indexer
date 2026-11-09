@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+from decimal import Decimal
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -12,6 +13,7 @@ import pytest
 import pytest_asyncio
 
 from src.migration_support import CATALOG_SQL, LOCK_KEY, ROOT
+from src.amounts import MAX_AMOUNT
 
 pytestmark = pytest.mark.integration
 SQL_FILES = sorted((ROOT / "migrations").glob("[0-9][0-9][0-9]_*.sql"))
@@ -63,11 +65,15 @@ async def apply_through(conn, revision):
             await conn.execute("""
                 INSERT INTO blocks(block_hash,block_number,timestamp,proposer,finalization_status)
                 VALUES ('legacy',1,1,'validator','finalized');
-                INSERT INTO deployments(deploy_id,block_hash,block_number,deployer,deployer_address,term,timestamp,sig)
+                INSERT INTO deployments(deploy_id,block_hash,block_number,deployer,
+                                        deployer_address,term,timestamp,sig)
                 VALUES ('legacy','legacy',1,'sender','sender','term',1,'legacy');
                 INSERT INTO transfers(deploy_id,block_hash,block_number,from_address,to_address,
                                       amount_dust,amount_asi,timestamp)
                 VALUES ('legacy','legacy',1,'sender','receiver',123456789,1.23456789,1);
+                UPDATE deployments SET phlo_price=9223372036854775807;
+                INSERT INTO pending_deploys(sig,deployer,deployer_address,term,timestamp,phlo_price)
+                VALUES ('pending','sender','sender','Nil',1,9223372036854775807);
             """)
 
 
@@ -78,7 +84,14 @@ async def test_empty_upgrade_and_repeat_do_not_replay_sql(isolated):
     for _ in range(2):
         code, _, error = await cli(url, "upgrade")
         assert code == 0, error
-        assert await conn.fetchval("SELECT version_num FROM alembic_version") == "003"
+        assert await conn.fetchval("SELECT version_num FROM alembic_version") == "004"
+    assert (
+        await conn.fetchval(
+            "SELECT data_type FROM information_schema.columns "
+            "WHERE table_name='deployments' AND column_name='phlo_price'"
+        )
+        == "numeric"
+    )
     assert await conn.fetchval("SELECT count(*) FROM native_transfer_calls") == 0
     assert (
         await conn.fetchval(
@@ -86,10 +99,10 @@ async def test_empty_upgrade_and_repeat_do_not_replay_sql(isolated):
         )
         == "0"
     )
-    assert await cli(url, "status") == (0, "003\n", "")
+    assert await cli(url, "status") == (0, "004\n", "")
 
 
-@pytest.mark.parametrize("revision", range(4))
+@pytest.mark.parametrize("revision", range(5))
 @pytest.mark.asyncio
 async def test_adoption_and_upgrade_preserve_history_and_repair_flag(
     isolated, revision
@@ -110,6 +123,7 @@ async def test_adoption_and_upgrade_preserve_history_and_repair_flag(
     assert await conn.fetchrow("SELECT amount_dust,amount_asi FROM transfers") == before
     code, _, error = await cli(url, "upgrade")
     assert code == 0, error
+    assert await conn.fetchval("SELECT version_num FROM alembic_version") == "004"
     assert await conn.fetchrow("SELECT amount_dust,amount_asi FROM transfers") == before
     assert await conn.fetchval("SELECT token_decimals FROM transfers") == 8
     assert await conn.fetchval("SELECT count(*) FROM blocks") == 1
@@ -119,6 +133,14 @@ async def test_adoption_and_upgrade_preserve_history_and_repair_flag(
         )
         == "1"
     )
+    for table in ("deployments", "pending_deploys"):
+        assert await conn.fetchval(f"SELECT phlo_price FROM {table}") == 2**63 - 1
+        for price in (2**63, 10**19 + 1, 2**128, MAX_AMOUNT):
+            await conn.execute(f"UPDATE {table} SET phlo_price=$1", Decimal(price))
+            assert await conn.fetchval(f"SELECT phlo_price FROM {table}") == price
+        for price in (-1, MAX_AMOUNT + 1):
+            with pytest.raises(asyncpg.CheckViolationError):
+                await conn.execute(f"UPDATE {table} SET phlo_price=$1", Decimal(price))
 
 
 @pytest.mark.asyncio
@@ -190,8 +212,55 @@ async def test_sql_failure_rolls_back_schema_data_and_revision(isolated):
     )
     assert (
         await conn.fetchval(
-            "SELECT count(*) FROM information_schema.columns WHERE table_name='blocks' AND column_name='token_decimals'"
+            "SELECT count(*) FROM information_schema.columns "
+            "WHERE table_name='blocks' AND column_name='token_decimals'"
         )
         == 0
     )
     assert await conn.fetchval("SELECT amount_dust FROM transfers") == -1
+
+
+@pytest.mark.asyncio
+async def test_004_failure_before_stamp_retains_schema_revision_and_lock(
+    isolated, monkeypatch
+):
+    from alembic import op
+    from src import migrate, migration_support
+
+    conn, url = isolated
+    await apply_through(conn, 3)
+    assert (await cli(url, "adopt", "--revision", "003"))[0] == 0
+    monkeypatch.setenv("DATABASE_URL", url)
+    apply_sql = migration_support.apply_sql
+
+    def fail_after_sql(filename):
+        apply_sql(filename)
+        if filename.startswith("004_"):
+
+            async def check_lock(driver):
+                competitor = await asyncpg.connect(url)
+                try:
+                    assert not await competitor.fetchval(
+                        "SELECT pg_try_advisory_xact_lock($1)", LOCK_KEY
+                    )
+                finally:
+                    await competitor.close()
+
+            op.get_bind().connection.dbapi_connection.run_async(check_lock)
+            raise RuntimeError("Injected failure after SQL and before stamping")
+
+    monkeypatch.setattr(migration_support, "apply_sql", fail_after_sql)
+    with pytest.raises(RuntimeError, match="Injected failure"):
+        await migrate.run("upgrade")
+    assert await conn.fetchval("SELECT version_num FROM alembic_version") == "003"
+    for table in ("deployments", "pending_deploys"):
+        assert await conn.fetchval(f"SELECT phlo_price FROM {table}") == 2**63 - 1
+        assert (
+            await conn.fetchval(
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_name=$1 AND column_name='phlo_price'",
+                table,
+            )
+            == "bigint"
+        )
+    assert await conn.fetchval("SELECT count(*) FROM transfers") == 1

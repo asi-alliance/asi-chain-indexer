@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from pathlib import Path
 
 from alembic import op
@@ -13,7 +14,7 @@ from sqlalchemy.engine import make_url
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCK_KEY = 18387725196134226
-REVISIONS = ("000", "001", "002", "003")
+REVISIONS = ("000", "001", "002", "003", "004")
 
 # SQL definitions, not data, are inspected. Extension-owned objects are excluded.
 CATALOG_SQL = """
@@ -110,7 +111,7 @@ def catalog(connection):
 def validate_adoption(connection, revision):
     if revision not in REVISIONS:
         raise CommandError(
-            "Select an explicit existing SQL revision: 000, 001, 002 or 003."
+            "Select an explicit existing SQL revision: " + ", ".join(REVISIONS) + "."
         )
     expected = json.loads(
         (ROOT / "migration_env" / "profiles" / (revision + ".json")).read_text()
@@ -147,6 +148,113 @@ def validate_adoption(connection, revision):
         )
 
 
+def _statement_spans(sql):
+    """Locate top-level SQL statements without splitting quoted function bodies."""
+    spans = []
+    start = None
+    i = 0
+    while i < len(sql):
+        if sql[i].isspace():
+            i += 1
+        elif sql.startswith("--", i):
+            end = sql.find("\n", i)
+            i = len(sql) if end < 0 else end + 1
+        elif sql.startswith("/*", i):
+            depth = 1
+            i += 2
+            while depth and i < len(sql):
+                if sql.startswith("/*", i):
+                    depth += 1
+                    i += 2
+                elif sql.startswith("*/", i):
+                    depth -= 1
+                    i += 2
+                else:
+                    i += 1
+            if depth:
+                raise CommandError("SQL migration has an unterminated comment.")
+        else:
+            if start is None:
+                start = i
+            if sql[i] in ("'", '"'):
+                quote = sql[i]
+                escapes = (
+                    quote == "'"
+                    and i > 0
+                    and sql[i - 1] in "eE"
+                    and (i < 2 or not (sql[i - 2].isalnum() or sql[i - 2] == "_"))
+                )
+                i += 1
+                while i < len(sql):
+                    if escapes and sql[i] == "\\":
+                        i += 2
+                    elif sql[i] == quote:
+                        i += 1
+                        if i < len(sql) and sql[i] == quote:
+                            i += 1
+                        else:
+                            break
+                    else:
+                        i += 1
+                else:
+                    raise CommandError("SQL migration has an unterminated quote.")
+            elif sql[i] == "$" and (
+                tag := re.match(r"\$(?:[A-Za-z_][A-Za-z_0-9]*)?\$", sql[i:])
+            ):
+                delimiter = tag.group()
+                end = sql.find(delimiter, i + len(delimiter))
+                if end < 0:
+                    raise CommandError(
+                        "SQL migration has an unterminated dollar quote."
+                    )
+                i = end + len(delimiter)
+            elif sql[i] == ";":
+                spans.append((start, i + 1))
+                start = None
+                i += 1
+            else:
+                i += 1
+    if start is not None:
+        spans.append((start, len(sql)))
+    return spans
+
+
+def transaction_body(sql):
+    """Strip one standalone wrapper and reject other transaction-control statements."""
+    spans = _statement_spans(sql)
+    if not spans:
+        return sql
+
+    def command(span):
+        match = re.match(r"[A-Za-z]+", sql[span[0] : span[1]])
+        return match.group().upper() if match else ""
+
+    first, last = spans[0], spans[-1]
+    wrapped = command(first) == "BEGIN" or command(last) == "COMMIT"
+    if wrapped:
+        if (
+            len(spans) < 2
+            or not re.fullmatch(r"BEGIN\s*;", sql[first[0] : first[1]], re.IGNORECASE)
+            or not re.fullmatch(r"COMMIT\s*;", sql[last[0] : last[1]], re.IGNORECASE)
+        ):
+            raise CommandError("SQL migration has an unexpected transaction boundary.")
+        spans = spans[1:-1]
+    for span in spans:
+        if command(span) in {
+            "BEGIN",
+            "COMMIT",
+            "END",
+            "ROLLBACK",
+            "ABORT",
+            "START",
+            "SAVEPOINT",
+            "RELEASE",
+            "PREPARE",
+        }:
+            raise CommandError("SQL migration has an unexpected transaction boundary.")
+    return sql[first[1] : last[0]] if wrapped else sql
+
+
 def apply_sql(filename):
     connection = op.get_bind()
     if filename.startswith("000_") and connection.scalar(
@@ -162,9 +270,5 @@ def apply_sql(filename):
     sql = (ROOT / "migrations" / filename).read_text()
     # Existing standalone files keep their BEGIN/COMMIT. Alembic owns the outer
     # transaction here, including every revision marker and the advisory lock.
-    if sql.lstrip().startswith("BEGIN;"):
-        sql = sql.lstrip()[len("BEGIN;") :].rstrip()
-        if not sql.endswith("COMMIT;"):
-            raise CommandError("SQL migration has an unexpected transaction boundary.")
-        sql = sql[: -len("COMMIT;")]
+    sql = transaction_body(sql)
     connection.connection.dbapi_connection.run_async(lambda driver: driver.execute(sql))

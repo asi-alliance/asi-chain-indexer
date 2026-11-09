@@ -2,7 +2,7 @@
 
 ## Tracked migration commands
 
-Alembic wraps the unchanged SQL files 000–003 as forward-only revisions. Commands
+Alembic wraps the unchanged SQL files 000–004 as forward-only revisions. Commands
 use the explicitly set DATABASE_URL and the installed runtime requirements; no
 psql executable or node connection is needed. They do not run on indexer startup.
 Back up the actual database, stop indexer writers and rehearse upgrades first.
@@ -15,7 +15,7 @@ make migration-status PYTHON=python
 make migrate PYTHON=python
 ```
 
-On an empty public schema, upgrade creates 000–003 and alembic_version. Subsequent
+On an empty public schema, upgrade creates 000–004 and alembic_version. Subsequent
 runs apply only pending revisions. The whole command, including version updates,
 is transactional and holds a per-database advisory lock; a concurrent command is
 rejected. Lock waits are bounded to five seconds and each SQL statement defaults
@@ -43,8 +43,8 @@ row-level permissions, Hasura metadata or whether history repair was performed.
 The profiles were generated and tested on PostgreSQL 18.6; verify other server
 versions in a disposable rehearsal before adopting them.
 
-Fresh Compose databases still initialize through the four SQL mounts. After that
-initialization, adopt revision 003 once to begin version tracking. Existing Compose
+Fresh Compose databases still initialize through the five SQL mounts. After that
+initialization, adopt revision 004 once to begin version tracking. Existing Compose
 volumes need adoption of their actual level and an explicit upgrade command, for
 example docker compose run --rm --no-deps indexer python -m src.migrate status
 (with PostgreSQL already running). Do not run native alembic stamp as a shortcut:
@@ -79,16 +79,18 @@ Apply these migrations in order to a new database:
 2. `001_bigint_amounts.sql`: exact token amounts and per-record decimal precision.
 3. `002_executed_transfers.sql`: stable native transfer event identity.
 4. `003_native_transfer_calls.sql`: durable pending calls, completion records, and lifecycle queries.
+5. `004_uint256_phlo_prices.sql`: widen included/pending fee prices with uint256 checks.
 
 ```bash
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/000_comprehensive_initial_schema.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/001_bigint_amounts.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/002_executed_transfers.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/003_native_transfer_calls.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/004_uint256_phlo_prices.sql
 ```
 
 For an existing version 000 database, back up the database, stop indexer writes,
-and apply **001, 002, and 003, once each**. The migration takes table locks while widening
+and apply **001, 002, 003 and 004, once each**. The migration takes table locks while widening
 columns and rebuilding generated balance totals and `transaction_history_view`.
 Reload Hasura metadata after migration and before deploying the matching explorer.
 Compose runs these migrations only when initializing an empty PostgreSQL volume;
@@ -103,8 +105,36 @@ No balance multiplication or automatic chain denomination change occurs.
 Raw monetary columns use `NUMERIC(78,0)` with a uint256 range check. Display columns
 support up to 77 fractional digits; the extra width avoids rounding at any supported
 precision. Keep `HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES=true`. Protocol counters,
-block heights, timestamps and the node's int64 phlo fields retain their bounded
-integer types. The node's int64 bond/transfer RPC limits are unchanged.
+block heights, timestamps, phlo limits and gas counts retain their bounded
+integer types. Monetary wire types depend on the explicitly selected
+[protocol profile](../protos/README.md).
+
+For an installation already at version 003, stop writers and apply only 004.
+It preserves prices without rescaling; existing invalid negative prices cause the
+transaction to fail rather than being clamped. Back up the database and metadata,
+reload Hasura metadata after the column type change, and update typed price filters
+from `bigint` to `numeric`. With `HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES=true`,
+price query results remain exact strings. No table/view recreation, history repair
+or chain reset is required by 004.
+
+### Tracked price migration 004
+
+The Alembic head is 004, matching the SQL initialized by current Compose. A tracked
+003 database obtains the checked NUMERIC price columns through `upgrade`; an
+unversioned database already initialized through SQL 004 uses `adopt --revision 004`.
+Both paths preserve existing prices and recorded native8/native18 precision.
+Reload Hasura metadata and adapt typed price filters after the column type change.
+
+The runner removes the standalone BEGIN/COMMIT wrapper, including leading/trailing
+comments, and rejects unexpected transaction-control statements. Function bodies,
+quoted identifiers and literals retain their contents. SQL, the revision stamp and
+the advisory lock stay in the outer transaction; failure after SQL execution and
+before stamping rolls the price columns and version back to 003.
+
+The separate [adoption review findings](https://github.com/asi-alliance/asi-chain-indexer/pull/37#issuecomment-6736839084)
+on internal FK-trigger enforcement and owned-sequence structure remain open.
+The current catalog profiles do not validate those properties; the current-dev
+integration and 004 support do not resolve those additional adoption checks.
 
 Legacy migrations were consolidated into `000_comprehensive_initial_schema.sql`
 and removed from the active tree. Earlier versions remain available in Git history.
@@ -148,7 +178,7 @@ replay state and explicit PRECHARGE/USER/REFUND phase markers (tested against
 f1r3node-rust 98eb647e6cfd864e4765f22e1fe97d84cac713fe). The native SystemVault
 channel is derived from that standard genesis contract; a custom SystemVault
 requires a reviewed adapter. Full traces preserve `GInt` and `GBigInt` values;
-compact node transfer summaries remain int64 and are not used. Missing/busy or
+compact summaries are not used as ledger evidence. Missing/busy or
 incompatible traces fail the block for retry, never fall back to source regexes.
 Only successful native user movements enter `transfers`; rejected attempts are
 not ledger movements, and deploy execution status alone does not imply success.

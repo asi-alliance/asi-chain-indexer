@@ -30,16 +30,7 @@ format: ## Format code with black
 	black src/ tests/
 
 protos: ## Regenerate the gRPC client from protos/ (needs: pip install grpcio-tools)
-	mkdir -p src/grpc_stubs/scalapb
-	$(PYTHON) -m grpc_tools.protoc \
-		-I protos \
-		--python_out=src/grpc_stubs --grpc_python_out=src/grpc_stubs \
-		protos/DeployServiceV1.proto \
-		protos/DeployServiceCommon.proto \
-		protos/CasperMessage.proto \
-		protos/RhoTypes.proto \
-		protos/ServiceError.proto \
-		protos/scalapb/scalapb.proto
+	$(PYTHON) scripts/generate-protos.py
 
 run: ## Run the indexer locally
 	$(PYTHON) -m src.main
@@ -53,7 +44,7 @@ migrate: ## Apply pending tracked migrations to DATABASE_URL
 migration-status: ## Show recorded schema revision
 	$(PYTHON) -m src.migrate status
 
-migration-adopt: ## Adopt existing SQL schema (set REVISION=000/001/002/003)
+migration-adopt: ## Adopt existing SQL schema (set REVISION=000/001/002/003/004)
 	$(PYTHON) -m src.migrate adopt --revision $(REVISION)
 
 docker-build: ## Build Docker image

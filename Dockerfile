@@ -1,7 +1,7 @@
 # ==============================
 # Stage 1: Build Python dependencies
 # ==============================
-FROM python:3.13.18-slim-bookworm AS python-builder
+FROM python:3.14.10-slim-bookworm AS python-builder
 
 RUN apt-get update && apt-get install -y \
     gcc \
@@ -15,22 +15,16 @@ RUN pip install --no-cache-dir --require-hashes --prefix=/install -r requirement
 
 # regenerates the gRPC client from protos/; installed without --user so it never reaches runtime
 RUN pip install --no-cache-dir --require-hashes -r requirements-dev.lock
-COPY protos/ /protos/
-RUN mkdir -p /stubs/scalapb && python -m grpc_tools.protoc \
-    -I /protos \
-    --python_out=/stubs --grpc_python_out=/stubs \
-    /protos/DeployServiceV1.proto \
-    /protos/DeployServiceCommon.proto \
-    /protos/CasperMessage.proto \
-    /protos/RhoTypes.proto \
-    /protos/ServiceError.proto \
-    /protos/scalapb/scalapb.proto
+ARG NODE_PROTOCOL_PROFILE=classic
+COPY protos/ protos/
+COPY scripts/generate-protos.py scripts/generate-protos.py
+RUN python scripts/generate-protos.py --profile "$NODE_PROTOCOL_PROFILE" --output /stubs
 
 
 # ==============================
 # Stage 2: Runtime image
 # ==============================
-FROM python:3.13.18-slim-bookworm AS runtime
+FROM python:3.14.10-slim-bookworm AS runtime
 
 RUN apt-get update && apt-get install -y \
     libpq5 \
@@ -50,6 +44,8 @@ RUN chown -R indexer:indexer /app
 
 USER indexer
 
+ARG NODE_PROTOCOL_PROFILE=classic
+ENV NODE_PROTOCOL_PROFILE=$NODE_PROTOCOL_PROFILE
 ENV PYTHONPATH=/app
 ENV PATH="/home/indexer/.local/bin:${PATH}"
 ENV PYTHONUNBUFFERED=1

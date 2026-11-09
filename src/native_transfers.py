@@ -8,6 +8,7 @@ from sqlalchemy.dialects.postgresql import ARRAY, insert
 from sqlalchemy.orm import aliased
 
 from src.config import settings
+from src.amounts import parse_signed_integer, signed_integer_text
 from src.models import (
     Block,
     BlockParent,
@@ -158,7 +159,7 @@ def stored_call(call):
         "return_channel": call.return_channel,
         "from_address": call.from_address,
         "to_address": call.to_address,
-        "amount": int(call.requested_amount),
+        "amount": parse_signed_integer(call.requested_amount),
         "token_decimals": call.token_decimals,
     }
 
@@ -245,7 +246,7 @@ async def reconcile_block(session, block_info, deployments, traces, client=None)
                     )
                 }
                 values.update(
-                    requested_amount=str(data["amount"]),
+                    requested_amount=signed_integer_text(data["amount"]),
                     timestamp=block_info["timestamp"],
                 )
                 existing = await session.get(NativeTransferCall, data["id"])
