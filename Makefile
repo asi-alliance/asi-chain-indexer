@@ -30,16 +30,7 @@ format: ## Format code with black
 	black src/ tests/
 
 protos: ## Regenerate the gRPC client from protos/ (needs: pip install grpcio-tools)
-	mkdir -p src/grpc_stubs/scalapb
-	$(PYTHON) -m grpc_tools.protoc \
-		-I protos \
-		--python_out=src/grpc_stubs --grpc_python_out=src/grpc_stubs \
-		protos/DeployServiceV1.proto \
-		protos/DeployServiceCommon.proto \
-		protos/CasperMessage.proto \
-		protos/RhoTypes.proto \
-		protos/ServiceError.proto \
-		protos/scalapb/scalapb.proto
+	$(PYTHON) scripts/generate-protos.py
 
 run: ## Run the indexer locally
 	$(PYTHON) -m src.main
@@ -47,11 +38,12 @@ run: ## Run the indexer locally
 run-reset: ## Run the indexer with database reset
 	$(PYTHON) -m src.main --reset
 
-migrate: ## Initialize a new database with migrations 000 through 003
+migrate: ## Initialize a new database with migrations 000 through 004
 	psql -v ON_ERROR_STOP=1 $(DATABASE_URL) < migrations/000_comprehensive_initial_schema.sql
 	psql -v ON_ERROR_STOP=1 $(DATABASE_URL) < migrations/001_bigint_amounts.sql
 	psql -v ON_ERROR_STOP=1 $(DATABASE_URL) < migrations/002_executed_transfers.sql
 	psql -v ON_ERROR_STOP=1 $(DATABASE_URL) < migrations/003_native_transfer_calls.sql
+	psql -v ON_ERROR_STOP=1 $(DATABASE_URL) < migrations/004_uint256_phlo_prices.sql
 
 docker-build: ## Build Docker image
 	docker build -t asi-indexer:latest .

@@ -14,7 +14,11 @@ jobs:
   postgres-hasura:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      matrix:
+        profile: [classic, uint256]
     env:
+      NODE_PROTOCOL_PROFILE: ${{ matrix.profile }}
       COMPOSE_PROJECT_NAME: indexer-dependency-ci
       NODE_HOST: unused.invalid
       GRPC_PORT: '40401'
@@ -30,7 +34,7 @@ jobs:
         run: |
           docker compose config --quiet
           docker compose build indexer
-          docker build --target test -t asi-indexer-tests:ci .
+          docker build --build-arg NODE_PROTOCOL_PROFILE="$NODE_PROTOCOL_PROFILE" --target test -t asi-indexer-tests:ci .
       - name: Verify production dependency isolation
         run: |
           docker compose run --rm --no-deps indexer python -m pip check

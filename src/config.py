@@ -1,6 +1,6 @@
 """Configuration management for the indexer."""
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     native_token_decimals: int = Field(default=8, ge=0, le=77)
+
+    node_protocol_profile: Literal["classic", "uint256"] = "classic"
 
     # Node Configuration
     node_timeout: int = Field(
@@ -27,6 +29,13 @@ class Settings(BaseSettings):
     grpc_port: int = Field(
         default=40452,
         description="GRPC port for status queries"
+    )
+
+    grpc_max_receive_message_bytes: int = Field(
+        default=64 * 1024 * 1024,
+        ge=1,
+        le=2**31 - 1,
+        description="Maximum size of a gRPC response message in bytes"
     )
 
     node_host: str = Field(

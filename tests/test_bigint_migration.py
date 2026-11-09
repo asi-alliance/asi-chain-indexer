@@ -42,8 +42,7 @@ async def test_migration_preserves_history_and_roundtrips_wide_amounts(monkeypat
         await connection.execute(
             (ROOT / "migrations/000_comprehensive_initial_schema.sql").read_text()
         )
-        await connection.execute(
-            """
+        await connection.execute("""
             INSERT INTO blocks(block_hash, block_number, timestamp, proposer, finalization_status, bonds_map)
             VALUES ('legacy', 0, 1, 'validator', 'finalized', '[{"validator":"validator","stake":9007199254740993}]');
             INSERT INTO deployments(deploy_id, block_hash, block_number, deployer, deployer_address, term, timestamp, sig)
@@ -55,8 +54,7 @@ async def test_migration_preserves_history_and_roundtrips_wide_amounts(monkeypat
             VALUES ('legacy', 0, 'validator', 9007199254740993);
             INSERT INTO balance_states(address, block_hash, block_number, unbonded_balance_dust, unbonded_balance_asi)
             VALUES ('receiver', 'legacy', 0, 123456789, 1.23456789);
-        """
-        )
+        """)
         await connection.execute(
             (ROOT / "migrations/001_bigint_amounts.sql").read_text()
         )
@@ -65,6 +63,16 @@ async def test_migration_preserves_history_and_roundtrips_wide_amounts(monkeypat
         )
         await connection.execute(
             (ROOT / "migrations/003_native_transfer_calls.sql").read_text()
+        )
+        await connection.execute(
+            "UPDATE deployments SET phlo_price=9223372036854775807"
+        )
+        await connection.execute(
+            (ROOT / "migrations/004_uint256_phlo_prices.sql").read_text()
+        )
+        assert (
+            await connection.fetchval("SELECT phlo_price FROM deployments LIMIT 1")
+            == 2**63 - 1
         )
         for table in [
             "blocks",
@@ -215,16 +223,14 @@ async def test_periodic_validator_refresh_updates_precision_after_migration(
         await connection.execute(
             (ROOT / "migrations/000_comprehensive_initial_schema.sql").read_text()
         )
-        await connection.execute(
-            """
+        await connection.execute("""
             INSERT INTO blocks(block_hash, block_number, timestamp, proposer, finalization_status)
             VALUES ('legacy', 0, 1, 'validator', 'finalized');
             INSERT INTO validators(public_key, total_stake)
             VALUES ('validator', 123456789);
             INSERT INTO validator_bonds(block_hash, block_number, validator_public_key, stake)
             VALUES ('legacy', 0, 'validator', 123456789);
-            """
-        )
+            """)
         await connection.execute(
             (ROOT / "migrations/001_bigint_amounts.sql").read_text()
         )
@@ -233,6 +239,9 @@ async def test_periodic_validator_refresh_updates_precision_after_migration(
         )
         await connection.execute(
             (ROOT / "migrations/003_native_transfer_calls.sql").read_text()
+        )
+        await connection.execute(
+            (ROOT / "migrations/004_uint256_phlo_prices.sql").read_text()
         )
         assert (
             await connection.fetchval(
@@ -251,12 +260,16 @@ async def test_periodic_validator_refresh_updates_precision_after_migration(
         indexer = BlockIndexer()
         indexer.client = SimpleNamespace(
             get_bonds=AsyncMock(),
-            get_active_validators=AsyncMock(return_value=["validator"]),
+            get_active_validators=AsyncMock(),
         )
 
         # Refresh at the same indexed height, without processing another block.
         for increment in (0, 1):
             stake = 10**decimals + increment
+            active_key = "validator" if increment == 0 else "new-validator"
+            indexer.client.get_active_validators.return_value = [
+                {"validator": active_key, "stake": stake}
+            ]
             indexer.client.get_bonds.return_value = {
                 "bonds": [
                     {"validator": key, "stake": stake}
@@ -266,16 +279,38 @@ async def test_periodic_validator_refresh_updates_precision_after_migration(
             await indexer._update_validator_states()
             assert indexer._cycle_error is None
             rows = await connection.fetch(
-                "SELECT total_stake, token_decimals FROM validators"
+                "SELECT public_key, total_stake, token_decimals, status FROM validators "
+                "ORDER BY public_key"
             )
             assert len(rows) == 2
             for row in rows:
                 assert (row["total_stake"], row["token_decimals"]) == (stake, decimals)
+                assert row["status"] == (
+                    "active" if row["public_key"] == active_key else "bonded"
+                )
                 assert token_decimal(
                     int(row["total_stake"]), row["token_decimals"]
                 ) == (Decimal(1) + Decimal(increment).scaleb(-decimals))
             assert await database.get_last_indexed_block() == 0
             assert await connection.fetchval("SELECT COUNT(*) FROM blocks") == 1
+
+        indexer.client.get_active_validators.return_value = None
+        await indexer._update_validator_states()
+        assert (
+            await connection.fetch(
+                "SELECT public_key, total_stake, token_decimals, status FROM validators "
+                "ORDER BY public_key"
+            )
+            == rows
+        )
+        indexer.client.get_active_validators.return_value = []
+        await indexer._update_validator_states()
+        assert (
+            await connection.fetchval(
+                "SELECT count(*) FROM validators WHERE status='bonded'"
+            )
+            == 2
+        )
 
         historical = await connection.fetchrow(
             "SELECT stake, token_decimals FROM validator_bonds WHERE block_hash='legacy'"
@@ -318,15 +353,13 @@ async def test_replayed_transfers_replace_false_rows_and_keep_identical_events(
             "003_native_transfer_calls.sql",
         ]:
             await connection.execute((ROOT / "migrations" / migration).read_text())
-        await connection.execute(
-            """
+        await connection.execute("""
             INSERT INTO blocks(block_hash, block_number, timestamp, proposer, finalization_status) VALUES ('block', 1, 1, 'validator', 'finalized');
             INSERT INTO deployments(deploy_id, block_hash, block_number, deployer, deployer_address, term, timestamp, sig)
               VALUES ('deploy', 'block', 1, 'sender', 'sender', 'arbitrary term', 1, 'deploy');
             INSERT INTO transfers(deploy_id, block_hash, block_number, from_address, to_address, amount_dust, amount_asi, timestamp)
               VALUES ('deploy', 'block', 1, 'sender', 'receiver', 2000, 2000, 1);
-        """
-        )
+        """)
         engine = create_async_engine(
             test_url.replace("postgresql://", "postgresql+asyncpg://", 1)
         )
@@ -373,18 +406,47 @@ async def test_replayed_transfers_replace_false_rows_and_keep_identical_events(
         # Exercise the formerly unreachable allocation write path, including
         # the synthetic mint origin and a repeated genesis wallet address.
         term = (ROOT / "tests/fixtures/genesis-vaults.rho").read_text()
-        genesis = {"blockHash": "genesis", "blockNumber": 0, "timestamp": 1,
-                   "token_decimals": 18, "bonds": [], "deploys": [{"term": term}]}
+        genesis = {
+            "blockHash": "genesis",
+            "blockNumber": 0,
+            "timestamp": 1,
+            "token_decimals": 18,
+            "bonds": [],
+            "deploys": [{"term": term}],
+        }
         async with AsyncSession(engine) as session:
-            session.add(Block(block_hash="genesis", block_number=0, timestamp=1,
-                              proposer="validator", finalization_status="finalized", token_decimals=18))
+            session.add(
+                Block(
+                    block_hash="genesis",
+                    block_number=0,
+                    timestamp=1,
+                    proposer="validator",
+                    finalization_status="finalized",
+                    token_decimals=18,
+                )
+            )
             await session.flush()
             await indexer._process_genesis_transfers(session, genesis)
             await indexer._process_genesis_balance_states(session, genesis)
             await session.commit()
-        assert await connection.fetchval("SELECT count(*) FROM transfers WHERE status='genesis_mint' AND from_address='genesis' AND token_decimals=18") == 21
-        assert await connection.fetchval("SELECT count(*) FROM balance_states WHERE unbonded_balance_dust>0 AND token_decimals=18") == 20
-        assert await connection.fetchval("SELECT sum(amount_dust) FROM transfers WHERE status='genesis_mint'") == 10550031996790000000000000000
+        assert (
+            await connection.fetchval(
+                "SELECT count(*) FROM transfers WHERE status='genesis_mint' AND from_address='genesis' AND token_decimals=18"
+            )
+            == 21
+        )
+        assert (
+            await connection.fetchval(
+                "SELECT count(*) FROM balance_states WHERE unbonded_balance_dust>0 AND token_decimals=18"
+            )
+            == 20
+        )
+        assert (
+            await connection.fetchval(
+                "SELECT sum(amount_dust) FROM transfers WHERE status='genesis_mint'"
+            )
+            == 10550031996790000000000000000
+        )
     finally:
         if engine:
             await engine.dispose()
