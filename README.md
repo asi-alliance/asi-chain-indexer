@@ -301,10 +301,10 @@ query the node; they are not an independent fleet monitor.
 
 ## Development and validation
 
-Use CPython 3.13.18 on Linux, or the Docker targets. With a matching interpreter:
+Use CPython 3.14.10 on Linux, or the Docker targets. With a matching interpreter:
 
 ```bash
-python3.13 -m venv .venv
+python3.14 -m venv .venv
 . .venv/bin/activate
 python -m pip install --require-hashes -r requirements-dev.lock
 make protos PYTHON=python

@@ -1,7 +1,7 @@
 # ==============================
 # Stage 1: Build Python dependencies
 # ==============================
-FROM python:3.13.18-slim-bookworm AS python-builder
+FROM python:3.14.10-slim-bookworm AS python-builder
 
 RUN apt-get update && apt-get install -y \
     gcc \
@@ -24,7 +24,7 @@ RUN python scripts/generate-protos.py --profile "$NODE_PROTOCOL_PROFILE" --outpu
 # ==============================
 # Stage 2: Runtime image
 # ==============================
-FROM python:3.13.18-slim-bookworm AS runtime
+FROM python:3.14.10-slim-bookworm AS runtime
 
 RUN apt-get update && apt-get install -y \
     libpq5 \
