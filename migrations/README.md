@@ -1,5 +1,79 @@
 # ASI Chain Indexer Database Migrations
 
+## Tracked migration commands
+
+Alembic wraps the unchanged SQL files 000–004 as forward-only revisions. Commands
+use the explicitly set DATABASE_URL and the installed runtime requirements; no
+psql executable or node connection is needed. They do not run on indexer startup.
+Back up the actual database, stop indexer writers and rehearse upgrades first.
+
+```bash
+python -m src.migrate status
+python -m src.migrate upgrade
+# Equivalent convenience targets:
+make migration-status PYTHON=python
+make migrate PYTHON=python
+```
+
+On an empty public schema, upgrade creates 000–004 and alembic_version. Subsequent
+runs apply only pending revisions. The whole command, including version updates,
+is transactional and holds a per-database advisory lock; a concurrent command is
+rejected. Lock waits are bounded to five seconds and each SQL statement defaults
+to a 300-second timeout. Set MIGRATION_STATEMENT_TIMEOUT_SECONDS (1–86400) deliberately
+for larger rehearsed upgrades.
+
+### Adopt a database initialized by existing SQL/Compose
+
+A pre-existing unversioned schema is never automatically stamped or replayed.
+Check the actual applied migration level and choose it explicitly:
+
+```bash
+# Example: this database already has SQL migrations 000 and 001.
+python -m src.migrate adopt --revision 001
+python -m src.migrate upgrade
+# Equivalent adoption target: make migration-adopt REVISION=001 PYTHON=python
+```
+
+Adoption checks columns/types/defaults, constraints, indexes, views, triggers and
+functions against committed profiles of the shipped SQL revisions. Internal FK
+triggers are checked on both referencing and referenced tables, including their
+enabled mode and deferral settings. Serial sequences are checked for type, start,
+increment, bounds, cache, cycling, and ownership by the expected table/column with
+the same role owner as the table. Missing, detached, reassigned or extra sequences
+owned by managed columns are rejected. Sequence allocation state (`last_value`
+and `is_called`) is retained as data and is not compared with a fresh database.
+A wrong level, missing object or changed owned column is rejected before writing
+a version.
+Unrelated objects and additional indexes are retained. Review custom schemas and
+permissions separately; this structure check does not validate historical data,
+row-level permissions, Hasura metadata or whether history repair was performed.
+The profiles were generated and tested on PostgreSQL 18.6; verify other server
+versions in a disposable rehearsal before adopting them.
+
+Fresh Compose databases still initialize through the five SQL mounts. After that
+initialization, adopt revision 004 once to begin version tracking. Existing Compose
+volumes need adoption of their actual level and an explicit upgrade command, for
+example docker compose run --rm --no-deps indexer python -m src.migrate status
+(with PostgreSQL already running). Do not run native alembic stamp as a shortcut:
+it bypasses the adoption checks.
+
+Once tracked, use the CLI for future upgrades rather than applying SQL manually.
+The original SQL files remain available for historical/manual procedures below.
+Do not edit shipped migrations or their profiles to make a mismatched database pass.
+Add a reviewed forward Alembic revision for a new change (alembic revision -m ...),
+including SQL views/functions/triggers and data transitions. ORM autogeneration is
+not configured as an authority for this hand-written schema. Review the new revision
+and test both an empty database and upgrades with real historical fixtures.
+
+Downgrade is intentionally unsupported: widening exact amounts and changing native
+history do not have a safe generic reverse transformation. Restore a reviewed backup
+with matching application/Hasura versions instead. SQL execution failure leaves
+both schema/data and revision at the prior transaction state.
+
+History repair and Hasura metadata remain explicit steps after a schema upgrade.
+Adoption does not clear native_transfer_backfill_required; upgrading a populated
+legacy database sets the same repair marker as standalone migration 003.
+
 ## Current schema
 
 PostgreSQL engine upgrades are separate from these schema migrations. See
@@ -50,23 +124,24 @@ from `bigint` to `numeric`. With `HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES=true`,
 price query results remain exact strings. No table/view recreation, history repair
 or chain reset is required by 004.
 
-### Integration with the separate Alembic candidate
+### Tracked price migration 004
 
-[PR #37](https://github.com/asi-alliance/asi-chain-indexer/pull/37) is a separate
-migration-runner candidate; this branch retains explicit SQL migrations. Do not
-replace this branch's five-step fresh initialization with an Alembic target that
-stops at 003. Before combining the candidates, add a tracked 004 revision and a
-validated 004 adoption profile/CLI choice. Verify fresh upgrades, tracked-003
-upgrades and adoption of manually initialized 004 databases, preserving historical
-prices and token precision.
+The Alembic head is 004, matching the SQL initialized by current Compose. A tracked
+003 database obtains the checked NUMERIC price columns through `upgrade`; an
+unversioned database already initialized through SQL 004 uses `adopt --revision 004`.
+Both paths preserve existing prices and recorded native8/native18 precision.
+Reload Hasura metadata and adapt typed price filters after the column type change.
 
-SQL 004 starts with a comment before its `BEGIN`/`COMMIT` wrapper. A runner must
-safely remove or reject that wrapper, including leading comments, so its schema
-changes, revision stamp and advisory lock remain in one transaction. Test an
-injected failure after SQL execution and before stamping: both schema and version
-must roll back. Recheck the runner's FK enforcement and owned-sequence adoption
-checks from its review before using the combined candidate. These are integration
-gates; this branch does not implement or validate Alembic adoption.
+The runner removes the standalone BEGIN/COMMIT wrapper, including leading/trailing
+comments, and rejects unexpected transaction-control statements. Function bodies,
+quoted identifiers and literals retain their contents. SQL, the revision stamp and
+the advisory lock stay in the outer transaction; failure after SQL execution and
+before stamping rolls the price columns and version back to 003.
+
+The separate [adoption review findings](https://github.com/asi-alliance/asi-chain-indexer/pull/37#issuecomment-6736839084)
+on internal FK-trigger enforcement and owned-sequence structure remain open.
+The current catalog profiles do not validate those properties; the current-dev
+integration and 004 support do not resolve those additional adoption checks.
 
 Legacy migrations were consolidated into `000_comprehensive_initial_schema.sql`
 and removed from the active tree. Earlier versions remain available in Git history.

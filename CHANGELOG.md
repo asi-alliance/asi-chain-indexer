@@ -5,6 +5,7 @@ All notable changes to the ASI-Chain Indexer project will be documented in this 
 ## [Unreleased]
 
 ### Changed
+- Add explicit Alembic status/upgrade/adopt commands around existing SQL migrations, with revision tracking, schema validation, transactional rollback and concurrent-run protection.
 - Upgrade the supported Docker and CI interpreter to Python 3.14.10 after clean-image and PostgreSQL/Hasura compatibility validation.
 - Upgrade the Docker/CI baseline to Python 3.13.18, lock transitive Python dependencies with hashes, and separate production packages from test/development tools.
 - Refresh pytest, pytest-asyncio, coverage, Black, Flake8 and mypy; remove unused aiofiles typing stubs.
@@ -19,7 +20,7 @@ All notable changes to the ASI-Chain Indexer project will be documented in this 
 - 🔄 **pycryptodome 3.20.0 → 4.4.0** — the only use is `Crypto.Hash.keccak` in `src/addr.py`, covered by the address derivation tests.
 
 ### Removed
-- ❌ **`alembic`, `tenacity`, `aiohttp-cors`** — unused runtime pins; the schema is applied from `migrations/*.sql` and retries live in `src/resilience.py`.
+- ❌ **`tenacity`, `aiohttp-cors`** — unused runtime pins; retries live in `src/resilience.py`. Alembic 1.20.1 is now used by the explicit migration commands.
 - ❌ **`src/cache.py`** — dead Redis module: nothing imported it, `redis` was never in `requirements.txt`, and `settings.redis_url` never existed. Remove it rather than add an unused dependency.
 
 ## [2.3.0] - 2026-09-08

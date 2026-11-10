@@ -261,10 +261,13 @@ Read [POSTGRES_UPGRADE.md](POSTGRES_UPGRADE.md) and the
 - Back up the actual database and Hasura metadata, stop writers and rehearse
   the upgrade. PostgreSQL 14 data requires dump/restore into a new PostgreSQL 18.6
   cluster; retain the old volume and matching images for rollback.
-- Apply only missing SQL migrations, in order. A new database needs 000–004;
-  an existing version-000 database needs 001–004 **once each**. Compose restarts
-  and SQLAlchemy `create_all()` do not upgrade existing schemas. There is
-  currently no Alembic environment or revision-tracked migration runner.
+- On an empty database, `python -m src.migrate upgrade` applies tracked revisions
+  000–004. For an existing unversioned SQL schema, inspect its actual level, use
+  `python -m src.migrate adopt --revision REVISION` once, selecting its actual
+  revision from `000`, `001`, `002`, `003` or `004`, then run
+  `python -m src.migrate upgrade`. A database already tracked at
+  003 upgrades to 004. Compose restarts and SQLAlchemy `create_all()` do not upgrade
+  existing schemas. See the migration guide for validation and backup requirements.
 - Populated databases marked for native-transfer backfill must complete
   `python -m src.reindex_transfers` with writes stopped. Do not manually clear
   the repair flag. Repair preserves blocks, the sync cursor and recorded precision.

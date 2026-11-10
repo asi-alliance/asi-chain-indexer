@@ -56,8 +56,9 @@
 
 - Read [migrations/README.md](migrations/README.md) and
   [POSTGRES_UPGRADE.md](POSTGRES_UPGRADE.md) before schema or deployment changes.
-  Current migrations are explicit SQL; there is no Alembic environment/revision
-  runner. Compose init scripts apply only to an empty PostgreSQL volume, and
+  Alembic wraps the shipped SQL revisions; use `python -m src.migrate` for status,
+  explicit validated adoption and upgrades. Never bypass adoption using a bare stamp.
+  Compose init scripts apply only to an empty PostgreSQL volume, and
   SQLAlchemy `create_all()` does not upgrade an existing schema.
 - Preserve already shipped migrations. Add reviewed forward migrations when needed;
   include SQL views, functions, triggers, data transitions and Hasura consequences,
