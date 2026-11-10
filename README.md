@@ -91,12 +91,13 @@ legacy nodes without token metadata support the eight-decimal profile. Each row
 retains its recorded precision; changing the setting does not rescale historical
 balances or change the chain denomination.
 
-Select the wire contract explicitly with `NODE_PROTOCOL_PROFILE`:
+The default wire contract is `uint256`. For legacy nodes, explicitly select
+`NODE_PROTOCOL_PROFILE=classic` at build and runtime:
 
 | Profile | Pinned node schema | Monetary wire fields |
 |---|---|---|
-| `classic` (default) | [#896 at 92903a1](https://github.com/F1R3FLY-io/f1r3node-rust/commit/92903a1d81c49fa0a035fb7ee729002e38428280) | Legacy int64 stakes/prices; exact transfer negotiation and authoritative `amountRaw` |
-| `uint256` | [merged #881 at 6233501](https://github.com/F1R3FLY-io/f1r3node-rust/commit/6233501064492d0cac9c7ebc598daf70c501a215) | Decimal-string stakes/prices/`amountRaw`; 32-byte big-endian pending deploy prices; no exact-transfer flags |
+| `uint256` (default) | [merged #881 at 6233501](https://github.com/F1R3FLY-io/f1r3node-rust/commit/6233501064492d0cac9c7ebc598daf70c501a215) | Decimal-string stakes/prices/`amountRaw`; 32-byte big-endian pending deploy prices; no exact-transfer flags |
+| `classic` (explicit legacy profile) | [#896 at 92903a1](https://github.com/F1R3FLY-io/f1r3node-rust/commit/92903a1d81c49fa0a035fb7ee729002e38428280) | Legacy int64 stakes/prices; exact transfer negotiation and authoritative `amountRaw` |
 
 This includes the exact-transfer and replay-history hardening from
 [#22](https://github.com/asi-alliance/asi-chain-indexer/pull/22). Missing or malformed
@@ -104,18 +105,26 @@ compact transfer amounts stay unknown; replay remains authoritative for the ledg
 Signed rejected attempts are preserved, including requests outside uint256.
 `GRPC_MAX_RECEIVE_MESSAGE_BYTES` bounds responses (default 64 MiB, range 1–2147483647).
 
-For a uint256 image and local Compose installation:
+For the default uint256 image and local Compose installation:
 
 ```bash
-# Set NODE_PROTOCOL_PROFILE=uint256 in .env alongside the node's actual precision.
 docker compose build indexer
 # After the reviewed database/metadata upgrade:
 docker compose up -d --force-recreate indexer
 ```
 
-For a standalone build use `docker build --build-arg NODE_PROTOCOL_PROFILE=uint256 .`.
-For local Python use `NODE_PROTOCOL_PROFILE=uint256 make protos PYTHON=python` and
-run with the same environment setting. The image retains its build profile as the
+Standalone `docker build .` and local `make protos PYTHON=python` also default to
+uint256 when `NODE_PROTOCOL_PROFILE` is unset. Compose honors an existing profile
+selection in `.env`.
+
+For a legacy node, set `NODE_PROTOCOL_PROFILE=classic` in `.env` before the Compose
+build and keep it set for runtime. For a standalone legacy image, use
+`docker build --build-arg NODE_PROTOCOL_PROFILE=classic .`. For local Python, export
+`NODE_PROTOCOL_PROFILE=classic` before both generating bindings and running the
+indexer. The legacy profile keeps the existing `classic` name.
+
+Rebuild the image or regenerate bindings when changing profiles. A runtime override
+alone cannot change compiled bindings. The image retains its build profile as the
 runtime default. An environment/binding mismatch fails immediately. Monetary
 messages reject incompatible wire fields on every read, including after a node
 schema switch or reconnect; rejected blocks cannot advance the sync cursor.

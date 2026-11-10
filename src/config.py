@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     native_token_decimals: int = Field(default=8, ge=0, le=77)
 
-    node_protocol_profile: Literal["classic", "uint256"] = "classic"
+    node_protocol_profile: Literal["classic", "uint256"] = "uint256"
 
     # Node Configuration
     node_timeout: int = Field(

@@ -30,7 +30,10 @@ share the selected definitions. Report event definitions and typed parameters
 (including `big_int_value`) come from the same pinned set. No peer writes, deploy
 signing or stored-node-state migration are performed by the indexer.
 
-Select `NODE_PROTOCOL_PROFILE=uint256` for generation/build and runtime together.
-Default `classic` remains compatible with the pre-#881 contract; an explicit
-profile does not select token precision or the separate cost-accounting schema.
+Generation/build and runtime default to `uint256`. Select
+`NODE_PROTOCOL_PROFILE=classic` explicitly at both stages for legacy nodes using
+the pre-#881 contract. The legacy profile retains its existing `classic` name.
+Rebuild/regenerate when changing profiles; a runtime setting alone cannot change
+the generated bindings. Profile selection does not select token precision or the
+separate cost-accounting schema.
 See the main README for SQL migration 004 and the remaining live acceptance gate.

@@ -13,7 +13,7 @@ def main():
     parser.add_argument(
         "--profile",
         choices=("classic", "uint256"),
-        default=os.environ.get("NODE_PROTOCOL_PROFILE", "classic"),
+        default=os.environ.get("NODE_PROTOCOL_PROFILE", "uint256"),
     )
     parser.add_argument("--output", type=Path, default=Path("src/grpc_stubs"))
     args = parser.parse_args()
