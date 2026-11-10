@@ -174,6 +174,91 @@ async def test_partial_schema_is_not_stamped(isolated, change):
     assert await conn.fetchval("SELECT to_regclass('alembic_version')") is None
 
 
+@pytest.mark.parametrize("revision", [3, 4], ids=["003", "004"])
+@pytest.mark.parametrize(
+    "table,mode",
+    [
+        ("native_transfer_calls", "DISABLE"),
+        ("blocks", "DISABLE"),
+        ("native_transfer_calls", "ENABLE REPLICA"),
+    ],
+    ids=["disabled-child", "disabled-parent", "replica-only"],
+)
+@pytest.mark.asyncio
+async def test_adoption_rejects_changed_fk_enforcement(isolated, revision, table, mode):
+    conn, url = isolated
+    await apply_through(conn, revision)
+    trigger = await conn.fetchval(
+        "SELECT t.tgname FROM pg_trigger t "
+        "JOIN pg_constraint c ON c.oid=t.tgconstraint "
+        "WHERE t.tgrelid=$1::regclass AND t.tgisinternal AND c.contype='f' "
+        "ORDER BY t.tgname LIMIT 1",
+        table,
+    )
+    assert trigger is not None
+    await conn.execute(f'ALTER TABLE {table} {mode} TRIGGER "{trigger}"')
+    code, _, error = await cli(url, "adopt", "--revision", f"{revision:03}")
+    assert code != 0 and "fk-trigger:" in error
+    assert await conn.fetchval("SELECT to_regclass('alembic_version')") is None
+    assert await conn.fetchval("SELECT count(*) FROM transfers") == 1
+
+
+@pytest.mark.parametrize("revision", [0, 4], ids=["000", "004"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "ALTER SEQUENCE transfers_id_seq AS smallint MAXVALUE 2",
+        "ALTER SEQUENCE transfers_id_seq INCREMENT BY 2",
+        "ALTER SEQUENCE transfers_id_seq MINVALUE 0",
+        "ALTER SEQUENCE transfers_id_seq MAXVALUE 2",
+        "ALTER SEQUENCE transfers_id_seq START WITH 2",
+        "ALTER SEQUENCE transfers_id_seq CACHE 2",
+        "ALTER SEQUENCE transfers_id_seq CYCLE",
+        "ALTER SEQUENCE transfers_id_seq OWNED BY NONE",
+        "ALTER SEQUENCE transfers_id_seq OWNED BY blocks.block_number",
+        "CREATE SEQUENCE unexpected_seq OWNED BY transfers.id",
+    ],
+    ids=[
+        "type", "increment", "minimum", "maximum", "start", "cache", "cycle",
+        "unowned", "wrong-column", "extra-owned",
+    ],
+)
+@pytest.mark.asyncio
+async def test_adoption_rejects_changed_owned_sequence(isolated, revision, change):
+    conn, url = isolated
+    await apply_through(conn, revision)
+    before = await conn.fetchrow("SELECT * FROM transfers")
+    await conn.execute(change)
+    code, _, error = await cli(url, "adopt", "--revision", f"{revision:03}")
+    assert code != 0 and "sequence:" in error
+    assert await conn.fetchval("SELECT to_regclass('alembic_version')") is None
+    assert await conn.fetchrow("SELECT * FROM transfers") == before
+
+
+@pytest.mark.parametrize("is_called", [False, True])
+@pytest.mark.asyncio
+async def test_adoption_preserves_sequence_progress_and_unrelated_objects(
+    isolated, is_called
+):
+    conn, url = isolated
+    await apply_through(conn, 4)
+    await conn.execute("SELECT setval('transfers_id_seq', 1000, $1)", is_called)
+    await conn.execute(
+        "CREATE TABLE unrelated (id SERIAL PRIMARY KEY); "
+        "CREATE SEQUENCE unrelated_seq AS smallint INCREMENT BY 2 MAXVALUE 7"
+    )
+    code, _, error = await cli(url, "adopt", "--revision", "004")
+    assert code == 0, error
+    assert await cli(url, "status") == (0, "004\n", "")
+    assert (await cli(url, "upgrade"))[0] == 0
+    assert await conn.fetchval("SELECT nextval('transfers_id_seq')") == (
+        1001 if is_called else 1000
+    )
+    assert await conn.fetchval("SELECT count(*) FROM transfers") == 1
+    assert await conn.fetchval("SELECT to_regclass('unrelated')") is not None
+    assert await conn.fetchval("SELECT to_regclass('unrelated_seq')") is not None
+
+
 @pytest.mark.asyncio
 async def test_wrong_revision_and_repeated_adoption_are_rejected(isolated):
     conn, url = isolated

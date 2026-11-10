@@ -19,7 +19,7 @@ REVISIONS = ("000", "001", "002", "003", "004")
 # SQL definitions, not data, are inspected. Extension-owned objects are excluded.
 CATALOG_SQL = """
 WITH relations AS (
-    SELECT c.oid, c.relname, c.relkind FROM pg_class c
+    SELECT c.oid, c.relname, c.relkind, c.relowner FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = 'public' AND c.relkind IN ('r', 'v')
       AND c.relname != 'alembic_version'
@@ -46,6 +46,33 @@ WITH relations AS (
     SELECT 'trigger:' || r.relname || ':' || t.tgname,
            json_build_array(pg_get_triggerdef(t.oid), t.tgenabled)::text
     FROM relations r JOIN pg_trigger t ON t.tgrelid = r.oid WHERE NOT t.tgisinternal
+    UNION ALL
+    -- Internal trigger names contain database-local OIDs; use their FK and role.
+    SELECT 'fk-trigger:' || r.relname || ':' || c.conname || ':' ||
+           n.nspname || '.' || target.relname || ':' || p.proname,
+           json_build_array(pn.nspname, t.tgtype, t.tgenabled,
+                            t.tgdeferrable, t.tginitdeferred)::text
+    FROM relations r JOIN pg_constraint c ON c.conrelid = r.oid AND c.contype = 'f'
+    JOIN pg_trigger t ON t.tgconstraint = c.oid AND t.tgisinternal
+    JOIN pg_class target ON target.oid = t.tgrelid
+    JOIN pg_namespace n ON n.oid = target.relnamespace
+    JOIN pg_proc p ON p.oid = t.tgfoid
+    JOIN pg_namespace pn ON pn.oid = p.pronamespace
+    UNION ALL
+    -- Sequence allocation state is data; only structure and ownership are compared.
+    SELECT 'sequence:' || r.relname || ':' || a.attname || ':' ||
+           n.nspname || '.' || s.relname,
+           json_build_array(format_type(q.seqtypid, NULL), q.seqstart,
+                            q.seqincrement, q.seqmin, q.seqmax, q.seqcache,
+                            q.seqcycle, d.deptype, s.relowner = r.relowner)::text
+    FROM relations r JOIN pg_attribute a ON a.attrelid = r.oid
+    JOIN pg_depend d ON d.refclassid = 'pg_class'::regclass AND d.refobjid = r.oid
+                    AND d.refobjsubid = a.attnum AND d.classid = 'pg_class'::regclass
+                    AND d.deptype IN ('a', 'i')
+    JOIN pg_class s ON s.oid = d.objid AND s.relkind = 'S'
+    JOIN pg_namespace n ON n.oid = s.relnamespace
+    JOIN pg_sequence q ON q.seqrelid = s.oid
+    WHERE a.attnum > 0 AND NOT a.attisdropped
     UNION ALL
     SELECT 'function:' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')',
            pg_get_functiondef(p.oid)
@@ -117,8 +144,8 @@ def validate_adoption(connection, revision):
         (ROOT / "migration_env" / "profiles" / (revision + ".json")).read_text()
     )
     actual = catalog(connection)
-    # Additional unrelated objects/indexes are allowed. Added columns or later owned
-    # tables are not: they can indicate a partially applied or misidentified revision.
+    # Extra columns/sequences on managed tables and later owned tables can indicate
+    # a partially applied revision. Unrelated objects/indexes are still allowed.
     profiles = [
         json.loads((ROOT / "migration_env" / "profiles" / (r + ".json")).read_text())
         for r in REVISIONS
@@ -134,7 +161,7 @@ def validate_adoption(connection, revision):
     mismatches.update(
         key
         for key in actual
-        if key.startswith("column:")
+        if key.startswith(("column:", "sequence:"))
         and key.split(":")[1] in owned_names
         and key not in expected
     )

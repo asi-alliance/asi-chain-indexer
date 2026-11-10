@@ -35,8 +35,15 @@ python -m src.migrate upgrade
 ```
 
 Adoption checks columns/types/defaults, constraints, indexes, views, triggers and
-functions against committed profiles of the shipped SQL revisions. A wrong level,
-missing object or changed owned column is rejected before writing a version.
+functions against committed profiles of the shipped SQL revisions. Internal FK
+triggers are checked on both referencing and referenced tables, including their
+enabled mode and deferral settings. Serial sequences are checked for type, start,
+increment, bounds, cache, cycling, and ownership by the expected table/column with
+the same role owner as the table. Missing, detached, reassigned or extra sequences
+owned by managed columns are rejected. Sequence allocation state (`last_value`
+and `is_called`) is retained as data and is not compared with a fresh database.
+A wrong level, missing object or changed owned column is rejected before writing
+a version.
 Unrelated objects and additional indexes are retained. Review custom schemas and
 permissions separately; this structure check does not validate historical data,
 row-level permissions, Hasura metadata or whether history repair was performed.
