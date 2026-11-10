@@ -132,6 +132,11 @@ Validator refreshes read finalized stakes over gRPC independently of HTTP activi
 membership. When HTTP membership is unavailable, stakes and recorded precision
 still refresh while existing activity statuses are preserved. New validators
 start as `bonded`; a successful HTTP response can update their activity status.
+Stored validators that are not in the finalized bond set become `inactive`. If such
+a validator bonds again, the next refresh sets `active` or `bonded` (`bonded` when
+HTTP membership is unavailable). A failed finalized-block read, or a finalized
+block without bonds, is not treated as membership evidence: stored statuses and
+stakes are kept unchanged until a later refresh reads a non-empty bond set.
 
 `python analyze_transfers.py` reads successful ledger transfers, including
 `genesis_mint` and `genesis_bond` records, through Hasura
