@@ -1,5 +1,8 @@
+import asyncio
 from decimal import Decimal, Inexact, Rounded, localcontext
+import random
 import sys
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -8,9 +11,10 @@ import pytest
 from src.amounts import (
     MAX_AMOUNT,
     amount,
+    canonical_signed_decimal,
     integer_json,
-    parse_signed_integer,
     signed_integer_text,
+    signed_integer_text_off_loop,
     token_decimal,
 )
 from src.block_indexer import BlockIndexer
@@ -33,8 +37,73 @@ def test_signed_persistence_conversions_ignore_context_precision_and_digit_limit
         context.traps[Inexact] = True
         context.traps[Rounded] = True
         assert signed_integer_text(raw) == text
-        assert parse_signed_integer(text) == raw
+        assert canonical_signed_decimal(text) == text
     assert sys.get_int_max_str_digits() == digit_limit
+
+
+def unlimited_str(value):
+    limit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(0)
+    try:
+        return str(value)
+    finally:
+        sys.set_int_max_str_digits(limit)
+
+
+def unlimited_int(text):
+    limit = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(0)
+    try:
+        return int(text)
+    finally:
+        sys.set_int_max_str_digits(limit)
+
+
+@pytest.mark.parametrize(
+    "bits", [1, 2, 4095, 4096, 4097, 8191, 8192, 8193, 65536, 65537, 200003]
+)
+@pytest.mark.parametrize("sign", [1, -1], ids=["positive", "negative"])
+def test_signed_integer_text_is_exact_across_split_boundaries(bits, sign):
+    rng = random.Random(bits)
+    for value in (
+        (1 << bits) - 1,
+        1 << (bits - 1),
+        rng.getrandbits(bits) | (1 << (bits - 1)),
+    ):
+        assert signed_integer_text(sign * value) == unlimited_str(sign * value)
+    assert signed_integer_text(0) == "0"
+
+
+def test_two_million_digit_conversion_time_is_recorded(record_testsuite_property):
+    digits = "9" + "".join(random.Random(28).choices("0123456789", k=1_999_999))
+    value = -unlimited_int(digits)
+    start = time.perf_counter()
+    text = signed_integer_text(value)
+    elapsed = time.perf_counter() - start
+    record_testsuite_property(
+        "signed_integer_text_2m_digits_seconds", round(elapsed, 3)
+    )
+    assert text == "-" + digits
+    # The former Decimal(int) conversion took about a minute for this value.
+    assert elapsed < 10
+
+
+@pytest.mark.asyncio
+async def test_large_conversion_keeps_the_event_loop_responsive():
+    value = -(10 ** 1_999_999 + 7)
+    loop = asyncio.get_running_loop()
+    conversion = asyncio.ensure_future(signed_integer_text_off_loop(value))
+    ticks, worst, last = 0, 0.0, loop.time()
+    while not conversion.done():
+        await asyncio.sleep(0.01)
+        now = loop.time()
+        worst, last, ticks = max(worst, now - last), now, ticks + 1
+    assert await conversion == "-1" + "0" * 1_999_998 + "7"
+    assert ticks > 1
+    assert worst < 0.25
+    assert await signed_integer_text_off_loop(-5) == "-5"
+    with pytest.raises(ValueError, match="exact integer"):
+        await signed_integer_text_off_loop(True)
 
 
 @pytest.mark.parametrize(
@@ -42,7 +111,7 @@ def test_signed_persistence_conversions_ignore_context_precision_and_digit_limit
 )
 def test_persisted_signed_amounts_require_canonical_integer_text(text):
     with pytest.raises(ValueError, match="canonical signed integer"):
-        parse_signed_integer(text)
+        canonical_signed_decimal(text)
 
 
 @pytest.mark.parametrize("value", [True, 1.0, Decimal(1)])

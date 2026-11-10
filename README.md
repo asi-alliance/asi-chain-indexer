@@ -172,8 +172,12 @@ advancement. Old nodes can omit BigInt transfers from compact summaries; source
 terms and compact summaries never replace execution-derived ledger movements.
 Signed rejected requests retain every digit through persistence and later result
 correlation, including values above Python's 4,300-digit conversion limit, without
-changing that limit or rounding with the Decimal context. Successful movements
-still require a positive uint256 amount.
+changing that limit or rounding with the Decimal context. There is no size
+maximum: the stored `requested_amount` stays canonical decimal text. The binary
+to decimal conversion is subquadratic (about 0.8 s for 2,000,000 digits) and runs
+in a worker process for values above 2^16 bits, so `/health` and metrics keep
+answering while such a block is indexed. Later blocks compare the stored text and
+never convert it back. Successful movements still require a positive uint256 amount.
 
 Classic #896 acceptance must use its pinned historical node: compare the legacy
 range error with the exact response for the same wide transfer. Current #881

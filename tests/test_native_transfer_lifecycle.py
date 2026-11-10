@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import os
 from types import SimpleNamespace
@@ -6,6 +7,7 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 from pathlib import Path
 
+from aiohttp.test_utils import TestClient, TestServer
 import asyncpg
 import pytest
 import pytest_asyncio
@@ -13,6 +15,7 @@ import pytest_asyncio
 from src.amounts import MAX_AMOUNT
 from src.block_indexer import BlockIndexer
 from src.database import Database
+from src.monitoring import MonitoringServer
 from src.native_transfers import reconcile_block, reconcile_completed_duplicates
 from src.transfer_reports import ReportUnavailable, block_events
 from test_transfer_reports import expr, payment, report
@@ -274,6 +277,53 @@ async def test_huge_rejected_attempt_preserves_replay_history_and_advances_curso
     assert (
         await ledger.conn.fetchval("SELECT count(*) FROM native_transfer_results") == 1
     )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_two_million_digit_attempt_keeps_health_responsive(ledger):
+    digits = 2_000_000
+    raw = -(10 ** (digits - 1) + 7)
+    exact = "-1" + "0" * (digits - 2) + "7"
+    events = payment(raw, success=False)
+    monitor = MonitoringServer(None)
+
+    async def while_serving_health(client, details, replay):
+        ledger.indexer.client.get_block_report.return_value = replay
+        loop = asyncio.get_running_loop()
+        work = asyncio.ensure_future(ledger.indexer._process_block(details))
+        gaps, last = [], loop.time()
+        while not work.done():
+            response = await client.get("/health")
+            assert response.status == 200
+            assert (await response.json())["status"] == "healthy"
+            gaps.append(loop.time() - last)
+            last = loop.time()
+            await asyncio.sleep(0.01)
+        await work
+        return gaps
+
+    async with TestClient(TestServer(monitor.app)) as client:
+        origin = await ledger.add(
+            1, "origin", [("start", report(events[:1]))], process=False
+        )
+        gaps = await while_serving_health(client, *origin)
+        assert await ledger.conn.fetchval(
+            "SELECT requested_amount FROM native_transfer_calls"
+        ) == exact
+        completion = await ledger.add(
+            2, "completion", [("finish", report(events[1:]))], ["origin"],
+            process=False,
+        )
+        gaps += await while_serving_health(client, *completion)
+
+    # Longest time without a /health answer while both blocks were processed.
+    assert max(gaps) < 0.5
+    lifecycle = await ledger.conn.fetchrow("SELECT * FROM native_transfer_lifecycle")
+    assert lifecycle["requested_amount"] == exact
+    assert lifecycle["status"] == "rejected"
+    assert lifecycle["completion_deploy_id"] == "finish"
+    assert await ledger.conn.fetchval("SELECT count(*) FROM transfers") == 0
 
 
 @pytest.mark.integration
