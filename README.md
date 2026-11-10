@@ -85,11 +85,14 @@ Raw token amounts are checked Python integers stored as uint256-range
 `NUMERIC(78,0)`. Human-readable amounts use exact decimal strings. Keep
 `HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES=true` and preserve strings in consumers.
 
-`NATIVE_TOKEN_DECIMALS` defaults to **8** and must match node token metadata.
-Set **18** only for a chain declaring 18 decimals. Startup checks this setting;
-legacy nodes without token metadata support the eight-decimal profile. Each row
-retains its recorded precision; changing the setting does not rescale historical
-balances or change the chain denomination.
+The generic `NATIVE_TOKEN_DECIMALS` fallback is **8** for legacy compatibility.
+For the selected ASI network, explicitly set `NATIVE_TOKEN_DECIMALS=18`, as shown
+in the environment examples. This setting must match node token metadata;
+choosing the uint256 wire profile does not choose the token's precision.
+Startup checks the configured precision. Legacy nodes without token metadata
+support the eight-decimal profile. Each row retains its recorded precision;
+changing the setting does not rescale historical balances or change the chain
+denomination.
 
 The default wire contract is `uint256`. For legacy nodes, explicitly select
 `NODE_PROTOCOL_PROFILE=classic` at build and runtime:
@@ -219,7 +222,7 @@ HTTP_PORT=40403
 DATABASE_URL=postgresql://indexer:indexer_pass@postgres:5432/asichain
 HASURA_ADMIN_SECRET=replace-with-a-long-random-secret
 HASURA_BASE=http://localhost:8080
-NATIVE_TOKEN_DECIMALS=8
+NATIVE_TOKEN_DECIMALS=18
 ```
 
 Replace the observer hostname and verify the node's actual host port mappings.
