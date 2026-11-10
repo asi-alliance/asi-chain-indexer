@@ -8,7 +8,7 @@ from sqlalchemy.dialects.postgresql import ARRAY, insert
 from sqlalchemy.orm import aliased
 
 from src.config import settings
-from src.amounts import parse_signed_integer, signed_integer_text
+from src.amounts import amount, canonical_signed_decimal, signed_integer_text_off_loop
 from src.models import (
     Block,
     BlockParent,
@@ -159,7 +159,7 @@ def stored_call(call):
         "return_channel": call.return_channel,
         "from_address": call.from_address,
         "to_address": call.to_address,
-        "amount": parse_signed_integer(call.requested_amount),
+        "amount": canonical_signed_decimal(call.requested_amount),
         "token_decimals": call.token_decimals,
     }
 
@@ -246,7 +246,7 @@ async def reconcile_block(session, block_info, deployments, traces, client=None)
                     )
                 }
                 values.update(
-                    requested_amount=signed_integer_text(data["amount"]),
+                    requested_amount=await signed_integer_text_off_loop(data["amount"]),
                     timestamp=block_info["timestamp"],
                 )
                 existing = await session.get(NativeTransferCall, data["id"])
@@ -303,7 +303,7 @@ async def reconcile_block(session, block_info, deployments, traces, client=None)
                         ),
                         "from_address": call["from_address"],
                         "to_address": call["to_address"],
-                        "amount": call["amount"],
+                        "amount": amount(call["amount"]),
                         "token_decimals": call["token_decimals"],
                         "native_result_id": result_id,
                         "timestamp": block_info["timestamp"],
