@@ -132,6 +132,11 @@ Validator refreshes read finalized stakes over gRPC independently of HTTP activi
 membership. When HTTP membership is unavailable, stakes and recorded precision
 still refresh while existing activity statuses are preserved. New validators
 start as `bonded`; a successful HTTP response can update their activity status.
+Stored validators that are not in the finalized bond set become `inactive`. If such
+a validator bonds again, the next refresh sets `active` or `bonded` (`bonded` when
+HTTP membership is unavailable). A failed finalized-block read, or a finalized
+block without bonds, is not treated as membership evidence: stored statuses and
+stakes are kept unchanged until a later refresh reads a non-empty bond set.
 
 `python analyze_transfers.py` reads successful ledger transfers, including
 `genesis_mint` and `genesis_bond` records, through Hasura
@@ -167,8 +172,12 @@ advancement. Old nodes can omit BigInt transfers from compact summaries; source
 terms and compact summaries never replace execution-derived ledger movements.
 Signed rejected requests retain every digit through persistence and later result
 correlation, including values above Python's 4,300-digit conversion limit, without
-changing that limit or rounding with the Decimal context. Successful movements
-still require a positive uint256 amount.
+changing that limit or rounding with the Decimal context. There is no size
+maximum: the stored `requested_amount` stays canonical decimal text. The binary
+to decimal conversion is subquadratic (about 0.8 s for 2,000,000 digits) and runs
+in a worker process for values above 2^16 bits, so `/health` and metrics keep
+answering while such a block is indexed. Later blocks compare the stored text and
+never convert it back. Successful movements still require a positive uint256 amount.
 
 Classic #896 acceptance must use its pinned historical node: compare the legacy
 range error with the exact response for the same wide transfer. Current #881
