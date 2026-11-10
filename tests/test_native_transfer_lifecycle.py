@@ -143,6 +143,82 @@ async def test_block_bonds_preserve_observed_activity_when_http_is_unavailable(l
     ) == 3
 
 
+async def _validator_statuses(ledger):
+    return dict(await ledger.conn.fetch("SELECT public_key, status FROM validators"))
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_validator_outside_finalized_bonds_becomes_inactive_and_rebonds(ledger):
+    bonds = [{"validator": key, "stake": 100} for key in ("stayer", "leaver")]
+    client = ledger.indexer.client
+    client.get_bonds = AsyncMock(return_value={"bonds": bonds})
+    client.get_active_validators = AsyncMock(
+        return_value=[{"validator": key, "stake": 100} for key in ("stayer", "leaver")]
+    )
+    await ledger.indexer._update_validator_states()
+    assert await _validator_statuses(ledger) == {"stayer": "active", "leaver": "active"}
+
+    client.get_bonds.return_value = {"bonds": bonds[:1]}
+    client.get_active_validators.return_value = [{"validator": "stayer", "stake": 100}]
+    await ledger.indexer._update_validator_states()
+    assert await _validator_statuses(ledger) == {"stayer": "active", "leaver": "inactive"}
+    assert await ledger.conn.fetchval(
+        "SELECT total_stake FROM validators WHERE public_key='leaver'"
+    ) == 100
+
+    # Rebonding restores a bonded status even while HTTP membership is unavailable.
+    client.get_bonds.return_value = {"bonds": bonds}
+    client.get_active_validators.return_value = None
+    await ledger.indexer._update_validator_states()
+    assert await _validator_statuses(ledger) == {"stayer": "active", "leaver": "bonded"}
+
+    client.get_bonds.return_value = {"bonds": bonds[:1]}
+    await ledger.indexer._update_validator_states()
+    client.get_active_validators.return_value = [
+        {"validator": key, "stake": 100} for key in ("stayer", "leaver")
+    ]
+    client.get_bonds.return_value = {"bonds": bonds}
+    await ledger.indexer._update_validator_states()
+    assert await _validator_statuses(ledger) == {"stayer": "active", "leaver": "active"}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        AsyncMock(return_value=None),
+        AsyncMock(return_value={"bonds": []}),
+        AsyncMock(side_effect=RuntimeError("node unavailable")),
+    ],
+    ids=["unavailable", "empty", "error"],
+)
+async def test_failed_or_empty_bond_read_keeps_stored_validator_statuses(
+    ledger, failure
+):
+    bonds = [{"validator": key, "stake": 100} for key in ("first", "second")]
+    client = ledger.indexer.client
+    client.get_bonds = AsyncMock(return_value={"bonds": bonds})
+    client.get_active_validators = AsyncMock(
+        return_value=[{"validator": "first", "stake": 100}]
+    )
+    await ledger.indexer._update_validator_states()
+    before = await ledger.conn.fetch(
+        "SELECT public_key, status, updated_at FROM validators ORDER BY public_key"
+    )
+    assert {row["public_key"]: row["status"] for row in before} == {
+        "first": "active",
+        "second": "bonded",
+    }
+
+    client.get_bonds = failure
+    await ledger.indexer._update_validator_states()
+    assert await ledger.conn.fetch(
+        "SELECT public_key, status, updated_at FROM validators ORDER BY public_key"
+    ) == before
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sign", [1, -1], ids=["positive", "negative"])

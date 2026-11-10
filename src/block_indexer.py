@@ -12,7 +12,7 @@ import aiohttp
 import asyncpg
 import grpc
 import structlog
-from sqlalchemy import select, text, delete
+from sqlalchemy import case, delete, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import InterfaceError, OperationalError
 
@@ -746,6 +746,9 @@ class BlockIndexer:
                 return
 
             bonds = bonds_data.get("bonds", [])
+            if not bonds:
+                logger.warning("Finalized block has no bonds; keeping stored validator statuses")
+                return
 
             # Get active validators
             active_validators = await self.client.get_active_validators()
@@ -783,11 +786,23 @@ class BlockIndexer:
                             "total_stake": stake,
                             "token_decimals": stmt.excluded.token_decimals,
                             "last_seen_block": current_block,
-                            "status": status if active_keys is not None else Validator.status,
+                            "status": status if active_keys is not None else case(
+                                (Validator.status == "inactive", "bonded"),
+                                else_=Validator.status,
+                            ),
                             "updated_at": utc_now()
                         }
                     )
                     await session.execute(stmt)
+
+                await session.execute(
+                    update(Validator)
+                    .where(
+                        Validator.public_key.not_in([bond["validator"] for bond in bonds]),
+                        Validator.status.is_distinct_from("inactive"),
+                    )
+                    .values(status="inactive", updated_at=utc_now())
+                )
 
                 await session.commit()
 
