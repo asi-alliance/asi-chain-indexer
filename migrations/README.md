@@ -128,9 +128,9 @@ or chain reset is required by 004.
 
 ### Tracked price migration 004
 
-Alembic revision 004 matches SQL file 004. A tracked
-003 database obtains the checked NUMERIC price columns through `upgrade`; an
-unversioned database already initialized through SQL 004 uses `adopt --revision 004`.
+Alembic revision 004 applies SQL file 004. A tracked 003 database obtains the
+checked NUMERIC price columns through `upgrade`. An unversioned database already
+initialized through SQL 004 uses `adopt --revision 004`.
 Both paths preserve existing prices and recorded native8/native18 precision.
 Reload Hasura metadata and adapt typed price filters after the column type change.
 
