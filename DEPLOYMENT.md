@@ -332,6 +332,19 @@ spec:
             cpu: "1000m"
 ```
 
+This Deployment runs only the indexer. If you run Hasura in Kubernetes, set
+`GHCRTS` in the Hasura container. The GHC runtime counts the CPUs of the node,
+and a pod CPU limit does not change that count. See
+[Hasura runtime capabilities](#hasura-runtime-capabilities).
+
+```yaml
+      - name: hasura
+        image: hasura/graphql-engine:v2.51.4
+        env:
+        - name: GHCRTS
+          value: "-maxN8"
+```
+
 ## Multi-Node Setup
 
 Index multiple networks or nodes:
