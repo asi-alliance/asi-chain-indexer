@@ -144,6 +144,11 @@ services:
       HASURA_GRAPHQL_ADMIN_SECRET: ${HASURA_ADMIN_SECRET:-todo}
       HASURA_GRAPHQL_UNAUTHORIZED_ROLE: "public"
       
+      # GHC runtime: at most 8 capabilities, never more than the CPUs. The image
+      # default (-N) starts one per host CPU and exhausts the 1024 open-file limit
+      # on hosts with hundreds of CPUs. See DEPLOYMENT.md.
+      GHCRTS: ${HASURA_GHCRTS:--maxN8}
+
       # Performance and real-time optimization
       HASURA_GRAPHQL_LIVE_QUERIES_MULTIPLEXED_REFETCH_INTERVAL: "500"
       HASURA_GRAPHQL_LIVE_QUERIES_MULTIPLEXED_BATCH_SIZE: "100"

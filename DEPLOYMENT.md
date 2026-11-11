@@ -241,6 +241,7 @@ services:
       HASURA_GRAPHQL_ADMIN_SECRET: ${HASURA_ADMIN_SECRET}
       HASURA_GRAPHQL_UNAUTHORIZED_ROLE: "public"
       HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES: "true"
+      GHCRTS: ${HASURA_GHCRTS:--maxN8}
     restart: unless-stopped
 
 volumes:
@@ -260,6 +261,19 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 # Configure Hasura (tracking, relationships, public permissions)
 ./scripts/full-init-hasura.sh
 ```
+
+### Hasura runtime capabilities
+
+The Hasura image starts its GHC runtime with `-N`, which creates one capability
+for each host CPU. Each capability uses operating-system threads and file
+descriptors. On a host with 384 CPUs, Hasura opened 1548 file descriptors. The
+container soft limit is 1024, so Hasura exited at startup with
+`getSystemTimerManager: the TimerManager requires linking against the threaded runtime`.
+
+Compose sets `GHCRTS=-maxN8`: at most 8 capabilities, and never more than the
+available CPUs. To change the value, set `HASURA_GHCRTS` in `.env`, for example
+`HASURA_GHCRTS=-maxN16`. If you run Hasura outside this Compose file, set
+`GHCRTS` in the same way, or raise the container `nofile` limit.
 
 ### Kubernetes Deployment
 
