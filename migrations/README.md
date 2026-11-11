@@ -226,8 +226,12 @@ unsigned transfer ledger. Only a successful response produces a `transfers` row.
 Its deploy, block, and timestamp identify completion, while its `native_result_id`
 links back to the initiating call. Amount precision comes from the initiating block.
 
-Reload metadata with `scripts/configure-hasura.py` to expose the read-only
-`native_transfer_lifecycle` view. It provides status (`pending`, `completed`,
+`scripts/full-init-hasura.sh` exposes the read-only `native_transfer_lifecycle`
+view to the public role; run it on fresh metadata. The script stops at the first
+object that is already tracked, so it does not update existing metadata. For an
+existing installation, add the view, its public select permission (no
+aggregations) and the relationships listed in the script through the Hasura
+metadata API or console, then check `get_inconsistent_metadata`. It provides status (`pending`, `completed`,
 `rejected`, or `coalesced`), exact requested amount as text, initiation/completion block and deploy
 links, timestamps, and the successful transfer ID. Internal return channels are
 not exposed through this view. Existing transfer queries and aggregates continue

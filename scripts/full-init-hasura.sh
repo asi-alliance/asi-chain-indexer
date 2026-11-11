@@ -130,6 +130,7 @@ VIEWS=(
   "block_ancestors_view"
   "block_descendants_view"
   "transaction_history_view"
+  "native_transfer_lifecycle"
 )
 
 FUNCTIONS=(
@@ -218,6 +219,12 @@ declare -A OBJECT_RELATIONS=(
 
   ["pending_deploys.deployer_validator"]="validators:deployer:public_key"
   ["pending_deploys.included_deployment"]="deployments:sig:deploy_id"
+
+  ["native_transfer_lifecycle.initiation_deployment"]="deployments:initiation_deploy_id:deploy_id"
+  ["native_transfer_lifecycle.completion_deployment"]="deployments:completion_deploy_id:deploy_id"
+  ["native_transfer_lifecycle.initiation_block"]="blocks:initiation_block_hash:block_hash"
+  ["native_transfer_lifecycle.completion_block"]="blocks:completion_block_hash:block_hash"
+  ["native_transfer_lifecycle.transfer"]="transfers:transfer_id:id"
 )
 
 log "Creating object relationships..."
@@ -250,6 +257,9 @@ declare -A ARRAY_RELATIONS=(
   ["blocks.network_stats"]="network_stats:block_number:block_number"
 
   ["deployments.transfers"]="transfers:deploy_id:deploy_id"
+  # Read-only lifecycle outcomes; the raw call/result tables stay untracked.
+  ["deployments.native_transfer_calls"]="native_transfer_lifecycle:deploy_id:initiation_deploy_id"
+  ["deployments.completed_native_transfers"]="native_transfer_lifecycle:deploy_id:completion_deploy_id"
 
   ["validators.validator_bonds"]="validator_bonds:public_key:validator_public_key"
   ["validators.block_validators"]="block_validators:public_key:validator_public_key"

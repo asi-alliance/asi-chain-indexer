@@ -4,6 +4,9 @@ All notable changes to the ASI-Chain Indexer project will be documented in this 
 
 ## [Unreleased]
 
+### Added
+- ✅ **Public `native_transfer_lifecycle` GraphQL view** — `full-init-hasura.sh` tracks the read-only view with public select (no aggregations) and its relationships (`initiation_deployment`, `completion_deployment`, `initiation_block`, `completion_block`, `transfer`, `deployments.native_transfer_calls`, `deployments.completed_native_transfers`). The raw call, result and alias tables stay untracked. Previously only the unsupported `configure-hasura.py` exposed the view.
+
 ### Changed
 - Add explicit Alembic status/upgrade/adopt commands around existing SQL migrations, with revision tracking, schema validation, transactional rollback and concurrent-run protection.
 - Upgrade the supported Docker and CI interpreter to Python 3.14.10 after clean-image and PostgreSQL/Hasura compatibility validation.

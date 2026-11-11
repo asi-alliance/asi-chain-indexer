@@ -322,12 +322,14 @@ A plain `docker compose restart` does not replace the container's environment.
 Routes are defined in [src/monitoring.py](src/monitoring.py); there is no indexer
 `/api/epochs` route. Hasura provides DAG relationships. Migration 003 defines the read-only
 `native_transfer_lifecycle` SQL view with initiation/completion references and
-pending, completed, rejected or coalesced outcomes. Exposing it in GraphQL requires
-reviewed metadata tracking and permissions: `full-init-hasura.sh` does not currently
-include that view. The older `scripts/configure-hasura.py` contains lifecycle metadata
-setup but has hard-coded connection/secret values and an additional `requests`
-dependency; do not run it unchanged. Count movements from the transfer ledger,
-not lifecycle-row counts.
+pending, completed, rejected or coalesced outcomes. `full-init-hasura.sh` tracks
+this view with public read access (no aggregations) and its relationships:
+`initiation_deployment`, `completion_deployment`, `initiation_block`,
+`completion_block`, `transfer`, and `deployments.native_transfer_calls` /
+`deployments.completed_native_transfers`. The raw call, result and alias tables
+stay untracked. The older `scripts/configure-hasura.py` has hard-coded
+connection/secret values and an additional `requests` dependency; do not run it
+unchanged. Count movements from the transfer ledger, not lifecycle-row counts.
 
 Exported metrics include `indexer_blocks_indexed_total`,
 `indexer_deployments_indexed_total`, `indexer_transfers_extracted_total`,

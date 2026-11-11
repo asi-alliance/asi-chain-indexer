@@ -234,3 +234,181 @@ async def test_public_report_fetches_genesis_statuses_with_recorded_precision():
             block_hashes,
         )
         await connection.close()
+
+
+async def public_graphql(client, base, query, variables=None):
+    async with client.post(
+        base + "/v1/graphql", json={"query": query, "variables": variables or {}}
+    ) as response:
+        response.raise_for_status()
+        return await response.json()
+
+
+@pytest.mark.asyncio
+async def test_public_native_transfer_lifecycle_hides_raw_observations():
+    database_url = os.environ.get("TEST_DATABASE_URL")
+    base = os.environ.get("TEST_HASURA_URL", "").rstrip("/")
+    if not all((database_url, base)):
+        pytest.skip("Set TEST_DATABASE_URL and TEST_HASURA_URL for stack checks")
+
+    connection = await asyncpg.connect(database_url)
+    key = "lifecycle_" + uuid4().hex
+    blocks = [key + "_b1", key + "_b2"]
+    initiating, completing = key + "_init", key + "_done"
+    calls = [key + "_pending", key + "_completed", key + "_rejected"]
+    results = [key + "_r_completed", key + "_r_rejected"]
+    big = 10**30 + 7
+    try:
+        async with connection.transaction():
+            for height, block_hash in enumerate(blocks, 1):
+                await connection.execute(
+                    """
+                    INSERT INTO blocks(block_hash, block_number, timestamp, proposer,
+                                       finalization_status, token_decimals)
+                    VALUES ($1, $2, $2, 'validator', 'finalized', 18)
+                    """,
+                    block_hash,
+                    height,
+                )
+            for deploy_id, block_hash, height in (
+                (initiating, blocks[0], 1),
+                (completing, blocks[1], 2),
+            ):
+                await connection.execute(
+                    """
+                    INSERT INTO deployments(deploy_id, block_hash, block_number, deployer,
+                                            deployer_address, term, timestamp, sig)
+                    VALUES ($1, $2, $3, 'sender', 'sender', 'Nil', $3, $1)
+                    """,
+                    deploy_id,
+                    block_hash,
+                    height,
+                )
+            for index, (call_id, amount) in enumerate(
+                zip(calls, ["7", str(big), "-5"])
+            ):
+                await connection.execute(
+                    """
+                    INSERT INTO native_transfer_calls(id, block_hash, deploy_id, event_index,
+                                                      return_channel, from_address, to_address,
+                                                      requested_amount, token_decimals, timestamp)
+                    VALUES ($1, $2, $3, $4, 'internal-channel', 'sender', 'receiver', $5, 18, 1)
+                    """,
+                    call_id,
+                    blocks[0],
+                    initiating,
+                    index,
+                    amount,
+                )
+            for result_id, call_id, block_hash, deploy_id, success in (
+                (results[0], calls[1], blocks[1], completing, True),
+                (results[1], calls[2], blocks[0], initiating, False),
+            ):
+                await connection.execute(
+                    """
+                    INSERT INTO native_transfer_results(id, call_id, block_hash, deploy_id,
+                                                        response_index, phase, success, timestamp)
+                    VALUES ($1, $2, $3, $4, 0, 'committed', $5, 2)
+                    """,
+                    result_id,
+                    call_id,
+                    block_hash,
+                    deploy_id,
+                    success,
+                )
+            await connection.execute(
+                """
+                INSERT INTO transfers(deploy_id, block_hash, block_number, from_address,
+                                      to_address, amount_dust, amount_asi, timestamp,
+                                      event_index, token_decimals, native_result_id)
+                VALUES ($1, $2, 2, 'sender', 'receiver', $3, $4, 2, 0, 18, $5)
+                """,
+                completing,
+                blocks[1],
+                big,
+                token_decimal(big, 18),
+                results[0],
+            )
+
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as client:
+            # No admin secret: the public role used by the explorer.
+            result = await public_graphql(
+                client,
+                base,
+                """
+                query($calls: [String!], $init: String!, $done: String!) {
+                  native_transfer_lifecycle(where: {call_id: {_in: $calls}},
+                                            order_by: {call_index: asc}) {
+                    call_id status requested_amount token_decimals
+                    initiation_block_number completion_block_number
+                    initiation_deployment { deploy_id }
+                    completion_deployment { deploy_id }
+                    initiation_block { block_hash }
+                    completion_block { block_hash }
+                    transfer { amount_dust }
+                  }
+                  initiated: deployments(where: {deploy_id: {_eq: $init}}) {
+                    native_transfer_calls(order_by: {call_index: asc}) { call_id status }
+                  }
+                  completed: deployments(where: {deploy_id: {_eq: $done}}) {
+                    completed_native_transfers { call_id status }
+                  }
+                }
+                """,
+                {"calls": calls, "init": initiating, "done": completing},
+            )
+            assert "errors" not in result, result
+            rows = result["data"]["native_transfer_lifecycle"]
+            assert [row["status"] for row in rows] == [
+                "pending",
+                "completed",
+                "rejected",
+            ]
+            assert [row["requested_amount"] for row in rows] == ["7", str(big), "-5"]
+            assert all(row["token_decimals"] == 18 for row in rows)
+            assert all(
+                row["initiation_deployment"]["deploy_id"] == initiating for row in rows
+            )
+            assert all(
+                row["initiation_block"]["block_hash"] == blocks[0] for row in rows
+            )
+            assert [row["completion_block_number"] for row in rows] == [None, "2", "1"]
+            assert rows[0]["completion_deployment"] is None
+            assert rows[1]["completion_deployment"]["deploy_id"] == completing
+            assert rows[1]["completion_block"]["block_hash"] == blocks[1]
+            assert rows[1]["transfer"] == {"amount_dust": str(big)}
+            assert rows[2]["transfer"] is None
+            assert result["data"]["initiated"][0]["native_transfer_calls"] == [
+                {"call_id": call, "status": status}
+                for call, status in zip(calls, ["pending", "completed", "rejected"])
+            ]
+            assert result["data"]["completed"][0]["completed_native_transfers"] == [
+                {"call_id": calls[1], "status": "completed"}
+            ]
+
+            # Raw observations, internal channels and lifecycle aggregates stay hidden.
+            for query in (
+                "{ native_transfer_calls { id } }",
+                "{ native_transfer_results { id } }",
+                "{ native_transfer_result_aliases { call_id } }",
+                "{ native_transfer_lifecycle { return_channel } }",
+                "{ native_transfer_lifecycle_aggregate { aggregate { count } } }",
+            ):
+                hidden = await public_graphql(client, base, query)
+                assert "errors" in hidden, (query, hidden)
+    finally:
+        await connection.execute(
+            "DELETE FROM transfers WHERE native_result_id = ANY($1::text[])", results
+        )
+        await connection.execute(
+            "DELETE FROM native_transfer_results WHERE id = ANY($1::text[])", results
+        )
+        await connection.execute(
+            "DELETE FROM native_transfer_calls WHERE id = ANY($1::text[])", calls
+        )
+        await connection.execute(
+            "DELETE FROM blocks WHERE block_hash = ANY($1::text[])", blocks
+        )
+        await connection.close()
