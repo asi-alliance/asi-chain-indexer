@@ -2,7 +2,7 @@
 
 ## Tracked migration commands
 
-Alembic wraps the unchanged SQL files 000–005 as forward-only revisions. Commands
+Alembic wraps the unchanged SQL files 000–006 as forward-only revisions. Commands
 use the explicitly set DATABASE_URL and the installed runtime requirements; no
 psql executable or node connection is needed. They do not run on indexer startup.
 Back up the actual database, stop indexer writers and rehearse upgrades first.
@@ -15,7 +15,7 @@ make migration-status PYTHON=python
 make migrate PYTHON=python
 ```
 
-On an empty public schema, upgrade creates 000–005 and alembic_version. Subsequent
+On an empty public schema, upgrade creates 000–006 and alembic_version. Subsequent
 runs apply only pending revisions. The whole command, including version updates,
 is transactional and holds a per-database advisory lock; a concurrent command is
 rejected. Lock waits are bounded to five seconds and each SQL statement defaults
@@ -50,8 +50,8 @@ row-level permissions, Hasura metadata or whether history repair was performed.
 The profiles were generated and tested on PostgreSQL 18.6; verify other server
 versions in a disposable rehearsal before adopting them.
 
-Fresh Compose databases still initialize through the six SQL mounts. After that
-initialization, adopt revision 005 once to begin version tracking. Existing Compose
+Fresh Compose databases still initialize through the seven SQL mounts. After that
+initialization, adopt revision 006 once to begin version tracking. Existing Compose
 volumes need adoption of their actual level and an explicit upgrade command, for
 example docker compose run --rm --no-deps indexer python -m src.migrate status
 (with PostgreSQL already running). Do not run native alembic stamp as a shortcut:
@@ -88,6 +88,7 @@ Apply these migrations in order to a new database:
 4. `003_native_transfer_calls.sql`: durable pending calls, completion records, and lifecycle queries.
 5. `004_uint256_phlo_prices.sql`: widen included/pending fee prices with uint256 checks.
 6. `005_network_metrics_empty_range.sql`: return empty network metric buckets for a database without data.
+7. `006_native_transfer_lifecycle_plans.sql`: index lifecycle lookups by initiating and completing deploy.
 
 ```bash
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/000_comprehensive_initial_schema.sql
@@ -96,10 +97,11 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/002_executed_transfers.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/003_native_transfer_calls.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/004_uint256_phlo_prices.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/005_network_metrics_empty_range.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/006_native_transfer_lifecycle_plans.sql
 ```
 
 For an existing version 000 database, back up the database, stop indexer writes,
-and apply **001, 002, 003, 004 and 005, once each**. The migration takes table locks while widening
+and apply **001, 002, 003, 004, 005 and 006, once each**. The migration takes table locks while widening
 columns and rebuilding generated balance totals and `transaction_history_view`.
 Reload Hasura metadata after migration and before deploying the matching explorer.
 Compose runs these migrations only when initializing an empty PostgreSQL volume;
@@ -142,7 +144,7 @@ before stamping rolls the price columns and version back to 003.
 
 ### Network metrics migration 005
 
-The Alembic head is 005, matching the SQL initialized by current Compose. On a
+On a
 database without blocks, deployments and transfers, `get_network_metrics` computed
 its range from `-infinity` and failed with `interval out of range`. Migration 005
 replaces the function with the same signature and result type. When no data
@@ -153,6 +155,32 @@ A tracked 004 database obtains the function through `upgrade`. For an untracked
 SQL installation at version 004, apply only 005. An unversioned database already
 initialized through SQL 005 uses `adopt --revision 005`. The migration changes no
 table, column or data, and Hasura metadata does not need a reload.
+
+### Lifecycle query plans migration 006
+
+The Alembic head is 006, matching the SQL initialized by current Compose.
+Hasura exposes `native_transfer_lifecycle` to the public role, and the explorer
+reads it by initiating and by completing deploy. Before 006, each such lookup read
+every native transfer result: the `UNION` that links results and aliases to
+calls sorted all rows, and `completion_deploy_id` had no index. On 450,000
+results, a lookup took about one second. Migration 006 adds an index on
+`native_transfer_results(deploy_id)` and replaces the `UNION` with `UNION ALL`.
+After 006, a lookup by `initiation_deploy_id` or by `completion_deploy_id` takes
+less than one millisecond.
+
+The indexer writes an alias only for a call other than the call of the result,
+so the two branches have no common rows. Migration 006 deletes alias rows that
+repeat the result's own call, if a database has them. The view keeps its columns
+and its rows. Hasura metadata does not need a reload.
+
+Filter the view by one deploy column per query. A filter that combines
+`initiation_deploy_id` and `completion_deploy_id` with `_or` still reads the
+whole view.
+
+A tracked 005 database obtains the change through `upgrade`. For an untracked
+SQL installation at version 005, apply only 006. An unversioned database already
+initialized through SQL 006 uses `adopt --revision 006`. The index build locks
+writes to `native_transfer_results`. Stop the indexer during the upgrade.
 
 The separate [adoption review findings](https://github.com/asi-alliance/asi-chain-indexer/pull/37#issuecomment-6736839084)
 on internal FK-trigger enforcement and owned-sequence structure remain open.
@@ -242,8 +270,12 @@ unsigned transfer ledger. Only a successful response produces a `transfers` row.
 Its deploy, block, and timestamp identify completion, while its `native_result_id`
 links back to the initiating call. Amount precision comes from the initiating block.
 
-Reload metadata with `scripts/configure-hasura.py` to expose the read-only
-`native_transfer_lifecycle` view. It provides status (`pending`, `completed`,
+`scripts/full-init-hasura.sh` exposes the read-only `native_transfer_lifecycle`
+view to the public role; run it on fresh metadata. The script stops at the first
+object that is already tracked, so it does not update existing metadata. For an
+existing installation, add the view, its public select permission (no
+aggregations) and the relationships listed in the script through the Hasura
+metadata API or console, then check `get_inconsistent_metadata`. It provides status (`pending`, `completed`,
 `rejected`, or `coalesced`), exact requested amount as text, initiation/completion block and deploy
 links, timestamps, and the successful transfer ID. Internal return channels are
 not exposed through this view. Existing transfer queries and aggregates continue

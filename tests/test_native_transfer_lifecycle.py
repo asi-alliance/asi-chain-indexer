@@ -37,9 +37,8 @@ async def ledger(monkeypatch, request):
     database = Database(test_url)
     try:
         for migration in sorted((ROOT / "migrations").glob("[0-9][0-9][0-9]_*.sql")):
-            if getattr(request, "param", None) == "002" and migration.name.startswith(
-                "003"
-            ):
+            # A database at 002 has none of the later migrations; 006 needs 003.
+            if getattr(request, "param", None) == "002" and migration.name >= "003":
                 continue
             await conn.execute(migration.read_text())
         await database.connect()
