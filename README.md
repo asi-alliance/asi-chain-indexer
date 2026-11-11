@@ -234,7 +234,7 @@ docker compose ps
 curl -fsS http://localhost:9090/status
 ```
 
-PostgreSQL runs SQL migrations 000–005 only when initializing an empty volume.
+PostgreSQL runs SQL migrations 000–006 only when initializing an empty volume.
 The Hasura script changes metadata and permissions; use it for a fresh installation,
 not as a read-only probe or a replacement for reviewing existing custom metadata.
 [deploy.sh](deploy.sh) wraps startup and metadata initialization, but currently
@@ -262,11 +262,11 @@ Read [POSTGRES_UPGRADE.md](POSTGRES_UPGRADE.md) and the
   the upgrade. PostgreSQL 14 data requires dump/restore into a new PostgreSQL 18.6
   cluster; retain the old volume and matching images for rollback.
 - On an empty database, `python -m src.migrate upgrade` applies tracked revisions
-  000–005. For an existing unversioned SQL schema, inspect its actual level, use
+  000–006. For an existing unversioned SQL schema, inspect its actual level, use
   `python -m src.migrate adopt --revision REVISION` once, selecting its actual
-  revision from `000`, `001`, `002`, `003`, `004` or `005`, then run
+  revision from `000`, `001`, `002`, `003`, `004`, `005` or `006`, then run
   `python -m src.migrate upgrade`. A database already tracked at
-  003 or 004 upgrades to 005. Compose restarts and SQLAlchemy `create_all()` do not upgrade
+  003, 004 or 005 upgrades to 006. Compose restarts and SQLAlchemy `create_all()` do not upgrade
   existing schemas. See the migration guide for validation and backup requirements.
 - Populated databases marked for native-transfer backfill must complete
   `python -m src.reindex_transfers` with writes stopped. Do not manually clear

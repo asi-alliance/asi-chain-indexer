@@ -44,7 +44,7 @@ migrate: ## Apply pending tracked migrations to DATABASE_URL
 migration-status: ## Show recorded schema revision
 	$(PYTHON) -m src.migrate status
 
-migration-adopt: ## Adopt existing SQL schema (set REVISION=000/001/002/003/004/005)
+migration-adopt: ## Adopt existing SQL schema (set REVISION=000/001/002/003/004/005/006)
 	$(PYTHON) -m src.migrate adopt --revision $(REVISION)
 
 docker-build: ## Build Docker image
