@@ -326,8 +326,11 @@ pending, completed, rejected or coalesced outcomes. `full-init-hasura.sh` tracks
 this view with public read access (no aggregations) and its relationships:
 `initiation_deployment`, `completion_deployment`, `initiation_block`,
 `completion_block`, `transfer`, and `deployments.native_transfer_calls` /
-`deployments.completed_native_transfers`. The raw call, result and alias tables
-stay untracked. The older `scripts/configure-hasura.py` has hard-coded
+`deployments.completed_native_transfers`. Both array relationships return
+lifecycle rows, that is call outcomes: a fork can record more than one outcome
+for one call. The `native_transfer_calls` name comes from the older
+`scripts/configure-hasura.py`. The raw call, result and alias tables stay
+untracked. The older `scripts/configure-hasura.py` has hard-coded
 connection/secret values and an additional `requests` dependency; do not run it
 unchanged. Count movements from the transfer ledger, not lifecycle-row counts.
 
