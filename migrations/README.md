@@ -2,7 +2,7 @@
 
 ## Tracked migration commands
 
-Alembic wraps the unchanged SQL files 000–004 as forward-only revisions. Commands
+Alembic wraps the unchanged SQL files 000–005 as forward-only revisions. Commands
 use the explicitly set DATABASE_URL and the installed runtime requirements; no
 psql executable or node connection is needed. They do not run on indexer startup.
 Back up the actual database, stop indexer writers and rehearse upgrades first.
@@ -15,7 +15,7 @@ make migration-status PYTHON=python
 make migrate PYTHON=python
 ```
 
-On an empty public schema, upgrade creates 000–004 and alembic_version. Subsequent
+On an empty public schema, upgrade creates 000–005 and alembic_version. Subsequent
 runs apply only pending revisions. The whole command, including version updates,
 is transactional and holds a per-database advisory lock; a concurrent command is
 rejected. Lock waits are bounded to five seconds and each SQL statement defaults
@@ -50,8 +50,8 @@ row-level permissions, Hasura metadata or whether history repair was performed.
 The profiles were generated and tested on PostgreSQL 18.6; verify other server
 versions in a disposable rehearsal before adopting them.
 
-Fresh Compose databases still initialize through the five SQL mounts. After that
-initialization, adopt revision 004 once to begin version tracking. Existing Compose
+Fresh Compose databases still initialize through the six SQL mounts. After that
+initialization, adopt revision 005 once to begin version tracking. Existing Compose
 volumes need adoption of their actual level and an explicit upgrade command, for
 example docker compose run --rm --no-deps indexer python -m src.migrate status
 (with PostgreSQL already running). Do not run native alembic stamp as a shortcut:
@@ -87,6 +87,7 @@ Apply these migrations in order to a new database:
 3. `002_executed_transfers.sql`: stable native transfer event identity.
 4. `003_native_transfer_calls.sql`: durable pending calls, completion records, and lifecycle queries.
 5. `004_uint256_phlo_prices.sql`: widen included/pending fee prices with uint256 checks.
+6. `005_network_metrics_empty_range.sql`: return empty network metric buckets for a database without data.
 
 ```bash
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/000_comprehensive_initial_schema.sql
@@ -94,10 +95,11 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/001_bigint_amounts.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/002_executed_transfers.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/003_native_transfer_calls.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/004_uint256_phlo_prices.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/005_network_metrics_empty_range.sql
 ```
 
 For an existing version 000 database, back up the database, stop indexer writes,
-and apply **001, 002, 003 and 004, once each**. The migration takes table locks while widening
+and apply **001, 002, 003, 004 and 005, once each**. The migration takes table locks while widening
 columns and rebuilding generated balance totals and `transaction_history_view`.
 Reload Hasura metadata after migration and before deploying the matching explorer.
 Compose runs these migrations only when initializing an empty PostgreSQL volume;
@@ -126,7 +128,7 @@ or chain reset is required by 004.
 
 ### Tracked price migration 004
 
-The Alembic head is 004, matching the SQL initialized by current Compose. A tracked
+Alembic revision 004 matches SQL file 004. A tracked
 003 database obtains the checked NUMERIC price columns through `upgrade`; an
 unversioned database already initialized through SQL 004 uses `adopt --revision 004`.
 Both paths preserve existing prices and recorded native8/native18 precision.
@@ -137,6 +139,20 @@ comments, and rejects unexpected transaction-control statements. Function bodies
 quoted identifiers and literals retain their contents. SQL, the revision stamp and
 the advisory lock stay in the outer transaction; failure after SQL execution and
 before stamping rolls the price columns and version back to 003.
+
+### Network metrics migration 005
+
+The Alembic head is 005, matching the SQL initialized by current Compose. On a
+database without blocks, deployments and transfers, `get_network_metrics` computed
+its range from `-infinity` and failed with `interval out of range`. Migration 005
+replaces the function with the same signature and result type. When no data
+exists, the range ends at `now()` and the function returns `p_divisions` empty
+buckets. Results for a database with data do not change.
+
+A tracked 004 database obtains the function through `upgrade`. For an untracked
+SQL installation at version 004, apply only 005. An unversioned database already
+initialized through SQL 005 uses `adopt --revision 005`. The migration changes no
+table, column or data, and Hasura metadata does not need a reload.
 
 The separate [adoption review findings](https://github.com/asi-alliance/asi-chain-indexer/pull/37#issuecomment-6736839084)
 on internal FK-trigger enforcement and owned-sequence structure remain open.
