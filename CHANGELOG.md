@@ -26,6 +26,9 @@ All notable changes to the ASI-Chain Indexer project will be documented in this 
 - ❌ **`tenacity`, `aiohttp-cors`** — unused runtime pins; retries live in `src/resilience.py`. Alembic 1.20.1 is now used by the explicit migration commands.
 - ❌ **`src/cache.py`** — dead Redis module: nothing imported it, `redis` was never in `requirements.txt`, and `settings.redis_url` never existed. Remove it rather than add an unused dependency.
 
+### Fixed
+- ✅ **`get_network_metrics` on an empty database (#41)** — tracked migration 005 replaces the function with the same signature. Without blocks, deployments and transfers it returns `p_divisions` empty buckets that end at `now()` instead of failing with `interval out of range`.
+
 ## [2.3.0] - 2026-09-08
 
 ### 🚀 Pending Deploys Tracking
