@@ -24,6 +24,7 @@ All notable changes to the ASI-Chain Indexer project will be documented in this 
 - ❌ **`src/cache.py`** — dead Redis module: nothing imported it, `redis` was never in `requirements.txt`, and `settings.redis_url` never existed. Remove it rather than add an unused dependency.
 
 ### Fixed
+- ✅ **Hasura startup on hosts with many CPUs (#42)** — Compose sets `GHCRTS=-maxN8` (override with `HASURA_GHCRTS`). The image default `-N` started one GHC capability per CPU; on a 384-CPU host Hasura opened 1548 file descriptors against the 1024 soft limit and exited with a `TimerManager` error.
 - ✅ **`get_network_metrics` on an empty database (#41)** — tracked migration 005 replaces the function with the same signature. Without blocks, deployments and transfers it returns `p_divisions` empty buckets that end at `now()` instead of failing with `interval out of range`.
 
 ## [2.3.0] - 2026-09-08
