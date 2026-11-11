@@ -199,8 +199,8 @@ cd asi-chain-indexer
 cp .env.example .env
 ```
 
-Edit `.env` before starting. The supplied template's database password differs
-from the local Compose database password; align them. For the unmodified local
+Edit `.env` before starting. `.env.example` and `.env.template` use the
+database credentials of the local Compose file. For the unmodified local
 Compose file, use this shape:
 
 ```dotenv
@@ -283,7 +283,9 @@ ORM table recreation also does not replace the SQL views, functions and triggers
 [.env.example](.env.example), [src/config.py](src/config.py) and
 [docker-compose.yml](docker-compose.yml) define different layers: Python defaults,
 environment values and the variables actually passed into containers. For example,
-`BATCH_SIZE` defaults to 100 in Python and 50 in Compose/the template.
+`BATCH_SIZE` defaults to 100 in Python and 50 in Compose and both templates.
+`.env.example` lists the Python-only settings that Compose does not pass to the
+container, for example `MONITORING_PORT` and `DATABASE_POOL_TIMEOUT`.
 
 Important settings include `NODE_HOST`, `GRPC_PORT`, `HTTP_PORT`,
 `NODE_TIMEOUT`, `GRPC_MAX_RECEIVE_MESSAGE_BYTES`, `DATABASE_URL`, `DATABASE_POOL_SIZE`, `SYNC_INTERVAL`,

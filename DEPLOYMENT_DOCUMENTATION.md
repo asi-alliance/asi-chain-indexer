@@ -72,11 +72,9 @@ Remote ASI Network (13.251.66.61:40452 gRPC / 40453 HTTP)
    After the indexer is running, configure Hasura GraphQL for the frontend:
    
    ```bash
-   # Setup Hasura configuration
-   ./scripts/configure-hasura.sh
-   
-   # Setup GraphQL relationships
-   ./scripts/setup-hasura-relationships.sh
+   # Track tables, views and relationships, and grant public read access.
+   # On fresh metadata only: the script stops at the first tracked object.
+   HASURA_ADMIN_SECRET=<your secret> bash scripts/full-init-hasura.sh
    ```
 
 4. **Verify Indexer:**
@@ -88,7 +86,7 @@ Remote ASI Network (13.251.66.61:40452 gRPC / 40453 HTTP)
    curl http://localhost:8080/v1/graphql \
      -X POST \
      -H "Content-Type: application/json" \
-     -H "x-hasura-admin-secret: myadminsecretkey" \
+     -H "x-hasura-admin-secret: $HASURA_ADMIN_SECRET" \
      -d '{"query":"{ blocks(limit: 1) { block_number deployments { deploy_id } validator_bonds { stake } } }"}'
    ```
 
@@ -214,13 +212,12 @@ docker ps | grep asi-
 
 2. **GraphQL Schema Issues:**
    ```bash
-   # Run Hasura configuration scripts
-   ./scripts/configure-hasura.sh
-   ./scripts/setup-hasura-relationships.sh
+   # Fresh metadata: run the Hasura initialization script
+   HASURA_ADMIN_SECRET=<your secret> bash scripts/full-init-hasura.sh
    
    # Or reload GraphQL metadata manually
    curl -X POST http://localhost:8080/v1/metadata \
-     -H "X-Hasura-Admin-Secret: myadminsecretkey" \
+     -H "X-Hasura-Admin-Secret: $HASURA_ADMIN_SECRET" \
      -d '{"type": "reload_metadata", "args": {}}'
    ```
 
