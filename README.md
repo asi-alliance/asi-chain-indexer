@@ -85,9 +85,10 @@ Raw token amounts are checked Python integers stored as uint256-range
 `NUMERIC(78,0)`. Human-readable amounts use exact decimal strings. Keep
 `HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES=true` and preserve strings in consumers.
 
-The generic `NATIVE_TOKEN_DECIMALS` fallback is **8** for legacy compatibility.
-For the selected ASI network, explicitly set `NATIVE_TOKEN_DECIMALS=18`, as shown
-in the environment examples. This setting must match node token metadata;
+The generic Python `NATIVE_TOKEN_DECIMALS` fallback is **8** for legacy compatibility.
+The ASI local Compose example defaults to **18**, matching the environment examples.
+Set `NATIVE_TOKEN_DECIMALS` explicitly to the chain's actual precision, including
+**8** for legacy eight-decimal chains. This setting must match node token metadata;
 choosing the uint256 wire profile does not choose the token's precision.
 Startup checks the configured precision. Legacy nodes without token metadata
 support the eight-decimal profile. Each row retains its recorded precision;
@@ -273,6 +274,14 @@ Read [POSTGRES_UPGRADE.md](POSTGRES_UPGRADE.md) and the
 - Back up the actual database and Hasura metadata, stop writers and rehearse
   the upgrade. PostgreSQL 14 data requires dump/restore into a new PostgreSQL 18.6
   cluster; retain the old volume and matching images for rollback.
+- If your legacy installation relied on the implicit `classic` profile, pin
+  `NODE_PROTOCOL_PROFILE=classic` in `.env` **before rebuilding**, and keep it set
+  for runtime. Explicitly set `NATIVE_TOKEN_DECIMALS=8` for an eight-decimal chain;
+  Compose now defaults to `uint256` and 18 decimals when these settings are absent.
+  For standalone Docker, build with `--build-arg NODE_PROTOCOL_PROFILE=classic`;
+  for local Python, set the profile before both generating bindings and running.
+  Select both settings from the node contract and metadata before a coordinated
+  upgrade. Rebuilding or changing defaults does not rescale stored amounts.
 - On an empty database, `python -m src.migrate upgrade` applies tracked revisions
   000–006. For an existing unversioned SQL schema, inspect its actual level, use
   `python -m src.migrate adopt --revision REVISION` once, selecting its actual
