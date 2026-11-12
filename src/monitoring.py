@@ -67,6 +67,16 @@ class MonitoringServer:
         # reuse the indexer's client: opening one per request leaks a grpc channel every time
         return self.indexer.client if self.indexer else None
 
+    def _chain_tip(self):
+        """Last finalized height and its observation time, as the sync loop saw them.
+
+        /metrics and /status use this instead of a node RPC per request, so a
+        scrape never reaches the node more often than the sync loop does.
+        """
+        if not self.indexer or not getattr(self.indexer, "node_reachable", False):
+            return None, getattr(self.indexer, "chain_tip_observed_at", None)
+        return self.indexer.chain_tip, self.indexer.chain_tip_observed_at
+
     def _json_response(self, data, status=200):
         """Create a JSON response with custom serialization."""
 
@@ -199,13 +209,10 @@ class MonitoringServer:
             last_indexed = await db.get_last_indexed_block()
             last_block_height.set(last_indexed)
 
-            # Get chain height and calculate lag
-            client = self._client()
-            last_finalized = await client.get_last_finalized_block() if client else None
-            if last_finalized and "blockNumber" in last_finalized:
-                latest_block = last_finalized["blockNumber"]
-                lag = max(0, latest_block - last_indexed)
-                sync_lag.set(lag)
+            # Lag against the tip the sync loop last observed; no node RPC here
+            latest_block, _ = self._chain_tip()
+            if latest_block is not None:
+                sync_lag.set(max(0, latest_block - last_indexed))
         except Exception as e:
             logger.error("Failed to update metrics", error=str(e))
 
@@ -230,24 +237,16 @@ class MonitoringServer:
 
             stats = dict(db_stats[0]) if db_stats else {}
 
-            # Node status
-            node_status = {}
-            try:
-                client = self._client()
-                last_finalized = await client.get_last_finalized_block() if client else None
-                if last_finalized:
-                    node_status = {
-                        "connected": True,
-                        "latest_block": last_finalized.get("blockNumber")
-                    }
-                else:
-                    node_status = {"connected": False}
-            except Exception:
-                node_status = {"connected": False}
+            # Node status as the sync loop last observed it; no node RPC here
+            latest_block, observed_at = self._chain_tip()
+            node_status = {
+                "connected": latest_block is not None,
+                "latest_block": latest_block,
+                "latest_block_observed_at": observed_at.isoformat() if observed_at else None,
+            }
 
             # Calculate sync status
             last_indexed = int(stats.get("last_indexed_block") or -1)
-            latest_block = node_status.get("latest_block", 0)
 
             return {
                 "indexer": {
@@ -281,7 +280,8 @@ class MonitoringServer:
                     "host": settings.node_host,
                     # "grpc_port": settings.grpc_port,
                     # "http_port": settings.http_port,
-                    "latest_block": node_status.get("latest_block")
+                    "latest_block": node_status.get("latest_block"),
+                    "latest_block_observed_at": node_status.get("latest_block_observed_at")
                 },
                 "timestamp": utc_now().isoformat()
             }

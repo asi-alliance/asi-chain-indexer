@@ -100,7 +100,8 @@ Detailed status information about the indexer.
     "host": "host.docker.internal",
     "grpc_port": 40412,
     "http_port": 40413,
-    "latest_block": 240
+    "latest_block": 240,
+    "latest_block_observed_at": "2025-08-06T08:10:14.104311+00:00"
   },
   "config": {
     "sync_interval": 5,
@@ -111,8 +112,12 @@ Detailed status information about the indexer.
 }
 ```
 
+`node` describes the last finalized block that the sync loop read; `/status` does not call the node.
+`connected` is `false` and `latest_block` is `null` before the first successful read and after a failed one.
+`latest_block_observed_at` is the time of the last successful read, so it shows how old the observation is.
+
 ### GET /metrics
-Prometheus-compatible metrics endpoint.
+Prometheus-compatible metrics endpoint. `indexer_sync_lag_blocks` uses the last finalized height that the sync loop read; a scrape does not call the node.
 
 **Response:** Text format metrics including:
 - `indexer_blocks_indexed_total`

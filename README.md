@@ -312,8 +312,8 @@ A plain `docker compose restart` does not replace the container's environment.
 |---|---|
 | `GET /health` | Basic HTTP-process response; does not check dependencies or sync progress |
 | `GET /readiness` (alias `/ready`) | Checks a database query and a last-finalized-block read; returns 200 or 503 |
-| `GET /status` | Database/cursor statistics and node observations; inspect the response content |
-| `GET /metrics` | Prometheus exposition with request-time dynamic updates |
+| `GET /status` | Database/cursor statistics and the last node observation of the sync loop; inspect the response content |
+| `GET /metrics` | Prometheus exposition; the sync lag uses the last finalized height that the sync loop observed |
 | `GET /api/blocks`, `/api/blocks/{block_number}`, `/api/blocks/search` | Block reads/search; a height is not a unique DAG identity |
 | `GET /api/deployments`, `/api/deployments/{deploy_id}`, `/api/deployments/search` | Deploy reads/search |
 | `GET /api/transfers`, `/api/address/{address}/transfers` | Successful ledger movements |
@@ -339,8 +339,10 @@ Exported metrics include `indexer_blocks_indexed_total`,
 `indexer_sync_lag_blocks`, `indexer_last_block_height`,
 `indexer_sync_duration_seconds` and `indexer_node_request_duration_seconds`.
 Health/readiness/metrics success alone does not prove continuing finalization;
-compare fresh observations over time. Requests to status/readiness/metrics may
-query the node; they are not an independent fleet monitor.
+compare fresh observations over time. Only `/readiness` queries the node on each
+request. `/status` and `/metrics` use the last finalized height that the sync loop
+observed, so a scrape never calls the node more often than the sync loop. None of
+these endpoints is an independent fleet monitor.
 
 ## Development and validation
 
