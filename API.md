@@ -122,6 +122,7 @@ Prometheus-compatible metrics endpoint.
 - `indexer_last_block_height`
 - `indexer_sync_duration_seconds`
 - `indexer_node_request_duration_seconds`
+- `indexer_http_request_duration_seconds` (labels `endpoint`, `method`, `status`; `endpoint` is the route template, or `unmatched` for an unknown route)
 - `process_resident_memory_bytes`
 - `process_cpu_seconds_total`
 
