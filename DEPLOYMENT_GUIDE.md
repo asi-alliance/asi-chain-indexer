@@ -198,7 +198,7 @@ The repository ships a single multi-stage `Dockerfile` that:
 
 1. Installs Python dependencies and `grpcio-tools`.
 2. Regenerates the gRPC stubs from `protos/` into `src/grpc_stubs/`.
-3. Builds a slim Python 3.11 runtime image that runs `python -m src.main`.
+3. Builds a slim Python 3.14 runtime image that runs `python -m src.main`.
 
 Compose file:
 
