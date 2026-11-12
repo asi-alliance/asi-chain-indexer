@@ -4,6 +4,10 @@ All notable changes to the ASI-Chain Indexer project will be documented in this 
 
 ## [Unreleased]
 
+### Added
+- ✅ **Public `native_transfer_lifecycle` GraphQL view** — `full-init-hasura.sh` tracks the read-only view with public select (no aggregations) and its relationships (`initiation_deployment`, `completion_deployment`, `initiation_block`, `completion_block`, `transfer`, `deployments.native_transfer_calls`, `deployments.completed_native_transfers`). The raw call, result and alias tables stay untracked. Previously only the unsupported `configure-hasura.py` exposed the view.
+- ✅ **Lifecycle lookups by deploy use indexes** — tracked migration 006 adds an index on `native_transfer_results(deploy_id)` and links results and aliases to calls with `UNION ALL`. A lookup by `initiation_deploy_id` or `completion_deploy_id` no longer reads every native transfer result (about 1 s → under 1 ms on 450,000 results).
+
 ### Changed
 - Add explicit Alembic status/upgrade/adopt commands around existing SQL migrations, with revision tracking, schema validation, transactional rollback and concurrent-run protection.
 - Upgrade the supported Docker and CI interpreter to Python 3.14.10 after clean-image and PostgreSQL/Hasura compatibility validation.
@@ -22,6 +26,10 @@ All notable changes to the ASI-Chain Indexer project will be documented in this 
 ### Removed
 - ❌ **`tenacity`, `aiohttp-cors`** — unused runtime pins; retries live in `src/resilience.py`. Alembic 1.20.1 is now used by the explicit migration commands.
 - ❌ **`src/cache.py`** — dead Redis module: nothing imported it, `redis` was never in `requirements.txt`, and `settings.redis_url` never existed. Remove it rather than add an unused dependency.
+
+### Fixed
+- ✅ **Hasura startup on hosts with many CPUs (#42)** — Compose sets `GHCRTS=-maxN8` (override with `HASURA_GHCRTS`). The image default `-N` started one GHC capability per CPU; on a 384-CPU host Hasura opened 1548 file descriptors against the 1024 soft limit and exited with a `TimerManager` error.
+- ✅ **`get_network_metrics` on an empty database (#41)** — tracked migration 005 replaces the function with the same signature. Without blocks, deployments and transfers it returns `p_divisions` empty buckets that end at `now()` instead of failing with `interval out of range`.
 
 ## [2.3.0] - 2026-09-08
 

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -84,7 +85,7 @@ async def test_empty_upgrade_and_repeat_do_not_replay_sql(isolated):
     for _ in range(2):
         code, _, error = await cli(url, "upgrade")
         assert code == 0, error
-        assert await conn.fetchval("SELECT version_num FROM alembic_version") == "004"
+        assert await conn.fetchval("SELECT version_num FROM alembic_version") == "006"
     assert (
         await conn.fetchval(
             "SELECT data_type FROM information_schema.columns "
@@ -99,10 +100,10 @@ async def test_empty_upgrade_and_repeat_do_not_replay_sql(isolated):
         )
         == "0"
     )
-    assert await cli(url, "status") == (0, "004\n", "")
+    assert await cli(url, "status") == (0, "006\n", "")
 
 
-@pytest.mark.parametrize("revision", range(5))
+@pytest.mark.parametrize("revision", range(7))
 @pytest.mark.asyncio
 async def test_adoption_and_upgrade_preserve_history_and_repair_flag(
     isolated, revision
@@ -123,7 +124,7 @@ async def test_adoption_and_upgrade_preserve_history_and_repair_flag(
     assert await conn.fetchrow("SELECT amount_dust,amount_asi FROM transfers") == before
     code, _, error = await cli(url, "upgrade")
     assert code == 0, error
-    assert await conn.fetchval("SELECT version_num FROM alembic_version") == "004"
+    assert await conn.fetchval("SELECT version_num FROM alembic_version") == "006"
     assert await conn.fetchrow("SELECT amount_dust,amount_asi FROM transfers") == before
     assert await conn.fetchval("SELECT token_decimals FROM transfers") == 8
     assert await conn.fetchval("SELECT count(*) FROM blocks") == 1
@@ -174,7 +175,7 @@ async def test_partial_schema_is_not_stamped(isolated, change):
     assert await conn.fetchval("SELECT to_regclass('alembic_version')") is None
 
 
-@pytest.mark.parametrize("revision", [3, 4], ids=["003", "004"])
+@pytest.mark.parametrize("revision", [3, 4, 5, 6], ids=["003", "004", "005", "006"])
 @pytest.mark.parametrize(
     "table,mode",
     [
@@ -203,7 +204,7 @@ async def test_adoption_rejects_changed_fk_enforcement(isolated, revision, table
     assert await conn.fetchval("SELECT count(*) FROM transfers") == 1
 
 
-@pytest.mark.parametrize("revision", [0, 4], ids=["000", "004"])
+@pytest.mark.parametrize("revision", [0, 4, 5, 6], ids=["000", "004", "005", "006"])
 @pytest.mark.parametrize(
     "change",
     [
@@ -349,3 +350,141 @@ async def test_004_failure_before_stamp_retains_schema_revision_and_lock(
             == "bigint"
         )
     assert await conn.fetchval("SELECT count(*) FROM transfers") == 1
+
+
+async def network_metrics(conn):
+    return await conn.fetch(
+        "SELECT * FROM get_network_metrics(1, 6) ORDER BY bucket_start"
+    )
+
+
+@pytest.mark.asyncio
+async def test_network_metrics_return_empty_buckets_without_data(isolated):
+    conn, url = isolated
+    code, _, error = await cli(url, "upgrade")
+    assert code == 0, error
+    before = await conn.fetchval("SELECT now()")
+    rows = await network_metrics(conn)
+    assert len(rows) == 6
+    assert all(row["deployments_count"] == row["transfers_count"] == 0 for row in rows)
+    assert rows[-1]["bucket_end"] >= before
+    assert rows[-1]["bucket_end"] - rows[0]["bucket_start"] == timedelta(hours=1)
+
+    await conn.execute("""
+        INSERT INTO blocks(block_hash,block_number,timestamp,proposer,finalization_status)
+        VALUES ('only',0,1762770000000,'validator','finalized')
+    """)
+    rows = await network_metrics(conn)
+    assert len(rows) == 6
+    block_time = datetime.fromtimestamp(1762770000, timezone.utc)
+    assert rows[-1]["bucket_end"] == block_time + timedelta(seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_005_upgrade_replaces_failing_network_metrics_on_tracked_004(isolated):
+    conn, url = isolated
+    for path in SQL_FILES[:5]:
+        await conn.execute(path.read_text())
+    with pytest.raises(asyncpg.PostgresError, match="interval out of range"):
+        await network_metrics(conn)
+    assert (await cli(url, "adopt", "--revision", "004"))[0] == 0
+    code, _, error = await cli(url, "upgrade")
+    assert code == 0, error
+    assert await cli(url, "status") == (0, "006\n", "")
+    assert len(await network_metrics(conn)) == 6
+
+
+LIFECYCLE_ROWS = """
+    INSERT INTO blocks(block_hash,block_number,timestamp,proposer,finalization_status)
+    VALUES ('b1',1,1,'validator','finalized'),('b2',2,2,'validator','finalized');
+    INSERT INTO deployments(deploy_id,block_hash,block_number,deployer,
+                            deployer_address,term,timestamp,sig)
+    VALUES ('start','b1',1,'k','a','t',1,'start'),('later','b2',2,'k','a','t',2,'later'),
+           ('fork','b2',2,'k','a','t',2,'fork');
+    INSERT INTO native_transfer_calls(id,block_hash,deploy_id,event_index,return_channel,
+                                      requested_amount,token_decimals,timestamp)
+    VALUES ('done','b1','start',0,'r0','5',18,1),('waiting','b1','start',1,'r1','6',18,1),
+           ('copy','b2','fork',0,'r0','5',18,2);
+    INSERT INTO native_transfer_results(id,call_id,block_hash,deploy_id,response_index,
+                                        phase,success,timestamp)
+    VALUES ('result','done','b2','later',0,'final',true,2);
+    INSERT INTO native_transfer_result_aliases(result_id,call_id)
+    VALUES ('result','copy'),('result','done');
+    INSERT INTO transfers(deploy_id,block_hash,block_number,from_address,to_address,
+                          amount_dust,amount_asi,timestamp,event_index,native_result_id)
+    VALUES ('later','b2',2,'a','b',5,0.000000000000000005,2,0,'result');
+"""
+
+
+async def lifecycle(conn):
+    rows = await conn.fetch(
+        "SELECT * FROM native_transfer_lifecycle ORDER BY call_id, result_id"
+    )
+    return [dict(row) for row in rows]
+
+
+@pytest.mark.asyncio
+async def test_006_upgrade_keeps_lifecycle_rows_and_drops_self_aliases(isolated):
+    conn, url = isolated
+    for path in SQL_FILES[:6]:
+        await conn.execute(path.read_text())
+    await conn.execute(LIFECYCLE_ROWS)
+    before = await lifecycle(conn)
+    assert [(row["call_id"], row["status"]) for row in before] == [
+        ("copy", "coalesced"),
+        ("done", "completed"),
+        ("waiting", "pending"),
+    ]
+    assert (await cli(url, "adopt", "--revision", "005"))[0] == 0
+    code, _, error = await cli(url, "upgrade")
+    assert code == 0, error
+    assert await cli(url, "status") == (0, "006\n", "")
+    assert await lifecycle(conn) == before
+    assert await conn.fetch(
+        "SELECT result_id, call_id FROM native_transfer_result_aliases"
+    ) == [("result", "copy")]
+
+
+def plan_nodes(node):
+    yield node
+    for child in node.get("Plans", []):
+        yield from plan_nodes(child)
+
+
+FILLER_ROWS = """
+    INSERT INTO deployments(deploy_id,block_hash,block_number,deployer,
+                            deployer_address,term,timestamp,sig)
+    SELECT 'f' || i, 'b1', 1, 'k', 'a', 't', 1, 'f' || i FROM generate_series(1, 3000) i;
+    INSERT INTO native_transfer_calls(id,block_hash,deploy_id,event_index,return_channel,
+                                      requested_amount,token_decimals,timestamp)
+    SELECT 'fc' || i, 'b1', 'f' || i, 0, 'r', '1', 18, 1 FROM generate_series(1, 3000) i;
+    INSERT INTO native_transfer_results(id,call_id,block_hash,deploy_id,response_index,
+                                        phase,success,timestamp)
+    SELECT 'fr' || i, 'fc' || i, 'b1', 'f' || i, 0, 'final', true, 1
+    FROM generate_series(1, 3000) i;
+    INSERT INTO native_transfer_result_aliases(result_id,call_id)
+    SELECT 'fr' || i, 'fc' || (i + 1) FROM generate_series(1, 2999, 10) i;
+"""
+
+
+@pytest.mark.parametrize("column", ["initiation_deploy_id", "completion_deploy_id"])
+@pytest.mark.asyncio
+async def test_006_lifecycle_lookup_by_deploy_uses_indexes(isolated, column):
+    conn, url = isolated
+    code, _, error = await cli(url, "upgrade")
+    assert code == 0, error
+    await conn.execute(LIFECYCLE_ROWS)
+    await conn.execute(FILLER_ROWS)
+    await conn.execute("ANALYZE")
+    plan = json.loads(
+        await conn.fetchval(
+            f"EXPLAIN (FORMAT JSON) SELECT * FROM native_transfer_lifecycle "
+            f"WHERE {column} = 'later'"
+        )
+    )[0]["Plan"]
+    nodes = list(plan_nodes(plan))
+    assert not [n for n in nodes if n["Node Type"] in ("Unique", "SetOp", "Aggregate")]
+    results = [n for n in nodes if n.get("Relation Name") == "native_transfer_results"]
+    assert results
+    for node in results:
+        assert "Index Cond" in node, node["Node Type"]

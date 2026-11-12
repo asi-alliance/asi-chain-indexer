@@ -20,7 +20,7 @@ The earlier `postgres_data` volume is retained for rollback. Never attach a
 PostgreSQL 14 data directory to PostgreSQL 18 and expect an in-place upgrade.
 Do not copy the old directory into the new volume.
 
-For a new installation, Compose initializes migrations 000–004. For an existing
+For a new installation, Compose initializes migrations 000–006. For an existing
 installation, first restore its database into an empty PostgreSQL 18 cluster,
 without running the initialization SQL over restored objects. Starting the full
 stack before restoring would start the indexer against an empty database.

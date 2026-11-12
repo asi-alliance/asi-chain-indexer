@@ -14,7 +14,7 @@ from sqlalchemy.engine import make_url
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCK_KEY = 18387725196134226
-REVISIONS = ("000", "001", "002", "003", "004")
+REVISIONS = ("000", "001", "002", "003", "004", "005", "006")
 
 # SQL definitions, not data, are inspected. Extension-owned objects are excluded.
 CATALOG_SQL = """
