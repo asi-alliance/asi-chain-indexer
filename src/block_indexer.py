@@ -21,6 +21,7 @@ from src.alerts import AlertedError, AlertEvent, AlertKind, AlertService, descri
 from src.config import settings
 from src.amounts import amount, token_decimal, integer_json
 from src.database import db
+from src.read_cache import read_cache
 from src.models import (
     Block, BlockParent, Deployment, PendingDeploy, Transfer, Validator, ValidatorBond,
     EpochTransition, NetworkStats, BalanceState
@@ -531,6 +532,14 @@ class BlockIndexer:
 
     async def _process_block(self, block_data: Dict):
         """Process a single block with full details."""
+        try:
+            await self._index_block(block_data)
+        finally:
+            # Any height, including a backfill below the cursor. Dropping the
+            # cache after a failed block is harmless; missing a commit is not.
+            read_cache.invalidate("block")
+
+    async def _index_block(self, block_data: Dict):
         block_info = block_data.get("blockInfo", {})
         deployments = block_data.get("deploys", [])
 
@@ -979,6 +988,8 @@ class BlockIndexer:
             )
 
             if mismatches:
+                # Cached reads may describe the abandoned branch
+                read_cache.invalidate("reorg")
                 logger.warning(
                     "Main chain mismatch detected",
                     heights=[block_num for block_num, _ in mismatches],

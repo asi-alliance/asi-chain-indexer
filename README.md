@@ -288,7 +288,8 @@ environment values and the variables actually passed into containers. For exampl
 Important settings include `NODE_HOST`, `GRPC_PORT`, `HTTP_PORT`,
 `NODE_TIMEOUT`, `GRPC_MAX_RECEIVE_MESSAGE_BYTES`, `DATABASE_URL`, `DATABASE_POOL_SIZE`, `SYNC_INTERVAL`,
 `BATCH_SIZE`, `START_FROM_BLOCK`, `NATIVE_TOKEN_DECIMALS`,
-`ENABLE_ASI_TRANSFER_EXTRACTION` and `ENABLE_PENDING_DEPLOYS_SYNC`.
+`ENABLE_ASI_TRANSFER_EXTRACTION`, `ENABLE_PENDING_DEPLOYS_SYNC`,
+`READ_CACHE_ENABLED` and `READ_CACHE_MAX_ENTRIES`.
 The pending-deploy snapshot represents one node's bounded buffers, not a durable
 network-wide queue. `START_FROM_BLOCK` is an initial-history boundary, not a
 command to discard the existing cursor or reindex stored history.
@@ -343,6 +344,47 @@ compare fresh observations over time. Only `/readiness` queries the node on each
 request. `/status` and `/metrics` use the last finalized height that the sync loop
 observed, so a scrape never calls the node more often than the sync loop. None of
 these endpoints is an independent fleet monitor.
+
+### Read cache
+
+The indexer keeps an in-process read-through cache for three read paths: the
+`blocks`, `deployments` and `transfers` counts of `GET /status`, `GET /api/transfers`
+and `GET /api/address/{address}/transfers`. The cursor, the validator count and
+all other endpoints are read live. `/health` and `/readiness` are never cached.
+
+- Every block that the indexer processes drops all entries. This includes a
+  backfill below the cursor. A detected reorg also drops all entries. There is
+  no TTL.
+- A read that overlaps a block commit is returned but not stored.
+- At most `READ_CACHE_MAX_ENTRIES` results (default 256) are kept; the least
+  recently used result is dropped first. A transfer page holds at most 100 rows.
+- A cache failure falls back to a direct query. It never causes an error response.
+- Set `READ_CACHE_ENABLED=false` to turn the cache off without a code change.
+- The cache does not survive a restart and is not shared between replicas.
+  Run `python -m src.reindex_transfers` only with indexer writes stopped, as
+  documented; the restarted indexer starts with an empty cache.
+
+Metrics: `indexer_read_cache_hits_total{endpoint}`,
+`indexer_read_cache_misses_total{endpoint}`, `indexer_read_cache_evictions_total{reason}`,
+`indexer_read_cache_errors_total{endpoint}`, `indexer_read_cache_entries` and
+`indexer_read_cache_enabled`.
+
+Latency target: p95 of 50 ms or less for `/status`, `/api/transfers` and
+`/api/address/{address}/transfers`. A local measurement used PostgreSQL 18.6
+with 200,000 blocks, 1,000,000 deployments and 1,000,000 transfers. Each endpoint
+received 10 requests per second for 30 s, and a block was committed every 5 s.
+
+| Endpoint | p95 without cache | p95 with cache |
+|---|---|---|
+| `/status` | 62.4 ms | 3.9 ms |
+| `/api/transfers?page=1&limit=20` | 39.4 ms | 1.8 ms |
+| `/api/address/{address}/transfers?page=1&limit=20` | 28.5 ms | 1.4 ms |
+
+A cache miss costs the same as an uncached read. When more than 5% of the
+requests for a key are misses, the p95 is the uncached latency. For example,
+with a block every second at the same request rate, the cached p95 was
+72.2 ms, 34.2 ms and 21.1 ms. Compare `indexer_http_request_duration_seconds`
+on a deployment with these numbers.
 
 ## Development and validation
 

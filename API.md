@@ -127,6 +127,9 @@ Prometheus-compatible metrics endpoint. `indexer_sync_lag_blocks` uses the last 
 - `indexer_last_block_height`
 - `indexer_sync_duration_seconds`
 - `indexer_node_request_duration_seconds`
+- `indexer_read_cache_hits_total`, `indexer_read_cache_misses_total` (label `endpoint`: `status`, `transfers`, `address_transfers`)
+- `indexer_read_cache_evictions_total` (label `reason`: `block`, `reorg`, `capacity`)
+- `indexer_read_cache_errors_total`, `indexer_read_cache_entries`, `indexer_read_cache_enabled`
 - `process_resident_memory_bytes`
 - `process_cpu_seconds_total`
 
