@@ -3,8 +3,7 @@ name: Python tests
 on:
   pull_request:
     branches: [dev, main, "chore/deps-*"]
-  push:
-    branches: [dev, main]
+  workflow_dispatch:
 
 permissions:
   contents: read
