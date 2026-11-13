@@ -1,9 +1,10 @@
 """Monitoring and health check endpoints."""
 
-from datetime import datetime
+from src.time_utils import utc_now
 from typing import Dict, Any, List
 from decimal import Decimal
 import json
+import time
 
 from aiohttp import web
 from prometheus_client import Counter, Gauge, Histogram, generate_latest, REGISTRY
@@ -11,6 +12,7 @@ import structlog
 
 from src.config import settings
 from src.database import db
+from src.read_cache import read_cache
 
 logger = structlog.get_logger(__name__)
 
@@ -54,18 +56,82 @@ node_request_duration = Histogram(
     buckets=[0.1, 0.25, 0.5, 1, 2, 5]
 )
 
+node_reachable = Gauge(
+    "indexer_node_reachable",
+    "1 when the last sync-loop read of the last finalized block succeeded, 0 otherwise"
+)
+
+chain_tip_height = Gauge(
+    "indexer_chain_tip_height",
+    "Last finalized height from the last successful sync-loop read; NaN before the first"
+)
+
+chain_tip_observed = Gauge(
+    "indexer_chain_tip_observed_timestamp_seconds",
+    "Unix time of the last successful sync-loop read of the last finalized block; "
+    "NaN before the first"
+)
+
+UNKNOWN = float("nan")
+
+http_request_duration = Histogram(
+    "indexer_http_request_duration_seconds",
+    "Time taken to serve a monitoring or API request, by route template",
+    ["endpoint", "method", "status"],
+    buckets=[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
+)
+
+# Bounded label values: the route template (never the raw path) and a fixed method set.
+_UNMATCHED_ENDPOINT = "unmatched"
+_LABELLED_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
+
+
+def _endpoint_label(request) -> str:
+    route = request.match_info.route if request.match_info is not None else None
+    resource = route.resource if route is not None else None
+    return resource.canonical if resource is not None else _UNMATCHED_ENDPOINT
+
+
+@web.middleware
+async def observe_request_duration(request, handler):
+    """Record the serving time of every request under its route template."""
+    started = time.perf_counter()
+    status = 500
+    try:
+        response = await handler(request)
+        status = response.status
+        return response
+    except web.HTTPException as e:
+        status = e.status
+        raise
+    finally:
+        method = request.method if request.method in _LABELLED_METHODS else "OTHER"
+        http_request_duration.labels(
+            _endpoint_label(request), method, str(status)
+        ).observe(time.perf_counter() - started)
+
 
 class MonitoringServer:
     """HTTP server for monitoring endpoints."""
 
     def __init__(self, indexer):
         self.indexer = indexer
-        self.app = web.Application()
+        self.app = web.Application(middlewares=[observe_request_duration])
         self._setup_routes()
 
     def _client(self):
         # reuse the indexer's client: opening one per request leaks a grpc channel every time
         return self.indexer.client if self.indexer else None
+
+    def _chain_tip(self):
+        """Last finalized height and its observation time, as the sync loop saw them.
+
+        /metrics and /status use this instead of a node RPC per request, so a
+        scrape never reaches the node more often than the sync loop does.
+        """
+        if not self.indexer or not getattr(self.indexer, "node_reachable", False):
+            return None, getattr(self.indexer, "chain_tip_observed_at", None)
+        return self.indexer.chain_tip, self.indexer.chain_tip_observed_at
 
     def _json_response(self, data, status=200):
         """Create a JSON response with custom serialization."""
@@ -74,7 +140,7 @@ class MonitoringServer:
             if hasattr(obj, 'isoformat'):
                 return obj.isoformat()
             elif isinstance(obj, Decimal):
-                return float(obj)
+                return format(obj, "f")
             raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
         return web.Response(
@@ -87,22 +153,15 @@ class MonitoringServer:
         """Convert database results to JSON-serializable format."""
         if isinstance(data, list):
             return [self._serialize_result(item) for item in data]
-        elif isinstance(data, dict):
-            result = {}
-            for key, value in data.items():
-                if hasattr(value, 'isoformat'):
-                    result[key] = value.isoformat()
-                elif isinstance(value, Decimal):
-                    result[key] = float(value)
-                elif isinstance(value, (dict, list)):
-                    result[key] = self._serialize_result(value)
-                else:
-                    result[key] = value
-            return result
-        elif isinstance(data, Decimal):
-            return float(data)
-        else:
-            return data
+        if isinstance(data, dict):
+            return {key: self._serialize_result(value) for key, value in data.items()}
+        if isinstance(data, Decimal):
+            return format(data, "f")
+        if isinstance(data, int) and abs(data) > 2**53 - 1:
+            return str(data)
+        if hasattr(data, "isoformat"):
+            return data.isoformat()
+        return data
 
     def _setup_routes(self):
         """Setup HTTP routes."""
@@ -130,7 +189,7 @@ class MonitoringServer:
         """Basic health check endpoint."""
         return web.json_response({
             "status": "healthy",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utc_now().isoformat(),
             "version": "1.0.0"
         })
 
@@ -170,7 +229,7 @@ class MonitoringServer:
         return web.json_response({
             "ready": all_healthy,
             "checks": checks,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": utc_now().isoformat()
         }, status=status_code)
 
     async def metrics(self, request):
@@ -200,31 +259,35 @@ class MonitoringServer:
         return web.json_response(status_data)
 
     async def _update_metrics(self):
-        """Update dynamic metrics values."""
+        """Update dynamic metrics values.
+
+        The tip comes from the sync loop, not from a node RPC. Without a valid
+        observation the lag is NaN, never a stale or default zero. The age of a
+        valid observation is time() - indexer_chain_tip_observed_timestamp_seconds.
+        """
+        latest_block, observed_at = self._chain_tip()
+        last_tip = getattr(self.indexer, "chain_tip", None)
+        node_reachable.set(0 if latest_block is None else 1)
+        chain_tip_height.set(UNKNOWN if last_tip is None else last_tip)
+        chain_tip_observed.set(UNKNOWN if observed_at is None else observed_at.timestamp())
         try:
-            # Get last indexed block
             last_indexed = await db.get_last_indexed_block()
             last_block_height.set(last_indexed)
-
-            # Get chain height and calculate lag
-            client = self._client()
-            last_finalized = await client.get_last_finalized_block() if client else None
-            if last_finalized and "blockNumber" in last_finalized:
-                latest_block = last_finalized["blockNumber"]
-                lag = max(0, latest_block - last_indexed)
-                sync_lag.set(lag)
+            sync_lag.set(
+                UNKNOWN if latest_block is None else max(0, latest_block - last_indexed)
+            )
         except Exception as e:
+            sync_lag.set(UNKNOWN)
             logger.error("Failed to update metrics", error=str(e))
 
     async def _get_status(self) -> Dict[str, Any]:
         """Get detailed indexer status."""
         try:
-            # Database stats
+            # Full-table counts change only when a block is committed: cached
+            counts = await read_cache.get_or_load("status", "counts", self._load_status_counts)
+            # Cursor and the small validators table: read live
             db_stats = await db.execute_raw("""
                 SELECT
-                    (SELECT COUNT(*) FROM blocks) as total_blocks,
-                    (SELECT COUNT(*) FROM deployments) as total_deployments,
-                    (SELECT COUNT(*) FROM transfers) as total_transfers,
                     (SELECT COUNT(*) FROM validators) as total_validators,
                     (SELECT value
                      FROM indexer_state
@@ -235,26 +298,18 @@ class MonitoringServer:
                     (SELECT MAX(block_number) FROM blocks) as highest_stored_block
             """)
 
-            stats = dict(db_stats[0]) if db_stats else {}
+            stats = {**counts, **(dict(db_stats[0]) if db_stats else {})}
 
-            # Node status
-            node_status = {}
-            try:
-                client = self._client()
-                last_finalized = await client.get_last_finalized_block() if client else None
-                if last_finalized:
-                    node_status = {
-                        "connected": True,
-                        "latest_block": last_finalized.get("blockNumber")
-                    }
-                else:
-                    node_status = {"connected": False}
-            except Exception:
-                node_status = {"connected": False}
+            # Node status as the sync loop last observed it; no node RPC here
+            latest_block, observed_at = self._chain_tip()
+            node_status = {
+                "connected": latest_block is not None,
+                "latest_block": latest_block,
+                "latest_block_observed_at": observed_at.isoformat() if observed_at else None,
+            }
 
             # Calculate sync status
             last_indexed = int(stats.get("last_indexed_block") or -1)
-            latest_block = node_status.get("latest_block", 0)
 
             return {
                 "indexer": {
@@ -288,16 +343,26 @@ class MonitoringServer:
                     "host": settings.node_host,
                     # "grpc_port": settings.grpc_port,
                     # "http_port": settings.http_port,
-                    "latest_block": node_status.get("latest_block")
+                    "latest_block": node_status.get("latest_block"),
+                    "latest_block_observed_at": node_status.get("latest_block_observed_at")
                 },
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now().isoformat()
             }
         except Exception as e:
             logger.error("Failed to get status", error=str(e))
             return {
                 "error": INTERNAL_ERROR["error"],
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now().isoformat()
             }
+
+    async def _load_status_counts(self) -> Dict[str, Any]:
+        rows = await db.execute_raw("""
+            SELECT
+                (SELECT COUNT(*) FROM blocks) as total_blocks,
+                (SELECT COUNT(*) FROM deployments) as total_deployments,
+                (SELECT COUNT(*) FROM transfers) as total_transfers
+        """)
+        return dict(rows[0]) if rows else {}
 
     async def get_blocks(self, request):
         """Get list of blocks with pagination."""
@@ -358,7 +423,7 @@ class MonitoringServer:
 
             # Get validator bonds for this block
             bonds_query = """
-                SELECT vb.validator_public_key, vb.stake, v.name
+                SELECT vb.validator_public_key, vb.stake, vb.token_decimals, v.name
                 FROM validator_bonds vb
                 JOIN validators v ON vb.validator_public_key = v.public_key
                 WHERE vb.block_number = $1
@@ -466,57 +531,64 @@ class MonitoringServer:
             # Get query parameters
             page = int(request.query.get('page', 1))
             limit = min(int(request.query.get('limit', 20)), 100)
-            offset = (page - 1) * limit
             from_address = request.query.get('from')
             to_address = request.query.get('to')
 
-            # Build query
-            query = """
-                SELECT 
-                    t.id, t.deploy_id, t.block_number, t.from_address, t.to_address,
-                    t.amount_dust, t.amount_asi::FLOAT as amount_asi, t.status, t.created_at,
-                    d.timestamp
-                FROM transfers t
-                JOIN deployments d ON t.deploy_id = d.deploy_id
-            """
-            params = []
-            where_clauses = []
-
-            if from_address:
-                where_clauses.append(f"t.from_address = ${len(params) + 1}")
-                params.append(from_address)
-
-            if to_address:
-                where_clauses.append(f"t.to_address = ${len(params) + 1}")
-                params.append(to_address)
-
-            if where_clauses:
-                query += " WHERE " + " AND ".join(where_clauses)
-
-            query += f" ORDER BY d.timestamp DESC LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
-            params.extend([limit, offset])
-
-            transfers = await db.execute_raw(query, *params)
-
-            # Get total count
-            count_query = "SELECT COUNT(*) as count FROM transfers t"
-            if where_clauses:
-                count_query += " WHERE " + " AND ".join(where_clauses)
-            count_result = await db.execute_raw(count_query, *params[:-2] if params else [])
-            total = count_result[0]['count'] if count_result else 0
-
-            return web.json_response({
-                "transfers": self._serialize_result([dict(t) for t in transfers]),
-                "pagination": {
-                    "page": page,
-                    "limit": limit,
-                    "total": total,
-                    "pages": (total + limit - 1) // limit
-                }
-            })
+            payload = await read_cache.get_or_load(
+                "transfers", (page, limit, from_address, to_address),
+                lambda: self._load_transfers(page, limit, from_address, to_address)
+            )
+            return web.json_response(payload)
         except Exception as e:
             logger.error("Failed to get transfers", error=str(e))
             return self._json_response(INTERNAL_ERROR, status=500)
+
+    async def _load_transfers(self, page, limit, from_address, to_address):
+        offset = (page - 1) * limit
+        # Build query
+        query = """
+            SELECT
+                t.id, t.deploy_id, t.block_number, t.from_address, t.to_address,
+                t.amount_dust, t.amount_asi, t.token_decimals, t.status, t.created_at,
+                d.timestamp
+            FROM transfers t
+            JOIN deployments d ON t.deploy_id = d.deploy_id
+        """
+        params = []
+        where_clauses = []
+
+        if from_address:
+            where_clauses.append(f"t.from_address = ${len(params) + 1}")
+            params.append(from_address)
+
+        if to_address:
+            where_clauses.append(f"t.to_address = ${len(params) + 1}")
+            params.append(to_address)
+
+        if where_clauses:
+            query += " WHERE " + " AND ".join(where_clauses)
+
+        query += f" ORDER BY d.timestamp DESC LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        params.extend([limit, offset])
+
+        transfers = await db.execute_raw(query, *params)
+
+        # Get total count
+        count_query = "SELECT COUNT(*) as count FROM transfers t"
+        if where_clauses:
+            count_query += " WHERE " + " AND ".join(where_clauses)
+        count_result = await db.execute_raw(count_query, *params[:-2] if params else [])
+        total = count_result[0]['count'] if count_result else 0
+
+        return {
+            "transfers": self._serialize_result([dict(t) for t in transfers]),
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total": total,
+                "pages": (total + limit - 1) // limit
+            }
+        }
 
     async def get_validators(self, request):
         """Get list of validators."""
@@ -688,7 +760,7 @@ class MonitoringServer:
                 "deployments": {
                     "by_type": [dict(d) for d in deployment_types]
                 },
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": utc_now().isoformat()
             })
         except Exception as e:
             logger.error("Failed to get network stats", error=str(e))
@@ -700,41 +772,49 @@ class MonitoringServer:
             address = request.match_info['address']
             page = int(request.query.get('page', 1))
             limit = min(int(request.query.get('limit', 20)), 100)
-            offset = (page - 1) * limit
 
-            # Get transfers where address is sender or receiver
-            query = """
-                SELECT 
-                    id, deploy_id, block_number, from_address, to_address,
-                    amount_dust, amount_asi::FLOAT as amount_asi, status, created_at
-                FROM transfers
-                WHERE from_address = $1 OR to_address = $1
-                ORDER BY block_number DESC
-                LIMIT $2 OFFSET $3
-            """
-            transfers = await db.execute_raw(query, address, limit, offset)
-
-            # Get count
-            count_query = """
-                SELECT COUNT(*) as count FROM transfers
-                WHERE from_address = $1 OR to_address = $1
-            """
-            count_result = await db.execute_raw(count_query, address)
-            total = count_result[0]['count'] if count_result else 0
-
-            return web.json_response({
-                "address": address,
-                "transfers": self._serialize_result([dict(t) for t in transfers]),
-                "pagination": {
-                    "page": page,
-                    "limit": limit,
-                    "total": total,
-                    "pages": (total + limit - 1) // limit if limit else 0
-                }
-            })
+            payload = await read_cache.get_or_load(
+                "address_transfers", (address, page, limit),
+                lambda: self._load_address_transfers(address, page, limit)
+            )
+            return web.json_response(payload)
         except Exception as e:
             logger.error("Failed to get address transfers", error=str(e))
             return self._json_response(INTERNAL_ERROR, status=500)
+
+    async def _load_address_transfers(self, address, page, limit):
+        offset = (page - 1) * limit
+
+        # Get transfers where address is sender or receiver
+        query = """
+            SELECT
+                id, deploy_id, block_number, from_address, to_address,
+                amount_dust, amount_asi, token_decimals, status, created_at
+            FROM transfers
+            WHERE from_address = $1 OR to_address = $1
+            ORDER BY block_number DESC
+            LIMIT $2 OFFSET $3
+        """
+        transfers = await db.execute_raw(query, address, limit, offset)
+
+        # Get count
+        count_query = """
+            SELECT COUNT(*) as count FROM transfers
+            WHERE from_address = $1 OR to_address = $1
+        """
+        count_result = await db.execute_raw(count_query, address)
+        total = count_result[0]['count'] if count_result else 0
+
+        return {
+            "address": address,
+            "transfers": self._serialize_result([dict(t) for t in transfers]),
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total": total,
+                "pages": (total + limit - 1) // limit if limit else 0
+            }
+        }
 
     async def start(self):
         """Start the monitoring server."""

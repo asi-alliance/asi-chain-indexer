@@ -6,6 +6,8 @@ import pytest
 from src.models import BalanceState, Block, Deployment, Transfer, ValidatorBond
 from src.block_indexer import BlockIndexer
 from src.sync_progress import BlockBatchProgress
+from src.transfer_reports import ReportUnavailable
+from test_node_exact_api import BLOCK_HASH, node_api
 
 
 def test_block_hash_is_the_only_block_primary_key() -> None:
@@ -136,4 +138,43 @@ async def test_sync_retries_a_failed_sibling_before_advancing(
 
     assert fake_database.last_indexed == 12
     assert fake_database.set_calls == [12]
-    assert indexer._process_block.await_count == 7
+    assert indexer._process_block.await_count == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("replay_available", [False, True])
+async def test_ambiguous_summary_allows_sync_only_after_block_processing(
+    monkeypatch, legacy, replay_available
+):
+    database = FakeDatabase()
+    database.last_indexed = 11
+    monkeypatch.setattr("src.block_indexer.db", database)
+    monkeypatch.setattr("src.block_indexer.settings.start_from_block", 0)
+    monkeypatch.setattr("src.block_indexer.settings.delay_before_node", 0)
+    async with node_api(-1, legacy=legacy, amount_raw="") as node:
+        node.client.get_blocks_by_height = AsyncMock(
+            return_value=[{"blockNumber": 12, "blockHash": BLOCK_HASH}]
+        )
+        indexer = BlockIndexer()
+        indexer.client = node.client
+        indexer._process_block = AsyncMock(
+            side_effect=(
+                None if replay_available else ReportUnavailable("Replay unavailable")
+            )
+        )
+
+        await indexer._sync_blocks()
+        await indexer._sync_blocks()
+
+        if replay_available:
+            assert database.last_indexed == 12
+            assert database.set_calls == [12]
+            assert indexer._process_block.await_count == 1
+        else:
+            assert database.last_indexed == 11
+            assert database.set_calls == []
+            assert indexer._process_block.await_count == 2
+        processed_block = indexer._process_block.call_args.args[0]
+        transfer = processed_block["deploys"][0]["transfers"][0]
+        assert transfer["amountRaw"] is None

@@ -2,6 +2,10 @@
 
 **Version**: 2.2.0 (dag_support) | **Updated**: August 2026
 
+**Database baseline (2026-11-05):** PostgreSQL 18.6 and Hasura v2.51.4.
+Existing installations must follow [the upgrade runbook](POSTGRES_UPGRADE.md)
+before running deployment commands. The examples below are for fresh databases.
+
 This guide covers deployment scenarios for the ASI-Chain Indexer. The indexer
 talks to an ASI Chain node **over gRPC** (the previous Rust-CLI based client has
 been removed — `feat: remove rust-cli`) and follows the **DAG-aware** schema:
@@ -90,7 +94,7 @@ curl -s http://localhost:8080/v1/graphql -H "Content-Type: application/json" \
 - `metrics-cron` — Alpine sidecar running
   `scripts/refresh-network-metrics-once.sh` every 3 min via `dcron` to upsert
   `network_metrics_buckets`
-- `hasura` (port 8080) — Hasura GraphQL Engine v2.36.0, unauthorized role `public`
+- `hasura` (port 8080) — Hasura GraphQL Engine v2.51.4, unauthorized role `public`
 
 **Note:** Step 2 (the `./deploy.sh` wrapper) is the recommended entrypoint.
 If you prefer to run `docker compose up -d` manually, you MUST afterwards run
@@ -122,7 +126,7 @@ python3 -m venv venv
 source venv/bin/activate
 
 # Install dependencies
-pip install -r requirements.txt
+python -m pip install --require-hashes -r requirements.lock
 
 # (Optional) Regenerate gRPC stubs from protos/ into src/grpc_stubs/
 pip install grpcio-tools==1.83.0
@@ -145,7 +149,7 @@ docker run -d \
   -e POSTGRES_DB=asichain \
   -p 5432:5432 \
   -v $(pwd)/migrations:/docker-entrypoint-initdb.d \
-  postgres:14-alpine
+  postgres:18.6-alpine
 
 # Configure environment for remote node
 export NODE_HOST=13.251.66.61   # observer host
@@ -189,14 +193,17 @@ services:
       retries: 3
 
   postgres:
-    image: postgres:14-alpine
+    image: postgres:18.6-alpine
     environment:
       - POSTGRES_USER=indexer
       - POSTGRES_PASSWORD=${DB_PASSWORD}
       - POSTGRES_DB=asichain
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres18_data:/var/lib/postgresql
       - ./migrations/000_comprehensive_initial_schema.sql:/docker-entrypoint-initdb.d/000_comprehensive_initial_schema.sql
+      - ./migrations/001_bigint_amounts.sql:/docker-entrypoint-initdb.d/001_bigint_amounts.sql
+      - ./migrations/002_executed_transfers.sql:/docker-entrypoint-initdb.d/002_executed_transfers.sql
+      - ./migrations/003_native_transfer_calls.sql:/docker-entrypoint-initdb.d/003_native_transfer_calls.sql
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U indexer"]
@@ -205,7 +212,7 @@ services:
       retries: 5
 
   metrics-cron:
-    image: alpine:3.19
+    image: alpine:3.24
     environment:
       DATABASE_URL: postgresql://indexer:${DB_PASSWORD}@postgres:5432/asichain
       LOOKBACK_HOURS: 168
@@ -216,13 +223,13 @@ services:
     entrypoint: >
       sh -c '
         set -e
-        apk add --no-cache postgresql-client dcron >/dev/null 2>&1
+        apk add --no-cache postgresql18-client dcron >/dev/null 2>&1
         echo "*/3 * * * * /scripts/refresh-network-metrics-once.sh >> /proc/1/fd/1 2>&1" | crontab -
         crond -f -l 2
       '
 
   hasura:
-    image: hasura/graphql-engine:v2.36.0
+    image: hasura/graphql-engine:v2.51.4
     ports:
       - "8080:8080"
     depends_on:
@@ -234,10 +241,11 @@ services:
       HASURA_GRAPHQL_ADMIN_SECRET: ${HASURA_ADMIN_SECRET}
       HASURA_GRAPHQL_UNAUTHORIZED_ROLE: "public"
       HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES: "true"
+      GHCRTS: ${HASURA_GHCRTS:--maxN8}
     restart: unless-stopped
 
 volumes:
-  postgres_data:
+  postgres18_data:
 ```
 
 Deploy:
@@ -253,6 +261,19 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 # Configure Hasura (tracking, relationships, public permissions)
 ./scripts/full-init-hasura.sh
 ```
+
+### Hasura runtime capabilities
+
+The Hasura image starts its GHC runtime with `-N`, which creates one capability
+for each host CPU. Each capability uses operating-system threads and file
+descriptors. On a host with 384 CPUs, Hasura opened 1548 file descriptors. The
+container soft limit is 1024, so Hasura exited at startup with
+`getSystemTimerManager: the TimerManager requires linking against the threaded runtime`.
+
+Compose sets `GHCRTS=-maxN8`: at most 8 capabilities, and never more than the
+available CPUs. To change the value, set `HASURA_GHCRTS` in `.env`, for example
+`HASURA_GHCRTS=-maxN16`. If you run Hasura outside this Compose file, set
+`GHCRTS` in the same way, or raise the container `nofile` limit.
 
 ### Kubernetes Deployment
 
@@ -309,6 +330,19 @@ spec:
           limits:
             memory: "512Mi"
             cpu: "1000m"
+```
+
+This Deployment runs only the indexer. If you run Hasura in Kubernetes, set
+`GHCRTS` in the Hasura container. The GHC runtime counts the CPUs of the node,
+and a pod CPU limit does not change that count. See
+[Hasura runtime capabilities](#hasura-runtime-capabilities).
+
+```yaml
+      - name: hasura
+        image: hasura/graphql-engine:v2.51.4
+        env:
+        - name: GHCRTS
+          value: "-maxN8"
 ```
 
 ## Multi-Node Setup

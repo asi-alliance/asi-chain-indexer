@@ -14,11 +14,10 @@ help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*##"; printf "\033[36m%-20s\033[0m %s\n", "Command", "Description"} /^[a-zA-Z_-]+:.*?##/ { printf "\033[36m%-20s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 install: ## Install production dependencies
-	$(PIP) install -r requirements.txt
+	$(PYTHON) -m pip install --require-hashes -r requirements.lock
 
 dev-install: ## Install development dependencies
-	$(PIP) install -r requirements.txt
-	$(PIP) install pytest pytest-asyncio pytest-cov black flake8 mypy
+	$(PYTHON) -m pip install --require-hashes -r requirements-dev.lock
 
 test: ## Run tests
 	pytest tests/ -v --cov=src --cov-report=term-missing
@@ -31,15 +30,7 @@ format: ## Format code with black
 	black src/ tests/
 
 protos: ## Regenerate the gRPC client from protos/ (needs: pip install grpcio-tools)
-	$(PYTHON) -m grpc_tools.protoc \
-		-I protos \
-		--python_out=src/grpc_stubs --grpc_python_out=src/grpc_stubs \
-		protos/DeployServiceV1.proto \
-		protos/DeployServiceCommon.proto \
-		protos/CasperMessage.proto \
-		protos/RhoTypes.proto \
-		protos/ServiceError.proto \
-		protos/scalapb/scalapb.proto
+	$(PYTHON) scripts/generate-protos.py
 
 run: ## Run the indexer locally
 	$(PYTHON) -m src.main
@@ -47,8 +38,14 @@ run: ## Run the indexer locally
 run-reset: ## Run the indexer with database reset
 	$(PYTHON) -m src.main --reset
 
-migrate: ## Run database migrations
-	psql $(DATABASE_URL) < migrations/000_comprehensive_initial_schema.sql
+migrate: ## Apply pending tracked migrations to DATABASE_URL
+	$(PYTHON) -m src.migrate upgrade
+
+migration-status: ## Show recorded schema revision
+	$(PYTHON) -m src.migrate status
+
+migration-adopt: ## Adopt existing SQL schema (set REVISION=000/001/002/003/004/005/006/007)
+	$(PYTHON) -m src.migrate adopt --revision $(REVISION)
 
 docker-build: ## Build Docker image
 	docker build -t asi-indexer:latest .

@@ -10,7 +10,7 @@ This guide provides detailed information for developers working on the ASI Chain
 - Docker Desktop 20.10+
 - Python 3.11+
 - Node.js 20+
-- PostgreSQL 14+ (for local development without Docker)
+- PostgreSQL 18.6 (the tested version, for local development without Docker)
 - Git
 
 ### IDE Recommendations
@@ -71,8 +71,7 @@ indexer/src/
 ├── alerts.py            # AlertService - Mattermost alerts for critical failures
 ├── sync_progress.py     # BlockBatchProgress - per-batch sync cursor tracking
 ├── addr.py              # ASI address conversion helpers
-├── resilience.py        # Error recovery mechanisms
-└── cache.py             # Caching utilities
+└── resilience.py        # Error recovery mechanisms
 ```
 
 ### Frontend Module Organization

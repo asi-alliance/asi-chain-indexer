@@ -13,23 +13,6 @@ for arg in "$@"; do
   esac
 done
 
-# --- Optional clean deploy ---
-if [ "$CLEAN_DEPLOY" = true ]; then
-  echo "⚠️  Performing CLEAN deploy: stopping containers, removing volumes and images..."
-  docker compose down -v --remove-orphans || true
-
-  echo "🧹 Removing local images related to the project..."
-  images=$(docker images --format "{{.Repository}}" | grep -E "indexer|hasura|postgres" || true)
-  if [ -n "$images" ]; then
-      echo "$images" | xargs -r docker rmi -f
-  else
-      echo "No project-related images found to remove."
-  fi
-
-  echo "✅ Clean environment ready for fresh build."
-  echo
-fi
-
 # --- Load .env if exists ---
 if [ -f ".env" ]; then
     sed -i 's/\r$//' .env
@@ -49,10 +32,40 @@ for var in "${REQUIRED_VARS[@]}"; do
     fi
 done
 
-echo "✅ All required environment variables loaded from .env:"
-for var in "${REQUIRED_VARS[@]}"; do
-    echo "   • $var=${!var}"
-done
+# ASI defaults are intentional; legacy installations can override both settings.
+export NODE_PROTOCOL_PROFILE="${NODE_PROTOCOL_PROFILE:-uint256}"
+export NATIVE_TOKEN_DECIMALS="${NATIVE_TOKEN_DECIMALS:-18}"
+case "$NODE_PROTOCOL_PROFILE" in
+    classic|uint256) ;;
+    *) echo "ERROR: NODE_PROTOCOL_PROFILE must be classic or uint256"; exit 1 ;;
+esac
+if ! [[ "$NATIVE_TOKEN_DECIMALS" =~ ^(0|[1-9][0-9]?)$ ]] ||
+   [ "$NATIVE_TOKEN_DECIMALS" -gt 77 ]; then
+    echo "ERROR: NATIVE_TOKEN_DECIMALS must be an integer from 0 to 77"
+    exit 1
+fi
+
+echo "Required environment variables are set."
+echo "Selected node profile: $NODE_PROTOCOL_PROFILE; native decimals: $NATIVE_TOKEN_DECIMALS"
+# Validate configuration before any container or volume mutation.
+docker compose config --quiet
+
+# --- Optional clean deploy ---
+if [ "$CLEAN_DEPLOY" = true ]; then
+  echo "⚠️  Performing CLEAN deploy: stopping containers, removing volumes and images..."
+  docker compose down -v --remove-orphans || true
+
+  echo "🧹 Removing local images related to the project..."
+  images=$(docker images --format "{{.Repository}}" | grep -E "indexer|hasura|postgres" || true)
+  if [ -n "$images" ]; then
+      echo "$images" | xargs -r docker rmi -f
+  else
+      echo "No project-related images found to remove."
+  fi
+
+  echo "✅ Clean environment ready for fresh build."
+  echo
+fi
 
 echo "--- Building and starting containers ---"
 docker compose up -d --build

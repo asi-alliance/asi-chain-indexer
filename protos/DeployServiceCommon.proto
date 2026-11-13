@@ -29,6 +29,7 @@ message FindDeployQuery {
 
 message BlockQuery {
   string hash = 1;
+  bool exactTransferAmounts = 2;
 }
 
 message ReportQuery{
@@ -77,6 +78,7 @@ message PrivateNamePreviewQuery {
 }
 
 message LastFinalizedBlockQuery {
+  bool exactTransferAmounts = 1;
 }
 
 message IsFinalizedQuery {
@@ -103,28 +105,6 @@ message DeployFinalizationStatusInfo {
   optional bytes latestBlockHash     = 3;
 }
 
-message PendingDeploysQuery {
-  // Empty bytes = return all pending deploys regardless of deployer.
-  // Non-empty = return only deploys signed by this public key.
-  bytes deployerPubkey = 1;
-}
-
-message PendingDeployInfo {
-  DeployDataProto deploy = 1 [(scalapb.field).no_box = true];
-  // true  = from rejected_deploy_buffer (recovering after merge conflict)
-  // false = from deploy_storage (fresh, not yet proposed)
-  bool   isRejected = 2;
-}
-
-message PendingDeploysResponsePayload {
-  repeated PendingDeployInfo deploys = 1;
-  // Total count of pending deploys that matched the query before cap
-  // truncation was applied. Compare with `deploys.size()` to detect
-  // truncation: when `deploys.size() < totalAvailable`, more pending
-  // deploys exist than were returned.
-  uint32 totalAvailable = 2;
-}
-
 message BondStatusQuery {
   bytes publicKey = 1;
 }
@@ -148,9 +128,10 @@ message JustificationInfo{
 message TransferInfo {
   string fromAddr   = 1; // Sender address
   string toAddr     = 2; // Recipient address
-  int64 amount      = 3; // Amount in dust (smallest unit)
+  int64 amount      = 3; // Legacy: amountRaw when it fits int64, otherwise -1
   bool success      = 4; // Whether the transfer succeeded
   string failReason = 5; // Error message if success is false, empty otherwise
+  string amountRaw  = 6; // Exact amount in dust (smallest unit) as a decimal string
 }
 
 message DeployInfo{
@@ -167,6 +148,29 @@ message DeployInfo{
   string systemDeployError    = 12;
   repeated TransferInfo transfers = 13;
   bool transfersAvailable         = 14; // true when transfers were extracted (readonly), false on validators
+  repeated DeployParameter parameters = 15;
+}
+
+message PendingDeploysQuery {
+  // Empty bytes = return all pending deploys regardless of deployer.
+  // Non-empty = return only deploys signed by this public key.
+  bytes deployerPubkey = 1;
+}
+
+message PendingDeployInfo {
+  DeployDataProto deploy = 1 [(scalapb.field).no_box = true];
+  // true  = from rejected_deploy_buffer (recovering after merge conflict)
+  // false = from deploy_storage (fresh, not yet proposed)
+  bool   isRejected = 2;
+}
+
+message PendingDeploysResponsePayload {
+  repeated PendingDeployInfo deploys = 1;
+  // Total count of pending deploys that matched the query before cap
+  // truncation was applied. Compare with `deploys.size()` to detect
+  // truncation: when `deploys.size() < totalAvailable`, more pending
+  // deploys exist than were returned.
+  uint32 totalAvailable = 2;
 }
 
 message LightBlockInfo {
@@ -260,8 +264,16 @@ message ReportProto{
   }
 }
 
+enum ReportPhase {
+  REPORT_PHASE_UNSPECIFIED = 0;
+  REPORT_PHASE_PRECHARGE   = 1;
+  REPORT_PHASE_USER        = 2;
+  REPORT_PHASE_REFUND      = 3;
+}
+
 message SingleReport{
   repeated ReportProto events = 1;
+  ReportPhase phase           = 2;
 }
 
 message DeployInfoWithEventData{

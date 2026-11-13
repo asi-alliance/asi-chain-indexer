@@ -1,15 +1,19 @@
 """Configuration management for the indexer."""
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
+
+    native_token_decimals: int = Field(default=18, ge=0, le=77)
+
+    node_protocol_profile: Literal["classic", "uint256"] = "uint256"
 
     # Node Configuration
     node_timeout: int = Field(
@@ -25,6 +29,13 @@ class Settings(BaseSettings):
     grpc_port: int = Field(
         default=40452,
         description="GRPC port for status queries"
+    )
+
+    grpc_max_receive_message_bytes: int = Field(
+        default=64 * 1024 * 1024,
+        ge=1,
+        le=2**31 - 1,
+        description="Maximum size of a gRPC response message in bytes"
     )
 
     node_host: str = Field(
@@ -191,6 +202,17 @@ class Settings(BaseSettings):
         description="Enable health check endpoint"
     )
 
+    # Read cache for /status counts and transfer lists; dropped on every committed block
+    read_cache_enabled: bool = Field(
+        default=True,
+        description="Serve repeated /status counts and transfer list reads from process memory"
+    )
+    read_cache_max_entries: int = Field(
+        default=256,
+        ge=1,
+        description="Maximum cached read results; the least recently used entry is dropped first"
+    )
+
     # Hasura Configuration (optional, not used by indexer but may be in env)
     hasura_admin_secret: Optional[SecretStr] = Field(
         default=None,
@@ -213,11 +235,12 @@ class Settings(BaseSettings):
             raise ValueError("ALERTS_ENABLED is true but MATTERMOST_WEBHOOK_URL is empty")
         return self
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
-        extra = "allow"  # allow extra fields in .env
-        hide_input_in_errors = True
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=False,
+        extra="allow",  # allow extra fields in .env
+        hide_input_in_errors=True,
+    )
 
 
 # Global settings instance

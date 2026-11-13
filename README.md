@@ -1,579 +1,478 @@
-<div align="center">
+# ASI Chain Indexer
 
-# ASI Chain: Indexer
+The indexer reads ASI Chain node gRPC and HTTP APIs, stores blocks and native-token
+activity in PostgreSQL, and exposes data through Hasura GraphQL and an aiohttp API.
+It uses SQLAlchemy ORM and asyncpg directly; no external node CLI is required.
 
-[![Status](https://img.shields.io/badge/Status-BETA-FFA500?style=for-the-badge)](https://github.com/asi-alliance/asi-chain-explorer)
-[![Version](https://img.shields.io/badge/Version-0.1.0-A8E6A3?style=for-the-badge)](https://github.com/asi-alliance/asi-chain-explorer/releases)
-[![License](https://img.shields.io/badge/License-Apache%202.0-1A1A1A?style=for-the-badge)](LICENSE)
-[![Docs](https://img.shields.io/badge/Docs-Available-C4F0C1?style=for-the-badge)](https://docs.asichain.io/explorer/usage/)
-
-<h3>Blockchain Indexer Infrastructure for ASI Chain</h3>
-
-Part of the [**Artificial Superintelligence Alliance**](https://superintelligence.io) ecosystem
-
-*Uniting Fetch.ai, SingularityNET and CUDOS*
-
-</div>
-
----
-
-**ASI Chain Indexer** provides comprehensive blockchain data synchronization and hasura interface for exploring blocks, transactions, validators, and network statistics on the ASI Chain network.
-
----
-
-
-A high-performance blockchain indexer for ASI-Chain that synchronizes data from ASI nodes using the node's native gRPC + HTTP API and stores it in PostgreSQL for efficient querying.
-
-## Latest Version
-
-The indexer provides complete automation for blockchain data synchronization:
-- Full blockchain sync from genesis (block 0) via the node gRPC/HTTP API
-- Automatic Hasura GraphQL relationships setup
-- Enhanced ASI transfer detection with Rholang pattern matching
-- Comprehensive database schema with single migration
-- Balance tracking with bonded/unbonded separation
-- DAG-aware block storage (multi-parent support via `block_parents`)
-- Pending deploys snapshot from the node's deploy buffers (via `getPendingDeploys` RPC)
-
-## Current Status
-
-✅ **Working Features:**
-- **Genesis block processing** with automatic extraction of validator bonds and initial allocations
-- **Full blockchain synchronization from block 0** via the node gRPC/HTTP API
-- **Enhanced ASI transfer detection** - now supports match-based Rholang patterns
-- **Balance state tracking** - separate bonded and unbonded balances per address
-- **GraphQL API** via Hasura with automatic bash-based configuration
-- Enhanced block metadata extraction (state roots, bonds, validators, justifications)
-- PostgreSQL storage with 150-char address fields (supports both ASI addresses and validator keys)
-- Deployment extraction with full Rholang code
-- Smart contract type classification (ASI transfers, validator ops, etc.)
-- ASI transfer extraction with both variable-based and match-based pattern matching
-- Address validation supporting 52-56 character ASI addresses
-- Validator tracking with full public keys (130+ characters)
-- Network consensus monitoring
-- Advanced search capabilities (blocks by hash, deployments by ID/deployer)
-- Network statistics and analytics
-- Prometheus metrics endpoint
-- Health and readiness checks
-- **Zero-touch deployment** - complete automation with automatic Hasura relationships
-- **Complete REST API and GraphQL interface** with working nested queries
-- **Pending deploys tracking** - live snapshot of the node's deploy buffers via the `getPendingDeploys` RPC, refreshed every sync cycle
-
-⚠️ **Known Limitations:**
-- **Epoch transitions tracking** - Table exists but data not populated (epoch rewards not tracked)
-- **Validator rewards** - Not tracked in current implementation
-
-✅ **Recent Improvements:**
-- Manual Hasura configuration eliminated - relationships setup automatically
-- Comprehensive migration - single `000_comprehensive_initial_schema.sql`
-- Data quality improvements - proper NULL handling
-- Enhanced error tracking
-
-📊 **Performance:**
-- Syncs up to 50 blocks per batch
-- Processes blocks from genesis without limitations
-- Sub-second block processing time
-- Handles complex block metadata including justifications
-- **240+ blocks indexed in initial sync**
-- **148+ deployments tracked with full metadata**
-- **732+ validator bond records maintained**
-
-🔧 **Technical Improvements:**
-- Uses the node's native gRPC + HTTP API for blockchain interaction (no external CLI binary)
-- Vendor node protos under `protos/`, gRPC stubs generated at build time
-- Enhanced database schema for additional data types
-- Proper NULL handling in error_message fields
-- Multi-stage Docker builds for optimized images
-
-### Stack
-
-- **Python 3.11**: Core programming language
-- **asyncio**: Asynchronous processing framework
-- **SQLAlchemy 2.0.31**: ORM and database abstraction
-- **asyncpg 0.29.0**: PostgreSQL async driver
-- **Pydantic 2.7.4**: Configuration and data validation
-- **pydantic-settings 2.3.4**: Settings management
-- **structlog 24.2.0**: Structured logging
-- **prometheus-client 0.20.0**: Metrics exposure
-- **aiohttp 3.9.5**: HTTP client
-- **click 8.1.7**: CLI interface
-- **tenacity 8.5.0**: Retry logic
-
+This README describes the integration branch, `dev`. Use the files at your selected
+revision as the configuration and dependency references. A feature PR or a published
+image may contain different behavior; verify its source before deployment.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     ASI Chain Node                          │
-│                  (RChain-based Network)                     │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-                      │ gRPC (40412) / HTTP (40413)
-                      │
-┌─────────────────────▼───────────────────────────────────────┐
-│                  gRPC Node Client                            │
-│         (Blockchain Data Extraction Interface)               │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-                      │ in-process calls
-                      │
-┌─────────────────────▼───────────────────────────────────────┐
-│                  Python Indexer Service                     │
-│  - Block synchronization                                    │
-│  - Deployment processing                                    │
-│  - Transfer extraction                                      │
-│  - Validator tracking                                       │
-│  - Network statistics                                       │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-                      │ asyncpg/SQLAlchemy
-                      │
-┌─────────────────────▼───────────────────────────────────────┐
-│                   PostgreSQL Database                       │
-│  Tables: blocks, block_parents, deployments, transfers,     │
-│         pending_deploys, validators, validator_bonds,       │
-│         balance_states, network_stats, epoch_transitions,    │
-│         block_validators, indexer_state                     │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-                      │ Database Connection
-                      │
-┌─────────────────────▼───────────────────────────────────────┐
-│                   Hasura GraphQL Engine                     │
-│  - Auto-generated GraphQL API                               │
-│  - Views: transaction_history, block_ancestors/descendants  │
-│  - SQL functions: get_block_ancestors/descendants, metrics  │
-│  - Real-time queries with polling                           │
-│  - Query optimization                                       │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-                      │ GraphQL (HTTP)
-                      │
-┌─────────────────────▼───────────────────────────────────────┐
-│                  Client Applications                        │
-│  - Explorer Frontend                                        │
-│  - Your App                                                 │
-└─────────────────────────────────────────────────────────────┘
+```text
+┌──────────────────────────────────────────────────────────────┐
+│ ASI Chain observer node                                      │
+│ Blocks, deploys, validator observations and replay reports   │
+└──────────────────────┬───────────────────────────────────────┘
+                       │
+                       │ gRPC + HTTP (configured node ports)
+                       ▼
+┌──────────────────────────────────────────────────────────────┐
+│ Node API client                                              │
+│ gRPC block/deploy reads; HTTP validators and replay traces   │
+└──────────────────────┬───────────────────────────────────────┘
+                       │
+                       │ in-process calls
+                       ▼
+┌──────────────────────────────────────────────────────────────┐
+│ Python indexer service                                       │
+│ Block synchronization and deploy processing                  │
+│ Native call/result correlation and successful transfers      │
+│ Validator observations, network statistics and sync cursor   │
+└──────────────────────┬───────────────────────────────────────┘
+                       │
+                       │ asyncpg / SQLAlchemy
+                       ▼
+┌──────────────────────────────────────────────────────────────┐
+│ PostgreSQL database                                          │
+│ blocks, block_parents, deployments, pending_deploys          │
+│ transfers, native_transfer_calls, native_transfer_results    │
+│ validators, validator_bonds, block_validators                │
+│ balance_states, network_stats, epoch_transitions             │
+│ indexer_state                                                │
+└──────────────────────┬───────────────────────────────────────┘
+                       │
+                       │ tracked tables, views and SQL functions
+                       ▼
+┌──────────────────────────────────────────────────────────────┐
+│ Hasura GraphQL engine                                        │
+│ DAG relationships, exact-amount queries and live updates     │
+└──────────────────────┬───────────────────────────────────────┘
+                       │
+                       │ GraphQL over HTTP / WebSocket
+                       ▼
+┌──────────────────────────────────────────────────────────────┐
+│ Client applications                                          │
+│ Explorer, wallet and other consumers                         │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-## Node gRPC/HTTP API Used
+The indexer also exposes its own HTTP data, status and Prometheus endpoints on
+port 9090. The metrics sidecar refreshes PostgreSQL network metric buckets; it
+does not sit between the indexer and Hasura. See [API and monitoring](#api-and-monitoring)
+for these paths and the metadata requirements for lifecycle queries.
 
-The indexer talks to the node directly via gRPC (primary) and HTTP (fallback for validator list), using vendored protos from `protos/`. Key RPCs:
+For runtime versions, dependency pins and lock maintenance, see
+[DEPENDENCIES.md](DEPENDENCIES.md).
 
-1. **getBlocksByHeights** - Fetch blocks within a height range (supports large batches)
-2. **getBlock** - Get detailed block information including deployments
-3. **findDeploy** - Retrieve specific deployment details
-4. **getPendingDeploys** - List deploys waiting in the node's buffers (deploy_storage + rejected-recovery), optionally filtered by deployer; snapshot refreshed every sync cycle
-5. **getBonds** - Get current validator bonds and stakes
-6. **showMainChain** - Verify main chain consistency
-7. **status** - Node health check
-8. HTTP `/api/validators` - List currently active validators (no gRPC equivalent)
+The service stores blocks by hash and retains ordered parent edges, deploys,
+validator observations, pending deploy snapshots, exact amounts, native call/result
+history and a sync cursor. Successful native movements come from replay reports,
+including calls completed by a later deploy. Pending/rejected calls remain separate
+from successful ledger totals. Hasura exposes relationships, SQL views and live
+queries; the metrics sidecar refreshes network metric buckets every three minutes.
 
-## ⚡ Quick Start
-## Requirements
+## Node compatibility and exact amounts
 
-- Docker and Docker Compose (recommended)
-- OR Python 3.9+ and PostgreSQL 14+
-- Running node (gRPC port & HTTP port)
+Configure a read-only observer with the gRPC service described by [protos/](protos/),
+HTTP APIs, retained replay state and phase-marked `/reporting/trace` responses for
+the standard SystemVault contract. Transfer extraction requires these reports;
+missing, mismatched or unsupported reports cause retry rather than source-regex
+fallback. A reachable node alone does not establish compatibility.
 
-## Installation
+Raw token amounts are checked Python integers stored as uint256-range
+`NUMERIC(78,0)`. Human-readable amounts use exact decimal strings. Keep
+`HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES=true` and preserve strings in consumers.
 
-### Recommended Installation
+Python, Docker Compose and the environment examples default
+`NATIVE_TOKEN_DECIMALS` to **18** for the ASI network.
+Set `NATIVE_TOKEN_DECIMALS` explicitly to the chain's actual precision, including
+**8** for legacy eight-decimal chains. This setting must match node token metadata;
+choosing the uint256 wire profile does not choose the token's precision.
+Startup checks the configured precision. Legacy nodes without token metadata
+support the eight-decimal profile. Each row retains its recorded precision;
+changing the setting does not rescale historical balances or change the chain
+denomination.
+
+The default wire contract is `uint256`. For legacy nodes, explicitly select
+`NODE_PROTOCOL_PROFILE=classic` at build and runtime:
+
+| Profile | Pinned node schema | Monetary wire fields |
+|---|---|---|
+| `uint256` (default) | [merged #881 at 6233501](https://github.com/F1R3FLY-io/f1r3node-rust/commit/6233501064492d0cac9c7ebc598daf70c501a215) | Decimal-string stakes/prices/`amountRaw`; 32-byte big-endian pending deploy prices; no exact-transfer flags |
+| `classic` (explicit legacy profile) | [#896 at 92903a1](https://github.com/F1R3FLY-io/f1r3node-rust/commit/92903a1d81c49fa0a035fb7ee729002e38428280) | Legacy int64 stakes/prices; exact transfer negotiation and authoritative `amountRaw` |
+
+This includes the exact-transfer and replay-history hardening from
+[#22](https://github.com/asi-alliance/asi-chain-indexer/pull/22). Missing or malformed
+compact transfer amounts stay unknown; replay remains authoritative for the ledger.
+Signed rejected attempts are preserved, including requests outside uint256.
+`GRPC_MAX_RECEIVE_MESSAGE_BYTES` bounds responses (default 64 MiB, range 1–2147483647).
+
+For the default uint256 image and local Compose installation:
 
 ```bash
-# Step 1: Create and configure .env file in /indexer directory
+docker compose build indexer
+# After the reviewed database/metadata upgrade:
+docker compose up -d --force-recreate indexer
+```
+
+Standalone `docker build .` and local `make protos PYTHON=python` also default to
+uint256 when `NODE_PROTOCOL_PROFILE` is unset. Compose honors an existing profile
+selection in `.env`.
+
+For a legacy node, set `NODE_PROTOCOL_PROFILE=classic` in `.env` before the Compose
+build and keep it set for runtime. For a standalone legacy image, use
+`docker build --build-arg NODE_PROTOCOL_PROFILE=classic .`. For local Python, export
+`NODE_PROTOCOL_PROFILE=classic` before both generating bindings and running the
+indexer. The legacy profile keeps the existing `classic` name.
+
+Rebuild the image or regenerate bindings when changing profiles. A runtime override
+alone cannot change compiled bindings. The image retains its build profile as the
+runtime default. An environment/binding mismatch fails immediately. Monetary
+messages reject incompatible wire fields on every read, including after a node
+schema switch or reconnect; rejected blocks cannot advance the sync cursor.
+Select by source revision, not by a guessed version or token precision.
+See [schema provenance](protos/README.md).
+
+Migration 004 widens included and pending `phlo_price` to checked `NUMERIC(78,0)`.
+Apply it once with writers stopped; then reload Hasura metadata so prices become
+`numeric` GraphQL strings. Consumers with typed `bigint` price filters must adapt.
+The migration preserves historical values and per-row precision. Heights, timestamps,
+phlo limits and gas counts retain their existing bounded types.
+
+Validator refreshes read finalized stakes over gRPC independently of HTTP activity
+membership. When HTTP membership is unavailable, stakes and recorded precision
+still refresh while existing activity statuses are preserved. New validators
+start as `bonded`; a successful HTTP response can update their activity status.
+Stored validators that are not in the finalized bond set become `inactive`. If such
+a validator bonds again, the next refresh sets `active` or `bonded` (`bonded` when
+HTTP membership is unavailable). A failed finalized-block read, or a finalized
+block without bonds, is not treated as membership evidence: stored statuses and
+stakes are kept unchanged until a later refresh reads a non-empty bond set.
+
+`python analyze_transfers.py` reads successful ledger transfers, including
+`genesis_mint` and `genesis_bond` records, through Hasura
+using `HASURA_URL` (default `http://localhost:8080/v1/graphql`) and an optional
+`HASURA_ADMIN_SECRET`. It paginates by transfer ID, rejects GraphQL errors, and
+computes exact totals and net flows from `amount_dust` and each row's recorded
+`token_decimals`. Detailed output retains fractional units; averages use exact
+fractions. These net flows exclude fees and are not wallet balance snapshots.
+
+Before release, validate a pinned fresh-state #881 observer with a funded wide
+transfer through ingestion, SQL and GraphQL. Protocol fixtures and database tests
+do not replace that live acceptance. Switching this setting does not migrate node
+state, authorize a chain reset, or select the cost-accounting protocol.
+
+A pending deploy disappearing from a node buffer is not proof of successful
+execution or finality. Block heights can have multiple DAG siblings; preserve every
+block hash and ordered parent link. [DAG.md](DAG.md) contains a dated research
+snapshot: its old branch-status table is historical, not a current feature inventory.
+
+### Classic exact-transfer compatibility and replay history
+
+The historical `classic` profile requests `exactTransferAmounts=true` on every
+full-block read, including finalized bonds and deploy lookup. It preserves the
+legacy integer `amount`; use canonical signed `amountRaw` text whenever known.
+Without `amountRaw`, legacy values convert directly to text except ambiguous `-1`,
+which remains unknown. A malformed exact field also becomes `None`, with a warning
+containing only its character count, and never falls back to the legacy amount.
+The `uint256` profile uses field 6 directly and sends no exact-transfer flags.
+
+Unknown compact amounts do not bypass replay processing. Non-genesis blocks with
+deploys still require valid phase-marked reports before ledger writes and cursor
+advancement. Old nodes can omit BigInt transfers from compact summaries; source
+terms and compact summaries never replace execution-derived ledger movements.
+Signed rejected requests retain every digit through persistence and later result
+correlation, including values above Python's 4,300-digit conversion limit, without
+changing that limit or rounding with the Decimal context. There is no size
+maximum: the stored `requested_amount` stays canonical decimal text. The binary
+to decimal conversion is subquadratic (about 0.8 s for 2,000,000 digits) and runs
+in a worker process for values above 2^16 bits, so `/health` and metrics keep
+answering while such a block is indexed. Later blocks compare the stored text and
+never convert it back. Successful movements still require a positive uint256 amount.
+
+Classic #896 acceptance must use its pinned historical node: compare the legacy
+range error with the exact response for the same wide transfer. Current #881
+acceptance uses the explicit `uint256` profile and migration 004 instead. Neither
+fixture suite establishes funded acceptance against a running node. The separate
+cost-accounting schema also requires its own selected source and reconciliation.
+
+## Fresh local installation
+
+These commands initialize a **new, disposable local installation**. Existing
+installations must use the [upgrade procedure below](#existing-installations).
+Prerequisites are Docker with Linux containers, Docker Compose, Bash and curl;
+the Hasura setup script also uses standard Unix utilities. Containers need access
+to their image/package repositories during builds and sidecar initialization.
+
+```bash
+git clone --branch dev https://github.com/asi-alliance/asi-chain-indexer.git
+cd asi-chain-indexer
 cp .env.example .env
-# Edit .env with your node configuration if needed
-
-# Step 2: Start the indexer
-./deploy.sh
-
-# Check status
-curl http://localhost:9090/status | jq .
 ```
 
-### Docker Installation
+Edit `.env` before starting. `.env.example` and `.env.template` use the
+database credentials of the local Compose file. For the unmodified local
+Compose file, use this shape:
 
-```bash
-# Clone the repository
-git clone <repository-url>
-
-# Manual Docker Compose
-docker compose -f docker-compose.yml up -d
-
-# Verify it's working
-curl http://localhost:9090/status | jq .
-```
-
-
-**That's it!** The indexer will automatically:
-- Generate the gRPC client from `protos/` (during `Dockerfile` build stage)
-- Set up PostgreSQL database with the complete schema (DAG-aware)
-- Start syncing from the genesis block
-
-After running `./deploy.sh` (which calls `scripts/full-init-hasura.sh`):
-- Hasura tables/views/functions will be tracked
-- Relationships (FK-based + manual DAG relationships) will be configured
-- Public role gets SELECT (`limit: 5000`) on every table/view, plus
-  aggregates enabled on `deployments`/`transfers`/`transaction_history_view`
-- API will be ready for complex queries
-
-**Access services:**
-- Indexer API: http://localhost:9090
-- Hasura Console: http://localhost:8080/console
-- GraphQL endpoint: http://localhost:8080/v1/graphql
-
-#### Docker Compose Files
-
-1. **docker-compose.yml** (Production)
-   - Uses the standard `Dockerfile`
-   - Services included:
-     - `postgres`: PostgreSQL 14 Alpine (port 5432)
-     - `indexer`: Python indexer with gRPC node client (port 9090)
-     - `metrics-cron`: Alpine sidecar refreshing `network_metrics_buckets` every 3 min
-     - `hasura`: Hasura GraphQL Engine (port 8080)
-   - Network: Custom bridge network `indexer-network`
-   - Volumes: 
-     - `postgres_data`: Persistent database storage
-     - `./migrations/000_comprehensive_initial_schema.sql`: Auto-run SQL migrations
-   - Health checks configured for all services
-
-> **Debug mode**: run the same `docker-compose.yml` with verbose, human-readable
-> logs via env vars —
-> `LOG_LEVEL=DEBUG LOG_FORMAT=text docker compose up -d --build`.
-
-### Environment Configuration
-
-Create a `.env` file in the indexer directory:
-
-```bash
-cp .env.example .env
-```
-
-**Key variables:**
-```bash
-NODE_HOST=13.251.66.61  # Your ASI Chain observer node
-GRPC_PORT=40452         # gRPC port
-HTTP_PORT=40453          # HTTP port (used for /api/validators)
+```dotenv
+NODE_HOST=observer.example.org
+GRPC_PORT=40401
+HTTP_PORT=40403
 DATABASE_URL=postgresql://indexer:indexer_pass@postgres:5432/asichain
+HASURA_ADMIN_SECRET=replace-with-a-long-random-secret
+HASURA_BASE=http://localhost:8080
+NATIVE_TOKEN_DECIMALS=18
 ```
 
-See `.env.example` for all available options. No pre-built binary is needed —
-the gRPC client is generated at Docker build time from `protos/` via
-`grpc_tools.protoc` (see `Dockerfile`).
+Replace the observer hostname and verify the node's actual host port mappings.
+The node's standard external gRPC/HTTP container ports are 40401/40403; the indexer's
+legacy Python defaults and `.env.example` still use 40452/40453. Set both ports
+explicitly for your node. Inside the indexer container, `localhost` refers to
+that container. Use a reachable observer address or the appropriate host gateway.
+
+The checked-in Compose file is a local example: database credentials are also
+hard-coded in PostgreSQL and Hasura settings, and host ports 5432/8080/9090 are
+published. Before remote use, review credentials, bind addresses, firewall rules,
+Hasura public permissions and console exposure together. Keep admin secrets and
+Mattermost webhook URLs out of browser assets, Git and logs.
+
+```bash
+docker compose config --quiet
+docker compose up -d --wait --wait-timeout 180 postgres hasura metrics-cron
+bash scripts/full-init-hasura.sh
+docker compose up -d --build indexer
+docker compose ps
+curl -fsS http://localhost:9090/status
+```
+
+PostgreSQL runs SQL migrations 000–007 only when initializing an empty volume.
+The Hasura script changes metadata and permissions; use it for a fresh installation,
+not as a read-only probe or a replacement for reviewing existing custom metadata.
+[deploy.sh](deploy.sh) validates configuration before startup and metadata
+initialization. It prints the selected wire profile and precision without printing
+required environment values. Avoid its destructive `--clean` option for retained data.
+
+| Local service | Address / storage |
+|---|---|
+| Indexer HTTP API | `http://localhost:9090` |
+| Hasura GraphQL | `http://localhost:8080/v1/graphql` |
+| Hasura console | `http://localhost:8080/console` |
+| PostgreSQL | host port `5432`; Compose service `postgres:5432` |
+| PostgreSQL volume | `postgres18_data` mounted at `/var/lib/postgresql` |
+
+The volume is scoped to the Compose project. PostgreSQL 18's default PGDATA here
+is `/var/lib/postgresql/18/docker`. The metrics sidecar has no healthcheck;
+container startup is not proof of successful indexing or metric refresh.
+
+## Existing installations
+
+Read [POSTGRES_UPGRADE.md](POSTGRES_UPGRADE.md) and the
+[migration and history-repair guide](migrations/README.md) before rollout.
+
+- Back up the actual database and Hasura metadata, stop writers and rehearse
+  the upgrade. PostgreSQL 14 data requires dump/restore into a new PostgreSQL 18.6
+  cluster; retain the old volume and matching images for rollback.
+- If your legacy installation relied on the implicit `classic` profile, pin
+  `NODE_PROTOCOL_PROFILE=classic` in `.env` **before rebuilding**, and keep it set
+  for runtime. Explicitly set `NATIVE_TOKEN_DECIMALS=8` for an eight-decimal chain;
+  Python, Compose and `deploy.sh` now default to `uint256` and 18 decimals when
+  these settings are absent. The deploy wrapper validates the selected settings
+  and Compose configuration before changing containers, including with `--clean`.
+  For standalone Docker, build with `--build-arg NODE_PROTOCOL_PROFILE=classic`;
+  for local Python, set the profile before both generating bindings and running.
+  Select both settings from the node contract and metadata before a coordinated
+  upgrade. Rebuilding or changing defaults does not rescale stored amounts.
+- On an empty database, `python -m src.migrate upgrade` applies tracked revisions
+  000–007. For an existing unversioned SQL schema, inspect its actual level, use
+  `python -m src.migrate adopt --revision REVISION` once, selecting its actual
+  revision from `000`, `001`, `002`, `003`, `004`, `005`, `006` or `007`, then run
+  `python -m src.migrate upgrade`. A database already tracked at
+  003, 004, 005 or 006 upgrades to 007. Compose restarts and SQLAlchemy `create_all()` do not upgrade
+  existing schemas. See the migration guide for validation and backup requirements.
+- Populated databases marked for native-transfer backfill must complete
+  `python -m src.reindex_transfers` with writes stopped. Do not manually clear
+  the repair flag. Repair preserves blocks, the sync cursor and recorded precision.
+- Review/reload Hasura metadata, then validate actual consumer queries,
+  subscriptions, exact balances, cursor progress and metrics before resuming access.
+
+Do not use `docker compose down -v`, `deploy.sh --clean`, `make docker-reset`
+or `python -m src.main --reset` as an upgrade procedure. These can delete data;
+ORM table recreation also does not replace the SQL views, functions and triggers.
 
 ## Configuration
 
-### Switching Between Configurations
+[.env.example](.env.example), [src/config.py](src/config.py) and
+[docker-compose.yml](docker-compose.yml) define different layers: Python defaults,
+environment values and the variables actually passed into containers. For example,
+`BATCH_SIZE` defaults to 100 in Python and 50 in Compose and both templates.
+`.env.example` lists the Python-only settings that Compose does not pass to the
+container, for example `MONITORING_PORT` and `DATABASE_POOL_TIMEOUT`.
+
+Important settings include `NODE_HOST`, `GRPC_PORT`, `HTTP_PORT`,
+`NODE_TIMEOUT`, `GRPC_MAX_RECEIVE_MESSAGE_BYTES`, `DATABASE_URL`, `DATABASE_POOL_SIZE`, `SYNC_INTERVAL`,
+`BATCH_SIZE`, `START_FROM_BLOCK`, `NATIVE_TOKEN_DECIMALS`,
+`ENABLE_ASI_TRANSFER_EXTRACTION`, `ENABLE_PENDING_DEPLOYS_SYNC`,
+`READ_CACHE_ENABLED` and `READ_CACHE_MAX_ENTRIES`.
+The pending-deploy snapshot represents one node's bounded buffers, not a durable
+network-wide queue. `START_FROM_BLOCK` is an initial-history boundary, not a
+command to discard the existing cursor or reindex stored history.
+
+Mattermost alerts are disabled by default. Enabling `ALERTS_ENABLED` requires
+`MATTERMOST_WEBHOOK_URL`; see the template for throttling and failure thresholds.
+Never log or publish webhook values. Configuration is loaded at process startup.
+After editing Compose environment values, recreate the affected service:
 
 ```bash
-# Edit your .env file with new configuration
-vim .env
-
-# Restart indexer to apply changes
-docker compose -f docker-compose.yml restart indexer
-
-# Rebuild after code/proto changes
-docker compose -f docker-compose.yml build
+docker compose up -d --force-recreate indexer
+# After code/protobuf/dependency changes:
+docker compose up -d --build indexer
 ```
 
-### Environment Variables
+A plain `docker compose restart` does not replace the container's environment.
 
-### Indexer Environment Variables
+## API and monitoring
 
-| Variable | Description                               | Default |
-|----------|-------------------------------------------|---------|
-| `NODE_HOST` | ASI Chain node hostname                   | `localhost` |
-| `GRPC_PORT` | Node gRPC port for blockchain operations  | `40452` |
-| `HTTP_PORT` | Node HTTP port for status queries         | `40453` |
-| `NODE_TIMEOUT` | HTTP/gRPC request timeout in seconds      | `30` |
-| `DATABASE_URL` | PostgreSQL connection URL                 | `postgresql://indexer:indexer_pass@localhost:5432/asichain` |
-| `DATABASE_POOL_SIZE` | Database connection pool size             | `20` |
-| `DATABASE_POOL_TIMEOUT` | Database pool timeout in seconds          | `10` |
-| `SYNC_INTERVAL` | Seconds between sync cycles               | `5` |
-| `BATCH_SIZE` | Number of blocks per batch                | `100` |
-| `START_FROM_BLOCK` | Initial block to start indexing           | `0` |
-| `MONITORING_PORT` | Prometheus metrics port                   | `9090` |
-| `HEALTH_CHECK_INTERVAL` | Health check interval in seconds          | `60` |
-| `LOG_LEVEL` | Logging level (DEBUG/INFO/WARNING/ERROR)  | `INFO` |
-| `LOG_FORMAT` | Log format (json/text)                    | `json` |
-| `ENABLE_ASI_TRANSFER_EXTRACTION` | Extract ASI transfers from deployments    | `true` |
-| `ENABLE_PENDING_DEPLOYS_SYNC` | Poll node pending deploys every sync cycle | `true` |
-| `ENABLE_METRICS` | Enable Prometheus metrics                 | `true` |
-| `ENABLE_HEALTH_CHECK` | Enable health check endpoint              | `true` |
-| `HASURA_ADMIN_SECRET` | Hasura admin secret (used by setup scripts) | Empty |
+| Endpoint | Behavior |
+|---|---|
+| `GET /health` | Basic HTTP-process response; does not check dependencies or sync progress |
+| `GET /readiness` (alias `/ready`) | Checks a database query and a last-finalized-block read; returns 200 or 503 |
+| `GET /status` | Database/cursor statistics and the last node observation of the sync loop; inspect the response content |
+| `GET /metrics` | Prometheus exposition; the sync lag uses the last finalized height that the sync loop observed |
+| `GET /api/blocks`, `/api/blocks/{block_number}`, `/api/blocks/search` | Block reads/search; a height is not a unique DAG identity |
+| `GET /api/deployments`, `/api/deployments/{deploy_id}`, `/api/deployments/search` | Deploy reads/search |
+| `GET /api/transfers`, `/api/address/{address}/transfers` | Successful ledger movements |
+| `GET /api/validators`, `/api/stats/network` | Stored validator/network data |
 
-## Database Schema
+Routes are defined in [src/monitoring.py](src/monitoring.py); there is no indexer
+`/api/epochs` route. Hasura provides DAG relationships. Migration 003 defines the read-only
+`native_transfer_lifecycle` SQL view with initiation/completion references and
+pending, completed, rejected or coalesced outcomes. `full-init-hasura.sh` tracks
+this view with public read access (no aggregations) and its relationships:
+`initiation_deployment`, `completion_deployment`, `initiation_block`,
+`completion_block`, `transfer`, and `deployments.native_transfer_calls` /
+`deployments.completed_native_transfers`. Both array relationships return
+lifecycle rows, that is call outcomes: a fork can record more than one outcome
+for one call. The `native_transfer_calls` name comes from the older
+`scripts/configure-hasura.py`. The raw call, result and alias tables stay
+untracked. The older `scripts/configure-hasura.py` has hard-coded
+connection/secret values and an additional `requests` dependency; do not run it
+unchanged. Count movements from the transfer ledger, not lifecycle-row counts.
 
-### Core Tables
+Exported metrics include `indexer_blocks_indexed_total`,
+`indexer_deployments_indexed_total`, `indexer_transfers_extracted_total`,
+`indexer_sync_lag_blocks`, `indexer_last_block_height`,
+`indexer_sync_duration_seconds`, `indexer_node_request_duration_seconds` and
+`indexer_http_request_duration_seconds`. The last one records the serving time of
+each HTTP request. Its `endpoint` label is the route template, for example
+`/api/address/{address}/transfers`, never the raw path. Unknown routes share
+the `unmatched` value.
+Health/readiness/metrics success alone does not prove continuing finalization;
+compare fresh observations over time. Only `/readiness` queries the node on each
+request. `/status` and `/metrics` use the last finalized height that the sync loop
+observed, so a scrape never calls the node more often than the sync loop. None of
+these endpoints is an independent fleet monitor.
 
-- **blocks**: Blockchain blocks with comprehensive metadata
-  - Enhanced with JSONB fields for `bonds_map` and `justifications`
-  - Tracks finalization status and fault tolerance metrics
-  - 150-char proposer field for full validator keys
+`indexer_node_reachable` is 0 before the first successful sync-loop read and after
+a failed read. Then `indexer_sync_lag_blocks` is NaN, not a stale or default zero.
+`indexer_chain_tip_height` and `indexer_chain_tip_observed_timestamp_seconds` keep
+the last successful read. Alert on its age, for example
+`time() - indexer_chain_tip_observed_timestamp_seconds > 120`, so that a sync cycle
+stuck after an old read does not hide behind a lag of zero.
 
-- **deployments**: Smart contract deployments
-  - Full Rholang term storage
-  - Automatic type classification
-  - Error tracking and status management
+### Read cache
 
-- **pending_deploys**: Ephemeral snapshot of the node's deploy buffers
-  - Deploys not yet included in any block (no block_hash / FK by design)
-  - Fully refreshed (DELETE + INSERT) every sync cycle (`SYNC_INTERVAL`, default 5s)
-  - `is_rejected` provenance: fresh (deploy_storage) vs recovering after merge conflict
-  - `sig` matches `deployments.deploy_id` once the deploy is included in a block
-  - Pre-cap total count in `indexer_state` key `pending_deploys_total_available` (node caps the response at 1000 entries)
+The indexer keeps an in-process read-through cache for three read paths: the
+`blocks`, `deployments` and `transfers` counts of `GET /status`, `GET /api/transfers`
+and `GET /api/address/{address}/transfers`. The cursor, the validator count and
+all other endpoints are read live. `/health` and `/readiness` are never cached.
 
-- **transfers**: ASI token transfers
-  - Supports both ASI addresses (52-57 chars) and validator public keys (130+ chars)
-  - Tracks amounts in both dust and ASI (8 decimal precision)
-  - Links to deployments and blocks
+- Every block that the indexer processes drops all entries, right after the
+  transaction that writes its blocks, deployments and transfers commits. This
+  includes a backfill below the cursor. A detected reorg also drops all
+  entries. There is no TTL.
+- A read that overlaps a block commit is returned but not stored.
+- At most `READ_CACHE_MAX_ENTRIES` results (default 256) are kept; the least
+  recently used result is dropped first. A transfer page holds at most 100 rows.
+- A cache failure falls back to a direct query. It never causes an error response.
+- Set `READ_CACHE_ENABLED=false` to turn the cache off without a code change.
+- The cache does not survive a restart and is not shared between replicas.
+  Run `python -m src.reindex_transfers` only with indexer writes stopped, as
+  documented; the restarted indexer starts with an empty cache.
 
-- **balance_states**: Address balance tracking
-  - Separate bonded and unbonded balances
-  - Point-in-time balance snapshots per block
-  - Supports both validator keys and ASI addresses
+Metrics: `indexer_read_cache_hits_total{endpoint}`,
+`indexer_read_cache_misses_total{endpoint}`, `indexer_read_cache_evictions_total{reason}`,
+`indexer_read_cache_errors_total{endpoint}`, `indexer_read_cache_entries` and
+`indexer_read_cache_enabled`.
 
-- **validators**: Validator registry
-  - Full public key storage (up to 200 chars)
-  - Status tracking (active/bonded/quarantine/inactive)
-  - First/last seen block tracking
+Latency target: p95 of 50 ms or less for `/status`, `/api/transfers` and
+`/api/address/{address}/transfers`. A local measurement used PostgreSQL 18.6
+with 200,000 blocks, 1,000,000 deployments and 1,000,000 transfers. Each endpoint
+received 10 requests per second for 30 s, and a block was committed every 5 s.
 
-- **validator_bonds**: Stake records per block
-  - Genesis bonds automatically extracted
-  - Links to blocks for historical tracking
+| Endpoint | p95 without cache | p95 with cache |
+|---|---|---|
+| `/status` | 62.4 ms | 3.9 ms |
+| `/api/transfers?page=1&limit=20` | 39.4 ms | 1.8 ms |
+| `/api/address/{address}/transfers?page=1&limit=20` | 28.5 ms | 1.4 ms |
 
-- **block_validators**: Block signers/justifications
-  - Many-to-many relationship between blocks and validators
+A cache miss costs the same as an uncached read. When more than 5% of the
+requests for a key are misses, the p95 is the uncached latency. For example,
+with a block every second at the same request rate, the cached p95 was
+72.2 ms, 34.2 ms and 21.1 ms. Compare `indexer_http_request_duration_seconds`
+on a deployment with these numbers.
 
-- **network_stats**: Network health snapshots
-  - Consensus participation rates
-  - Active validator counts
-  - Quarantine metrics
+## Development and validation
 
-- **epoch_transitions**: Epoch boundaries
-  - Start/end blocks per epoch
-  - Active validator counts
-
-- **indexer_state**: Indexer metadata (key-value store)
-  - Sync/runtime state: e.g. `pending_deploys_total_available` (pre-cap pending deploy count, updated every sync cycle)
-
-### Views
-
-- **transaction_history_view**: Combined wallet transaction history
-  - Pre-joins `deployments` LEFT JOIN `transfers` into one row per transfer (or per deployment if it produced none)
-  - Fields: `transfer_id`, `deploy_id`, `block_hash`, `block_number`, `timestamp`, `type` (`'transfer'` | `'not_transfer'`), `deployer_address`, `from_address`, `to_address`, `from_public_key`, `amount_asi`, `status`
-  - All `transfers.*` fields are NULL when `type = 'not_transfer'` (deployment produced no transfer)
-  - Hasura public SELECT with `limit: 5000` and `allow_aggregations: true`
-  - Pagination via GraphQL `where` / `order_by` / `offset` / `limit` (no SQL parameters)
-
-- **block_ancestors_view / block_descendants_view**: DAG traversal result types
-  - `block_ancestors_view`: `ancestor_hash`, `ancestor_number`, `depth`
-  - `block_descendants_view`: `descendant_hash`, `descendant_number`, `depth`
-  - Used as the return type of `get_block_ancestors` / `get_block_descendants` SQL functions
-
-### SQL Functions
-
-- **get_block_ancestors(p_block_hash)**: Recursively returns all ancestor blocks of the given block by walking `block_parents` (DAG traversal)
-- **get_block_descendants(p_block_hash)**: Recursively returns all descendant blocks of the given block by walking `block_parents`
-- Both are `LANGUAGE sql STABLE` recursive CTEs using `UNION` (deduplicated) and are exposed via Hasura as callable GraphQL functions
-
-## API Endpoints
-
-### Status and Health
+Use CPython 3.14.10 on Linux, or the Docker targets. With a matching interpreter:
 
 ```bash
-# Detailed sync status
-curl http://localhost:9090/status | jq .
-
-# Health check
-curl http://localhost:9090/health
-
-# Readiness check
-curl http://localhost:9090/ready
+python3.14 -m venv .venv
+. .venv/bin/activate
+python -m pip install --require-hashes -r requirements-dev.lock
+make protos PYTHON=python
+python -W error::DeprecationWarning -m pytest tests/ -m "not integration" --strict-markers
+python -m pip check
 ```
 
-### Data Endpoints
-
-All existing endpoints continue to work with enhanced data:
+The generated `src/grpc_stubs/` directory is ignored. Regenerate it with the
+locked generator after protobuf changes; do not hand-edit generated files.
+To run the same unit suite in the test image:
 
 ```bash
-# Blocks with enhanced metadata
-curl http://localhost:9090/api/blocks | jq .
-
-# Network statistics
-curl http://localhost:9090/api/stats/network | jq .
-
-# Epoch information
-curl http://localhost:9090/api/epochs | jq .
-
-# Validator performance
-curl http://localhost:9090/api/validators | jq .
+docker build --target test -t asi-indexer-tests:local .
+docker run --rm asi-indexer-tests:local python -W error::DeprecationWarning -m pytest tests/ -m "not integration" --strict-markers
 ```
 
-## Monitoring
+Tests marked `integration` require disposable services. Supply
+`TEST_DATABASE_URL` with CREATEDB permission, plus `TEST_HASURA_URL` and
+`TEST_HASURA_ADMIN_SECRET` for an initialized Hasura test stack. Some tests
+create/drop a random database; Hasura tests also write fixtures into the configured
+source database. Never point these settings at retained application data.
 
-The indexer exposes a Prometheus-compatible `/metrics` endpoint on port 9090:
+[Database CI](.github/workflows/database-compatibility.yml) is the reference for
+production/test builds, dependency isolation, metadata initialization, the full
+suite, SQL amount assertions and metrics-client checks. [Unit CI](.github/workflows/tests.yml)
+generates bindings and coverage. A run without external settings can skip integration
+tests; inspect skips before claiming full validation. Black, Flake8 and mypy are
+available as development tools; repository-wide findings are not currently CI gates.
 
-- `indexer_blocks_indexed_total`: Total blocks processed
-- `indexer_sync_lag_blocks`: Blocks behind chain head
-- `indexer_grpc_requests_total`: gRPC calls made to the node
-- `indexer_grpc_errors_total`: gRPC call failures
-- `indexer_epoch_transitions_total`: Epoch changes detected
-- `indexer_network_health_score`: Network consensus health (0-1)
+For diagnostics, start with `docker compose ps`, bounded service logs and the
+response bodies from status/readiness. For schema failures, identify the applied
+migration and use the migration guide; rerunning migration 000 or deleting a volume
+is not a repair. Existing documentation does not establish current performance:
+measure the selected node, data set and source revision before sizing a deployment.
 
-## Troubleshooting
+## Source map
 
-### Common Issues
+| Area | Files |
+|---|---|
+| Node reads and synchronization | [grpc_node_client.py](src/grpc_node_client.py), [block_indexer.py](src/block_indexer.py) |
+| Exact amounts and native execution | [amounts.py](src/amounts.py), [transfer_reports.py](src/transfer_reports.py), [native_transfers.py](src/native_transfers.py) |
+| ORM, SQL and history repair | [models.py](src/models.py), [database.py](src/database.py), [migrations/](migrations/), [reindex_transfers.py](src/reindex_transfers.py) |
+| Service and observability | [main.py](src/main.py), [monitoring.py](src/monitoring.py), [alerts.py](src/alerts.py), [config.py](src/config.py) |
+| Contributor instructions | [AGENTS.md](AGENTS.md) |
 
-1. **gRPC connection refused / unavailable**
-   - Verify the observer node is reachable from the indexer container:
-     `docker exec asi-indexer python -c "import grpc, asyncio; asyncio.run(grpc.aio.insecure_channel('host:40452').channel_ready())"`
-   - Check `NODE_HOST`, `GRPC_PORT`, `HTTP_PORT` in `.env` match the observer node
-   - For Linux Docker hosts, use the actual IP address instead of `host.docker.internal`
-
-2. **Cannot connect to node**
-   - Verify node is running and ports are accessible
-   - Check `NODE_HOST` is set correctly (use `host.docker.internal` for Docker on Mac/Windows)
-   - For Linux Docker hosts, use actual IP address instead of `host.docker.internal`
-
-3. **Database schema errors**
-   - Run migrations: `docker exec asi-indexer-db psql -U indexer -d asichain < migrations/000_comprehensive_initial_schema.sql`
-
-### Docker-Specific Issues
-
-1. **Build fails**
-   - Ensure Docker has at least 2GB RAM allocated
-   - Check disk space (gRPC stub generation needs a few hundred MB)
-   - Try cleaning Docker cache: `docker system prune -a`
-   - Rebuild: `docker compose -f docker-compose.yml build`
-
-2. **Container health checks failing**
-   ```bash
-   # Check container logs
-   docker compose -f docker-compose.yml logs indexer
-    
-   # Verify all services are running
-   docker compose -f docker-compose.yml ps
-   
-   # Check network connectivity between containers
-   docker exec asi-indexer ping postgres
-   ```
-
-3. **Permission errors with volumes**
-   ```bash
-   # Fix PostgreSQL volume permissions
-   sudo chown -R 999:999 ./postgres_data
-   
-   # Or remove and recreate volumes
-   docker compose -f docker-compose.yml down -v
-   docker compose -f docker-compose.yml up -d
-   ```
-
-### Reset and Start Fresh
-
-```bash
-# Stop services and remove data
-docker compose -f docker-compose.yml down -v
-
-# Start fresh sync from block 0
-docker compose -f docker-compose.yml up -d
-```
-
-## Performance Characteristics
-
-- **Memory Usage**: ~80MB (indexer) + ~50MB (database)
-- **CPU Usage**: <5% during sync, <1% when caught up
-- **Sync Performance**: 100 blocks in ~2 seconds
-- **Database Growth**: ~100KB per 100 blocks (with enhanced data)
-- **gRPC round-trip latency**: 10–50ms per call
-- **Full Chain Sync**: Capable of syncing entire blockchain
-
-## Migration from HTTP Indexer
-
-To migrate from the HTTP-based indexer:
-
-1. **Export existing data** (optional):
-   ```bash
-   docker exec asi-indexer-db pg_dump -U indexer asichain > backup.sql
-   ```
-
-2. **Stop old indexer**:
-   ```bash
-   docker compose down
-   ```
-
-3. **Start the gRPC indexer**:
-   ```bash
-   docker compose -f docker-compose.yml up -d --build
-   ./scripts/full-init-hasura.sh
-   ```
-
-The indexer will start syncing from block 0 by default (`START_FROM_BLOCK=0`),
-building a complete chain history.
-
-## Development
-
-### Project Structure
-
-```
-indexer/
-├── src/
-│   ├── grpc_node_client.py    # Async gRPC client (DeployServiceV1)
-│   ├── block_indexer.py       # Indexer service (BlockIndexer)
-│   ├── models.py              # Database models (DAG-aware)
-│   ├── database.py            # asyncpg/SQLAlchemy sessions
-│   ├── main.py                # Entry point / orchestrator
-│   ├── monitoring.py          # REST API + Prometheus metrics
-│   ├── config.py              # Pydantic settings
-│   ├── addr.py                # ASI address derivation
-│   ├── cache.py / resilience.py
-│   └── grpc_stubs/            # Generated gRPC client (from protos/)
-├── migrations/
-│   ├── 000_comprehensive_initial_schema.sql  # Current complete schema
-│   └── backup_old_migrations/
-├── scripts/
-│   ├── full-init-hasura.sh               # FULL Hasura setup (recommended)
-│   ├── refresh-network-metrics-once.sh   # Sidecar entrypoint for metrics-cron
-│   ├── configure-hasura.py               # Legacy Hasura setup (older)
-│   ├── configure-hasura.sh               # Legacy Hasura setup (older)
-│   ├── setup-hasura-relationships.sh      # Legacy relationship setup
-│   ├── fix-hasura-relationships.py        # Legacy relationship fix
-│   ├── test-relationships.sh / test-stats.sh
-│   └── seed_test_data.py
-├── protos/                    # Protobuf definitions for the node's DeployServiceV1
-├── examples/
-├── Docker Configuration:
-│   ├── Dockerfile             # Multi-stage Python image; regenerates gRPC stubs
-│   ├── docker-compose.yml     # Production (postgres + indexer + metrics-cron + hasura)
-│   └── deploy.sh              # One-command deploy + Hasura init + self-tests
-├── Environment Templates:
-│   ├── .env.example           # Reference with all options
-│   ├── .env.template          # Blank template
-│   └── .env.remote-observer   # Remote observer node sample
-├── Documentation:
-│   ├── README.md                 # This file
-│   ├── API.md                    # REST API documentation
-│   ├── CHANGELOG.md              # Version history
-│   ├── DEPLOYMENT.md             # Deployment scenarios (current)
-│   ├── DEPLOYMENT_GUIDE.md       # Quick deployment guide
-│   ├── DEPLOYMENT_DOCUMENTATION.md  # Comprehensive deployment
-│   ├── GRAPHQL_GUIDE.md          # GraphQL usage guide
-│   └── GRAPHQL_SCHEMA.md         # Database schema reference
-```
-
-### Modifying the gRPC Client
-
-The gRPC stubs are generated at Docker build time from `protos/`. To regenerate
-them locally (e.g. after editing a `.proto`):
-
-1. `pip install grpcio-tools==1.83.0`
-2. `make protos` (regenerates stubs into `src/grpc_stubs/`)
-3. Restart the indexer
-
-If you need to call a new node RPC, add a method to `GrpcNodeClient` in
-`src/grpc_node_client.py`, then wire it into `src/block_indexer.py`.
-
-## License
-
-This project is licensed under the Apache License 2.0. See LICENSE file for details.
+Protocol/SQL/configuration files and implementation at the selected revision take
+precedence over older architecture/API guides. Licensed under [Apache 2.0](LICENSE).
