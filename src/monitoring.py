@@ -12,6 +12,7 @@ import structlog
 
 from src.config import settings
 from src.database import db
+from src.read_cache import read_cache
 
 logger = structlog.get_logger(__name__)
 
@@ -282,12 +283,11 @@ class MonitoringServer:
     async def _get_status(self) -> Dict[str, Any]:
         """Get detailed indexer status."""
         try:
-            # Database stats
+            # Full-table counts change only when a block is committed: cached
+            counts = await read_cache.get_or_load("status", "counts", self._load_status_counts)
+            # Cursor and the small validators table: read live
             db_stats = await db.execute_raw("""
                 SELECT
-                    (SELECT COUNT(*) FROM blocks) as total_blocks,
-                    (SELECT COUNT(*) FROM deployments) as total_deployments,
-                    (SELECT COUNT(*) FROM transfers) as total_transfers,
                     (SELECT COUNT(*) FROM validators) as total_validators,
                     (SELECT value
                      FROM indexer_state
@@ -298,7 +298,7 @@ class MonitoringServer:
                     (SELECT MAX(block_number) FROM blocks) as highest_stored_block
             """)
 
-            stats = dict(db_stats[0]) if db_stats else {}
+            stats = {**counts, **(dict(db_stats[0]) if db_stats else {})}
 
             # Node status as the sync loop last observed it; no node RPC here
             latest_block, observed_at = self._chain_tip()
@@ -354,6 +354,15 @@ class MonitoringServer:
                 "error": INTERNAL_ERROR["error"],
                 "timestamp": utc_now().isoformat()
             }
+
+    async def _load_status_counts(self) -> Dict[str, Any]:
+        rows = await db.execute_raw("""
+            SELECT
+                (SELECT COUNT(*) FROM blocks) as total_blocks,
+                (SELECT COUNT(*) FROM deployments) as total_deployments,
+                (SELECT COUNT(*) FROM transfers) as total_transfers
+        """)
+        return dict(rows[0]) if rows else {}
 
     async def get_blocks(self, request):
         """Get list of blocks with pagination."""
@@ -522,57 +531,64 @@ class MonitoringServer:
             # Get query parameters
             page = int(request.query.get('page', 1))
             limit = min(int(request.query.get('limit', 20)), 100)
-            offset = (page - 1) * limit
             from_address = request.query.get('from')
             to_address = request.query.get('to')
 
-            # Build query
-            query = """
-                SELECT 
-                    t.id, t.deploy_id, t.block_number, t.from_address, t.to_address,
-                    t.amount_dust, t.amount_asi, t.token_decimals, t.status, t.created_at,
-                    d.timestamp
-                FROM transfers t
-                JOIN deployments d ON t.deploy_id = d.deploy_id
-            """
-            params = []
-            where_clauses = []
-
-            if from_address:
-                where_clauses.append(f"t.from_address = ${len(params) + 1}")
-                params.append(from_address)
-
-            if to_address:
-                where_clauses.append(f"t.to_address = ${len(params) + 1}")
-                params.append(to_address)
-
-            if where_clauses:
-                query += " WHERE " + " AND ".join(where_clauses)
-
-            query += f" ORDER BY d.timestamp DESC LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
-            params.extend([limit, offset])
-
-            transfers = await db.execute_raw(query, *params)
-
-            # Get total count
-            count_query = "SELECT COUNT(*) as count FROM transfers t"
-            if where_clauses:
-                count_query += " WHERE " + " AND ".join(where_clauses)
-            count_result = await db.execute_raw(count_query, *params[:-2] if params else [])
-            total = count_result[0]['count'] if count_result else 0
-
-            return web.json_response({
-                "transfers": self._serialize_result([dict(t) for t in transfers]),
-                "pagination": {
-                    "page": page,
-                    "limit": limit,
-                    "total": total,
-                    "pages": (total + limit - 1) // limit
-                }
-            })
+            payload = await read_cache.get_or_load(
+                "transfers", (page, limit, from_address, to_address),
+                lambda: self._load_transfers(page, limit, from_address, to_address)
+            )
+            return web.json_response(payload)
         except Exception as e:
             logger.error("Failed to get transfers", error=str(e))
             return self._json_response(INTERNAL_ERROR, status=500)
+
+    async def _load_transfers(self, page, limit, from_address, to_address):
+        offset = (page - 1) * limit
+        # Build query
+        query = """
+            SELECT
+                t.id, t.deploy_id, t.block_number, t.from_address, t.to_address,
+                t.amount_dust, t.amount_asi, t.token_decimals, t.status, t.created_at,
+                d.timestamp
+            FROM transfers t
+            JOIN deployments d ON t.deploy_id = d.deploy_id
+        """
+        params = []
+        where_clauses = []
+
+        if from_address:
+            where_clauses.append(f"t.from_address = ${len(params) + 1}")
+            params.append(from_address)
+
+        if to_address:
+            where_clauses.append(f"t.to_address = ${len(params) + 1}")
+            params.append(to_address)
+
+        if where_clauses:
+            query += " WHERE " + " AND ".join(where_clauses)
+
+        query += f" ORDER BY d.timestamp DESC LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        params.extend([limit, offset])
+
+        transfers = await db.execute_raw(query, *params)
+
+        # Get total count
+        count_query = "SELECT COUNT(*) as count FROM transfers t"
+        if where_clauses:
+            count_query += " WHERE " + " AND ".join(where_clauses)
+        count_result = await db.execute_raw(count_query, *params[:-2] if params else [])
+        total = count_result[0]['count'] if count_result else 0
+
+        return {
+            "transfers": self._serialize_result([dict(t) for t in transfers]),
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total": total,
+                "pages": (total + limit - 1) // limit
+            }
+        }
 
     async def get_validators(self, request):
         """Get list of validators."""
@@ -756,41 +772,49 @@ class MonitoringServer:
             address = request.match_info['address']
             page = int(request.query.get('page', 1))
             limit = min(int(request.query.get('limit', 20)), 100)
-            offset = (page - 1) * limit
 
-            # Get transfers where address is sender or receiver
-            query = """
-                SELECT 
-                    id, deploy_id, block_number, from_address, to_address,
-                    amount_dust, amount_asi, token_decimals, status, created_at
-                FROM transfers
-                WHERE from_address = $1 OR to_address = $1
-                ORDER BY block_number DESC
-                LIMIT $2 OFFSET $3
-            """
-            transfers = await db.execute_raw(query, address, limit, offset)
-
-            # Get count
-            count_query = """
-                SELECT COUNT(*) as count FROM transfers
-                WHERE from_address = $1 OR to_address = $1
-            """
-            count_result = await db.execute_raw(count_query, address)
-            total = count_result[0]['count'] if count_result else 0
-
-            return web.json_response({
-                "address": address,
-                "transfers": self._serialize_result([dict(t) for t in transfers]),
-                "pagination": {
-                    "page": page,
-                    "limit": limit,
-                    "total": total,
-                    "pages": (total + limit - 1) // limit if limit else 0
-                }
-            })
+            payload = await read_cache.get_or_load(
+                "address_transfers", (address, page, limit),
+                lambda: self._load_address_transfers(address, page, limit)
+            )
+            return web.json_response(payload)
         except Exception as e:
             logger.error("Failed to get address transfers", error=str(e))
             return self._json_response(INTERNAL_ERROR, status=500)
+
+    async def _load_address_transfers(self, address, page, limit):
+        offset = (page - 1) * limit
+
+        # Get transfers where address is sender or receiver
+        query = """
+            SELECT
+                id, deploy_id, block_number, from_address, to_address,
+                amount_dust, amount_asi, token_decimals, status, created_at
+            FROM transfers
+            WHERE from_address = $1 OR to_address = $1
+            ORDER BY block_number DESC
+            LIMIT $2 OFFSET $3
+        """
+        transfers = await db.execute_raw(query, address, limit, offset)
+
+        # Get count
+        count_query = """
+            SELECT COUNT(*) as count FROM transfers
+            WHERE from_address = $1 OR to_address = $1
+        """
+        count_result = await db.execute_raw(count_query, address)
+        total = count_result[0]['count'] if count_result else 0
+
+        return {
+            "address": address,
+            "transfers": self._serialize_result([dict(t) for t in transfers]),
+            "pagination": {
+                "page": page,
+                "limit": limit,
+                "total": total,
+                "pages": (total + limit - 1) // limit if limit else 0
+            }
+        }
 
     async def start(self):
         """Start the monitoring server."""
