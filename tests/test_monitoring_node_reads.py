@@ -1,3 +1,7 @@
+from datetime import datetime, timedelta
+import math
+import os
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -107,3 +111,96 @@ async def test_readiness_still_calls_the_node_on_every_probe(stored):
         assert response.status == 503
 
     assert rpc.await_count == 4
+
+
+def gauge(name):
+    return REGISTRY.get_sample_value(name)
+
+
+async def scrape(client):
+    response = await client.get("/metrics")
+    assert response.status == 200
+
+
+@pytest.mark.asyncio
+async def test_metrics_mark_the_lag_unknown_before_the_first_observation(stored):
+    indexer = indexer_with_tip(LAST_INDEXED + 20)
+    async with TestClient(TestServer(MonitoringServer(indexer).app)) as client:
+        await scrape(client)
+
+    assert indexer.client.get_last_finalized_block.await_count == 0
+    assert gauge("indexer_node_reachable") == 0
+    assert math.isnan(gauge("indexer_sync_lag_blocks"))
+    assert math.isnan(gauge("indexer_chain_tip_height"))
+    assert math.isnan(gauge("indexer_chain_tip_observed_timestamp_seconds"))
+    assert gauge("indexer_last_block_height") == LAST_INDEXED
+
+
+@pytest.mark.asyncio
+async def test_metrics_expose_the_age_of_an_old_observation(stored):
+    indexer = indexer_with_tip(LAST_INDEXED)
+    await indexer._sync_blocks()
+    # A sync cycle stuck in block work since its last tip read an hour ago.
+    indexer.chain_tip_observed_at -= timedelta(hours=1)
+    indexer.client.get_last_finalized_block.return_value = {"blockNumber": LAST_INDEXED + 50}
+
+    async with TestClient(TestServer(MonitoringServer(indexer).app)) as client:
+        await scrape(client)
+
+    assert indexer.client.get_last_finalized_block.await_count == 1
+    assert gauge("indexer_node_reachable") == 1
+    assert gauge("indexer_sync_lag_blocks") == 0
+    assert gauge("indexer_chain_tip_height") == LAST_INDEXED
+    observed = gauge("indexer_chain_tip_observed_timestamp_seconds")
+    assert observed == indexer.chain_tip_observed_at.timestamp()
+    assert 3590 < time.time() - observed < 3700
+
+
+@pytest.mark.asyncio
+async def test_metrics_mark_the_lag_unknown_after_a_failed_read(stored):
+    indexer = indexer_with_tip(LAST_INDEXED + 5)
+    await indexer._sync_blocks()
+    observed_at = indexer.chain_tip_observed_at
+    async with TestClient(TestServer(MonitoringServer(indexer).app)) as client:
+        await scrape(client)
+        assert gauge("indexer_sync_lag_blocks") == 5
+
+        indexer.client.get_last_finalized_block.return_value = None
+        await indexer._sync_blocks()
+        await scrape(client)
+
+    assert gauge("indexer_node_reachable") == 0
+    assert math.isnan(gauge("indexer_sync_lag_blocks"))
+    # The last successful read stays visible, so its age can still be computed.
+    assert gauge("indexer_chain_tip_height") == LAST_INDEXED + 5
+    assert gauge("indexer_chain_tip_observed_timestamp_seconds") == observed_at.timestamp()
+
+
+@pytest.fixture
+def moscow_time():
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = "Europe/Moscow"
+    time.tzset()
+    yield
+    if previous is None:
+        del os.environ["TZ"]
+    else:
+        os.environ["TZ"] = previous
+    time.tzset()
+
+
+@pytest.mark.asyncio
+async def test_status_observation_time_carries_its_utc_offset(stored, moscow_time):
+    indexer = indexer_with_tip(LAST_INDEXED)
+    await indexer._sync_blocks()
+    async with TestClient(TestServer(MonitoringServer(indexer).app)) as client:
+        status = await (await client.get("/status")).json()
+
+    value = status["node"]["latest_block_observed_at"]
+    parsed = datetime.fromisoformat(value)
+    assert parsed.utcoffset() == timedelta(0)
+    assert value.endswith("+00:00")
+    # A client in UTC+3 reads the same instant, not one three hours earlier.
+    assert time.localtime().tm_gmtoff == 3 * 3600
+    assert parsed.timestamp() == indexer.chain_tip_observed_at.timestamp()
+    assert abs(parsed.timestamp() - time.time()) < 60

@@ -114,10 +114,12 @@ Detailed status information about the indexer.
 
 `node` describes the last finalized block that the sync loop read; `/status` does not call the node.
 `connected` is `false` and `latest_block` is `null` before the first successful read and after a failed one.
-`latest_block_observed_at` is the time of the last successful read, so it shows how old the observation is.
+`latest_block_observed_at` is the time of the last successful read in UTC with an explicit offset (`+00:00`), so it shows how old the observation is.
 
 ### GET /metrics
 Prometheus-compatible metrics endpoint. `indexer_sync_lag_blocks` uses the last finalized height that the sync loop read; a scrape does not call the node.
+When the last sync-loop read failed or no read succeeded yet, `indexer_node_reachable` is 0 and `indexer_sync_lag_blocks` is NaN.
+`indexer_chain_tip_height` and `indexer_chain_tip_observed_timestamp_seconds` keep the last successful read; `time() - indexer_chain_tip_observed_timestamp_seconds` is its age.
 
 **Response:** Text format metrics including:
 - `indexer_blocks_indexed_total`
@@ -127,6 +129,7 @@ Prometheus-compatible metrics endpoint. `indexer_sync_lag_blocks` uses the last 
 - `indexer_last_block_height`
 - `indexer_sync_duration_seconds`
 - `indexer_node_request_duration_seconds`
+- `indexer_node_reachable`, `indexer_chain_tip_height`, `indexer_chain_tip_observed_timestamp_seconds`
 - `process_resident_memory_bytes`
 - `process_cpu_seconds_total`
 

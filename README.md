@@ -344,6 +344,13 @@ request. `/status` and `/metrics` use the last finalized height that the sync lo
 observed, so a scrape never calls the node more often than the sync loop. None of
 these endpoints is an independent fleet monitor.
 
+`indexer_node_reachable` is 0 before the first successful sync-loop read and after
+a failed read. Then `indexer_sync_lag_blocks` is NaN, not a stale or default zero.
+`indexer_chain_tip_height` and `indexer_chain_tip_observed_timestamp_seconds` keep
+the last successful read. Alert on its age, for example
+`time() - indexer_chain_tip_observed_timestamp_seconds > 120`, so that a sync cycle
+stuck after an old read does not hide behind a lag of zero.
+
 ## Development and validation
 
 Use CPython 3.14.10 on Linux, or the Docker targets. With a matching interpreter:

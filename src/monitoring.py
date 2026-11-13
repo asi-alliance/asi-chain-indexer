@@ -54,6 +54,24 @@ node_request_duration = Histogram(
     buckets=[0.1, 0.25, 0.5, 1, 2, 5]
 )
 
+node_reachable = Gauge(
+    "indexer_node_reachable",
+    "1 when the last sync-loop read of the last finalized block succeeded, 0 otherwise"
+)
+
+chain_tip_height = Gauge(
+    "indexer_chain_tip_height",
+    "Last finalized height from the last successful sync-loop read; NaN before the first"
+)
+
+chain_tip_observed = Gauge(
+    "indexer_chain_tip_observed_timestamp_seconds",
+    "Unix time of the last successful sync-loop read of the last finalized block; "
+    "NaN before the first"
+)
+
+UNKNOWN = float("nan")
+
 
 class MonitoringServer:
     """HTTP server for monitoring endpoints."""
@@ -203,17 +221,25 @@ class MonitoringServer:
         return web.json_response(status_data)
 
     async def _update_metrics(self):
-        """Update dynamic metrics values."""
+        """Update dynamic metrics values.
+
+        The tip comes from the sync loop, not from a node RPC. Without a valid
+        observation the lag is NaN, never a stale or default zero. The age of a
+        valid observation is time() - indexer_chain_tip_observed_timestamp_seconds.
+        """
+        latest_block, observed_at = self._chain_tip()
+        last_tip = getattr(self.indexer, "chain_tip", None)
+        node_reachable.set(0 if latest_block is None else 1)
+        chain_tip_height.set(UNKNOWN if last_tip is None else last_tip)
+        chain_tip_observed.set(UNKNOWN if observed_at is None else observed_at.timestamp())
         try:
-            # Get last indexed block
             last_indexed = await db.get_last_indexed_block()
             last_block_height.set(last_indexed)
-
-            # Lag against the tip the sync loop last observed; no node RPC here
-            latest_block, _ = self._chain_tip()
-            if latest_block is not None:
-                sync_lag.set(max(0, latest_block - last_indexed))
+            sync_lag.set(
+                UNKNOWN if latest_block is None else max(0, latest_block - last_indexed)
+            )
         except Exception as e:
+            sync_lag.set(UNKNOWN)
             logger.error("Failed to update metrics", error=str(e))
 
     async def _get_status(self) -> Dict[str, Any]:
