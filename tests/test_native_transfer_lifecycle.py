@@ -21,6 +21,19 @@ from src.transfer_reports import ReportUnavailable, block_events
 from test_transfer_reports import expr, payment, report
 from test_node_exact_api import BLOCK_HASH, DEPLOY_ID, node_api
 
+
+def replaying(source):
+    """Serve get_block_events from a replay report, a lookup by block hash or a failure."""
+
+    def events(block_hash, deploy_ids):
+        report = source(block_hash) if callable(source) else source
+        if isinstance(report, Exception):
+            raise report
+        return block_events(report, block_hash, deploy_ids)
+
+    return events
+
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -49,7 +62,7 @@ async def ledger(monkeypatch, request):
             "src.block_indexer.settings.enable_asi_transfer_extraction", True
         )
         indexer = BlockIndexer()
-        indexer.client = SimpleNamespace(get_block_report=AsyncMock())
+        indexer.client = SimpleNamespace(get_block_events=AsyncMock())
 
         async def add(
             height, block_hash, entries, parents=(), *, bonds=(), process=True
@@ -81,7 +94,7 @@ async def ledger(monkeypatch, request):
                     }
                 )
             replay = {"blockInfo": {"blockHash": block_hash}, "deploys": reports}
-            indexer.client.get_block_report.return_value = replay
+            indexer.client.get_block_events.side_effect = replaying(replay)
             if process:
                 await indexer._process_block(details)
             return details, replay
@@ -246,7 +259,7 @@ async def test_huge_rejected_attempt_preserves_replay_history_and_advances_curso
             == "pending"
         )
         ledger.indexer.__dict__.update(BlockIndexer().__dict__)
-        ledger.indexer.client = SimpleNamespace(get_block_report=AsyncMock())
+        ledger.indexer.client = SimpleNamespace(get_block_events=AsyncMock())
     height = 2 if delayed else 1
     details, _ = await ledger.add(
         height,
@@ -267,7 +280,9 @@ async def test_huge_rejected_attempt_preserves_replay_history_and_advances_curso
     await ledger.indexer._sync_blocks()
 
     assert await ledger.db.get_last_indexed_block() == height
-    ledger.indexer.client.get_block_report.assert_awaited_once_with("completion")
+    ledger.indexer.client.get_block_events.assert_awaited_once_with(
+        "completion", ["finish"]
+    )
     lifecycle = await ledger.conn.fetchrow("SELECT * FROM native_transfer_lifecycle")
     assert lifecycle["requested_amount"] == exact
     assert lifecycle["status"] == "rejected"
@@ -288,7 +303,7 @@ async def test_two_million_digit_attempt_keeps_health_responsive(ledger):
     monitor = MonitoringServer(None)
 
     async def while_serving_health(client, details, replay):
-        ledger.indexer.client.get_block_report.return_value = replay
+        ledger.indexer.client.get_block_events.side_effect = replaying(replay)
         loop = asyncio.get_running_loop()
         work = asyncio.ensure_future(ledger.indexer._process_block(details))
         gaps, last = [], loop.time()
@@ -345,13 +360,12 @@ async def test_unknown_summary_requires_real_replay_before_persisting_or_advanci
         node.client.get_blocks_by_height = AsyncMock(
             return_value=[{"blockNumber": 12, "blockHash": BLOCK_HASH}]
         )
-        node.client.get_block_report = AsyncMock(
-            return_value=replay,
-            side_effect=(
+        node.client.get_block_events = AsyncMock(
+            side_effect=replaying(
                 ReportUnavailable("Replay unavailable")
                 if replay_state == "unavailable"
-                else None
-            ),
+                else replay
+            )
         )
         ledger.indexer.client = node.client
         await ledger.indexer._sync_blocks()
@@ -359,7 +373,7 @@ async def test_unknown_summary_requires_real_replay_before_persisting_or_advanci
 
         if replay_state == "available":
             assert await ledger.db.get_last_indexed_block() == 12
-            assert node.client.get_block_report.await_count == 1
+            assert node.client.get_block_events.await_count == 1
             assert await ledger.conn.fetchval("SELECT count(*) FROM blocks") == 1
             row = await ledger.conn.fetchrow("SELECT * FROM transfers")
             assert row["amount_dust"] == raw
@@ -373,7 +387,7 @@ async def test_unknown_summary_requires_real_replay_before_persisting_or_advanci
             )
         else:
             assert await ledger.db.get_last_indexed_block() == 11
-            assert node.client.get_block_report.await_count == 2
+            assert node.client.get_block_events.await_count == 2
             for table in (
                 "blocks",
                 "deployments",
@@ -396,7 +410,7 @@ async def test_pending_restart_and_later_completion(ledger, raw):
     assert initial["requested_amount"] == str(raw)
     assert initial["completion_deploy_id"] is None
     ledger.indexer.__dict__.update(BlockIndexer().__dict__)
-    ledger.indexer.client = SimpleNamespace(get_block_report=AsyncMock())
+    ledger.indexer.client = SimpleNamespace(get_block_events=AsyncMock())
     details, replay = await ledger.add(
         2, "completion", [("finish", report(events[1:]))], ["origin"]
     )
@@ -529,10 +543,9 @@ async def test_successful_noop_without_user_segment_advances_cursor(
             }
         ],
     }
-    ledger.indexer.client.get_block_report.return_value = {
-        "blockInfo": {"blockHash": "noop-block"},
-        "deploys": [noop],
-    }
+    ledger.indexer.client.get_block_events.side_effect = replaying(
+        {"blockInfo": {"blockHash": "noop-block"}, "deploys": [noop]}
+    )
     ledger.indexer.client.get_last_finalized_block = AsyncMock(
         return_value={"blockNumber": 1}
     )
@@ -741,13 +754,12 @@ async def test_interrupted_historical_repair_resumes_without_moving_cursor(
         DELETE FROM native_transfer_calls;
         UPDATE indexer_state SET value='1' WHERE key='native_transfer_backfill_required';
     """)
+    replies = iter([origin_report, ReportUnavailable("busy")])
     client = SimpleNamespace(
         get_block_details=AsyncMock(
             side_effect=lambda h: {"origin": origin, "completion": completion}[h]
         ),
-        get_block_report=AsyncMock(
-            side_effect=[origin_report, ReportUnavailable("busy")]
-        ),
+        get_block_events=AsyncMock(side_effect=replaying(lambda h: next(replies))),
         close=AsyncMock(),
         require_native_precision=AsyncMock(),
     )
@@ -769,10 +781,9 @@ async def test_interrupted_historical_repair_resumes_without_moving_cursor(
             == "pending"
         )
         for _ in range(2):
-            client.get_block_report.side_effect = lambda h: {
-                "origin": origin_report,
-                "completion": completion_report,
-            }[h]
+            client.get_block_events.side_effect = replaying(
+                lambda h: {"origin": origin_report, "completion": completion_report}[h]
+            )
             await repair()
     assert await ledger.db.get_last_indexed_block() == 2
     assert (
@@ -1033,7 +1044,7 @@ async def test_repair_preserves_live_owner_of_immediate_sibling_transfers(
     assert before["block_hash"] == "right"
     client = SimpleNamespace(
         get_block_details=AsyncMock(side_effect=lambda h: blocks[h]),
-        get_block_report=AsyncMock(side_effect=lambda h: reports[h]),
+        get_block_events=AsyncMock(side_effect=replaying(lambda h: reports[h])),
         close=AsyncMock(),
         require_native_precision=AsyncMock(),
     )

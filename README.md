@@ -368,6 +368,8 @@ Exported metrics include `indexer_blocks_indexed_total`,
 each HTTP request. Its `endpoint` label is the route template, for example
 `/api/address/{address}/transfers`, never the raw path. Unknown routes share
 the `unmatched` value.
+The timer starts when the handler runs, so the histogram does not include the
+time that a request waits for the event loop. Measure that time at the client.
 Health/readiness/metrics success alone does not prove continuing finalization;
 compare fresh observations over time. Only `/readiness` queries the node on each
 request. `/status` and `/metrics` use the last finalized height that the sync loop
@@ -420,8 +422,31 @@ received 10 requests per second for 30 s, and a block was committed every 5 s.
 A cache miss costs the same as an uncached read. When more than 5% of the
 requests for a key are misses, the p95 is the uncached latency. For example,
 with a block every second at the same request rate, the cached p95 was
-72.2 ms, 34.2 ms and 21.1 ms. Compare `indexer_http_request_duration_seconds`
-on a deployment with these numbers.
+72.2 ms, 34.2 ms and 21.1 ms.
+
+A second measurement used live F1R3node test networks: node `dev` at `9d4425179`
+(includes the #881 uint256 schema), three validators and an observer, heartbeat
+check intervals of 1 s and 3 s, and native transfers about six times per second.
+The indexer read the observer, and its cache was on. Each endpoint received 10
+requests per second for 30 min. The client measured the p95:
+
+| Heartbeat (indexed blocks per minute) | Endpoint | Trace parsed on the event loop | Trace parsed in a worker process |
+|---|---|---|---|
+| 1 s (37) | `/status` | 562 ms | 8.1 ms |
+| 1 s (37) | `/api/transfers?page=1&limit=20` | 491 ms | 5.9 ms |
+| 1 s (37) | `/api/address/{address}/transfers?page=1&limit=20` | 490 ms | 6.7 ms |
+| 3 s (12) | `/status` | 745 ms | 11.0 ms |
+| 3 s (12) | `/api/transfers?page=1&limit=20` | 1154 ms | 10.7 ms |
+| 3 s (12) | `/api/address/{address}/transfers?page=1&limit=20` | 1153 ms | 12.6 ms |
+
+The node returns the replay trace of a block as one JSON document: 23 MB for a
+block with five transfers. Parsing it took about 0.6 s. While the event loop
+parsed a trace, every request waited, also a cache hit. The cache hit ratio was
+91–98% in both columns, and turning the cache off did not change the p95 of the
+first column. The indexer now parses the trace and extracts its events in a worker
+process. The tables held about 20,000 transfers, so this measurement shows the
+effect of a live block rate and replay traces; the synthetic measurement above
+shows the effect of table size.
 
 ## Development and validation
 
