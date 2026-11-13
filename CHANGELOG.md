@@ -5,6 +5,7 @@ All notable changes to the ASI-Chain Indexer project will be documented in this 
 ## [Unreleased]
 
 ### Added
+- ✅ **Per-endpoint read latency (#31)** — `indexer_http_request_duration_seconds{endpoint,method,status}` records the serving time of every monitoring and API request. `endpoint` is the route template (for example `/api/address/{address}/transfers`), so raw paths and unknown routes cannot create new series. This is the measurement step before any read cache.
 - ✅ **Public `native_transfer_lifecycle` GraphQL view** — `full-init-hasura.sh` tracks the read-only view with public select (no aggregations) and its relationships (`initiation_deployment`, `completion_deployment`, `initiation_block`, `completion_block`, `transfer`, `deployments.native_transfer_calls`, `deployments.completed_native_transfers`). The raw call, result and alias tables stay untracked. Previously only the unsupported `configure-hasura.py` exposed the view.
 - ✅ **Lifecycle lookups by deploy use indexes** — tracked migration 006 adds an index on `native_transfer_results(deploy_id)` and links results and aliases to calls with `UNION ALL`. A lookup by `initiation_deploy_id` or `completion_deploy_id` no longer reads every native transfer result (about 1 s → under 1 ms on 450,000 results).
 

@@ -362,7 +362,11 @@ unchanged. Count movements from the transfer ledger, not lifecycle-row counts.
 Exported metrics include `indexer_blocks_indexed_total`,
 `indexer_deployments_indexed_total`, `indexer_transfers_extracted_total`,
 `indexer_sync_lag_blocks`, `indexer_last_block_height`,
-`indexer_sync_duration_seconds` and `indexer_node_request_duration_seconds`.
+`indexer_sync_duration_seconds`, `indexer_node_request_duration_seconds` and
+`indexer_http_request_duration_seconds`. The last one records the serving time of
+each HTTP request. Its `endpoint` label is the route template, for example
+`/api/address/{address}/transfers`, never the raw path. Unknown routes share
+the `unmatched` value.
 Health/readiness/metrics success alone does not prove continuing finalization;
 compare fresh observations over time. Requests to status/readiness/metrics may
 query the node; they are not an independent fleet monitor.
