@@ -143,30 +143,33 @@ class Transfer(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     event_index = Column(Integer, nullable=True)
     native_result_id = Column(String(64), ForeignKey("native_transfer_results.id"), unique=True)
-    deploy_id = Column(String(140), ForeignKey("deployments.deploy_id"), nullable=False, index=True)
-    block_hash = Column(String(64), ForeignKey("blocks.block_hash"), nullable=False, index=True)
-    block_number = Column(BigInteger, nullable=False, index=True)
-    from_address = Column(String(150), nullable=False, index=True)
-    from_public_key = Column(String(150), nullable=True, index=True)  # Support validator public keys
-    to_address = Column(String(150), nullable=False, index=True)  # Support validator public keys
+    deploy_id = Column(String(140), ForeignKey("deployments.deploy_id"), nullable=False)
+    block_hash = Column(String(64), ForeignKey("blocks.block_hash"), nullable=False)
+    block_number = Column(BigInteger, nullable=False)
+    from_address = Column(String(150), nullable=False)
+    from_public_key = Column(String(150), nullable=True)  # Support validator public keys
+    to_address = Column(String(150), nullable=False)  # Support validator public keys
     amount_dust = Column(
         Amount(), CheckConstraint(f"amount_dust >= 0 AND amount_dust <= {MAX_AMOUNT}"),
         nullable=False,
     )
     amount_asi = Column(Numeric(155, 77), nullable=False)
-    status = Column(String(20), default="success", index=True)
-    timestamp = Column(BigInteger, nullable=False, index=True)
+    status = Column(String(20), default="success")
+    timestamp = Column(BigInteger, nullable=False)
     created_at = Column(DateTime, default=utc_now, nullable=False)
 
     # Relationships
     deployment = relationship("Deployment", back_populates="transfers")
 
+    # The same names and definitions as migrations 000-007
     __table_args__ = (
         UniqueConstraint("deploy_id", "event_index", name="uq_transfer_event"),
+        Index("idx_transfers_deploy_id", "deploy_id"),
+        Index("idx_transfers_block_hash", "block_hash"),
+        Index("idx_transfers_block_number", block_number.desc()),
         Index("idx_transfers_from", "from_address"),
         Index("idx_transfers_to", "to_address"),
-        Index("idx_transfers_block", "block_number"),
-        Index("idx_transfers_created", "created_at"),
+        Index("idx_transfers_created_at", created_at.desc()),
     )
 
 

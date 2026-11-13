@@ -202,6 +202,17 @@ class Settings(BaseSettings):
         description="Enable health check endpoint"
     )
 
+    # Read cache for /status counts and transfer lists; dropped on every committed block
+    read_cache_enabled: bool = Field(
+        default=True,
+        description="Serve repeated /status counts and transfer list reads from process memory"
+    )
+    read_cache_max_entries: int = Field(
+        default=256,
+        ge=1,
+        description="Maximum cached read results; the least recently used entry is dropped first"
+    )
+
     # Hasura Configuration (optional, not used by indexer but may be in env)
     hasura_admin_secret: Optional[SecretStr] = Field(
         default=None,

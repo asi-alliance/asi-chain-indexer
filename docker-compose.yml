@@ -19,6 +19,7 @@ services:
       - ./migrations/004_uint256_phlo_prices.sql:/docker-entrypoint-initdb.d/004_uint256_phlo_prices.sql
       - ./migrations/005_network_metrics_empty_range.sql:/docker-entrypoint-initdb.d/005_network_metrics_empty_range.sql
       - ./migrations/006_native_transfer_lifecycle_plans.sql:/docker-entrypoint-initdb.d/006_native_transfer_lifecycle_plans.sql
+      - ./migrations/007_transfer_index_names.sql:/docker-entrypoint-initdb.d/007_transfer_index_names.sql
     ports:
       - "5432:5432"
     healthcheck:
@@ -70,6 +71,8 @@ services:
       ENABLE_PENDING_DEPLOYS_SYNC: ${ENABLE_PENDING_DEPLOYS_SYNC:-true}
       ENABLE_METRICS: ${ENABLE_METRICS:-true}
       ENABLE_HEALTH_CHECK: ${ENABLE_HEALTH_CHECK:-true}
+      READ_CACHE_ENABLED: ${READ_CACHE_ENABLED:-true}
+      READ_CACHE_MAX_ENTRIES: ${READ_CACHE_MAX_ENTRIES:-256}
 
       # Alerts (Mattermost incoming webhook)
       ALERTS_ENABLED: ${ALERTS_ENABLED:-false}

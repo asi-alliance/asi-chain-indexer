@@ -14,7 +14,7 @@ from sqlalchemy.engine import make_url
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCK_KEY = 18387725196134226
-REVISIONS = ("000", "001", "002", "003", "004", "005", "006")
+REVISIONS = ("000", "001", "002", "003", "004", "005", "006", "007")
 
 # SQL definitions, not data, are inspected. Extension-owned objects are excluded.
 CATALOG_SQL = """
@@ -156,6 +156,14 @@ def validate_adoption(connection, revision):
     mismatches = {key for key, value in expected.items() if actual.get(key) != value}
     mismatches.update(
         key for key in managed_relations if key in actual and key not in expected
+    )
+    # An index that one shipped revision creates and another drops identifies
+    # the level, so it must be absent when the selected revision lacks it.
+    managed_indexes = {
+        key for profile in profiles for key in profile if key.startswith("index:")
+    }
+    mismatches.update(
+        key for key in managed_indexes if key in actual and key not in expected
     )
     owned_names = {key.split(":", 1)[1] for key in managed_relations}
     mismatches.update(

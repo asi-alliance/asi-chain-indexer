@@ -247,7 +247,7 @@ docker compose ps
 curl -fsS http://localhost:9090/status
 ```
 
-PostgreSQL runs SQL migrations 000–006 only when initializing an empty volume.
+PostgreSQL runs SQL migrations 000–007 only when initializing an empty volume.
 The Hasura script changes metadata and permissions; use it for a fresh installation,
 not as a read-only probe or a replacement for reviewing existing custom metadata.
 [deploy.sh](deploy.sh) validates configuration before startup and metadata
@@ -285,11 +285,11 @@ Read [POSTGRES_UPGRADE.md](POSTGRES_UPGRADE.md) and the
   Select both settings from the node contract and metadata before a coordinated
   upgrade. Rebuilding or changing defaults does not rescale stored amounts.
 - On an empty database, `python -m src.migrate upgrade` applies tracked revisions
-  000–006. For an existing unversioned SQL schema, inspect its actual level, use
+  000–007. For an existing unversioned SQL schema, inspect its actual level, use
   `python -m src.migrate adopt --revision REVISION` once, selecting its actual
-  revision from `000`, `001`, `002`, `003`, `004`, `005` or `006`, then run
+  revision from `000`, `001`, `002`, `003`, `004`, `005`, `006` or `007`, then run
   `python -m src.migrate upgrade`. A database already tracked at
-  003, 004 or 005 upgrades to 006. Compose restarts and SQLAlchemy `create_all()` do not upgrade
+  003, 004, 005 or 006 upgrades to 007. Compose restarts and SQLAlchemy `create_all()` do not upgrade
   existing schemas. See the migration guide for validation and backup requirements.
 - Populated databases marked for native-transfer backfill must complete
   `python -m src.reindex_transfers` with writes stopped. Do not manually clear
@@ -313,7 +313,8 @@ container, for example `MONITORING_PORT` and `DATABASE_POOL_TIMEOUT`.
 Important settings include `NODE_HOST`, `GRPC_PORT`, `HTTP_PORT`,
 `NODE_TIMEOUT`, `GRPC_MAX_RECEIVE_MESSAGE_BYTES`, `DATABASE_URL`, `DATABASE_POOL_SIZE`, `SYNC_INTERVAL`,
 `BATCH_SIZE`, `START_FROM_BLOCK`, `NATIVE_TOKEN_DECIMALS`,
-`ENABLE_ASI_TRANSFER_EXTRACTION` and `ENABLE_PENDING_DEPLOYS_SYNC`.
+`ENABLE_ASI_TRANSFER_EXTRACTION`, `ENABLE_PENDING_DEPLOYS_SYNC`,
+`READ_CACHE_ENABLED` and `READ_CACHE_MAX_ENTRIES`.
 The pending-deploy snapshot represents one node's bounded buffers, not a durable
 network-wide queue. `START_FROM_BLOCK` is an initial-history boundary, not a
 command to discard the existing cursor or reindex stored history.
@@ -337,8 +338,8 @@ A plain `docker compose restart` does not replace the container's environment.
 |---|---|
 | `GET /health` | Basic HTTP-process response; does not check dependencies or sync progress |
 | `GET /readiness` (alias `/ready`) | Checks a database query and a last-finalized-block read; returns 200 or 503 |
-| `GET /status` | Database/cursor statistics and node observations; inspect the response content |
-| `GET /metrics` | Prometheus exposition with request-time dynamic updates |
+| `GET /status` | Database/cursor statistics and the last node observation of the sync loop; inspect the response content |
+| `GET /metrics` | Prometheus exposition; the sync lag uses the last finalized height that the sync loop observed |
 | `GET /api/blocks`, `/api/blocks/{block_number}`, `/api/blocks/search` | Block reads/search; a height is not a unique DAG identity |
 | `GET /api/deployments`, `/api/deployments/{deploy_id}`, `/api/deployments/search` | Deploy reads/search |
 | `GET /api/transfers`, `/api/address/{address}/transfers` | Successful ledger movements |
@@ -368,8 +369,59 @@ each HTTP request. Its `endpoint` label is the route template, for example
 `/api/address/{address}/transfers`, never the raw path. Unknown routes share
 the `unmatched` value.
 Health/readiness/metrics success alone does not prove continuing finalization;
-compare fresh observations over time. Requests to status/readiness/metrics may
-query the node; they are not an independent fleet monitor.
+compare fresh observations over time. Only `/readiness` queries the node on each
+request. `/status` and `/metrics` use the last finalized height that the sync loop
+observed, so a scrape never calls the node more often than the sync loop. None of
+these endpoints is an independent fleet monitor.
+
+`indexer_node_reachable` is 0 before the first successful sync-loop read and after
+a failed read. Then `indexer_sync_lag_blocks` is NaN, not a stale or default zero.
+`indexer_chain_tip_height` and `indexer_chain_tip_observed_timestamp_seconds` keep
+the last successful read. Alert on its age, for example
+`time() - indexer_chain_tip_observed_timestamp_seconds > 120`, so that a sync cycle
+stuck after an old read does not hide behind a lag of zero.
+
+### Read cache
+
+The indexer keeps an in-process read-through cache for three read paths: the
+`blocks`, `deployments` and `transfers` counts of `GET /status`, `GET /api/transfers`
+and `GET /api/address/{address}/transfers`. The cursor, the validator count and
+all other endpoints are read live. `/health` and `/readiness` are never cached.
+
+- Every block that the indexer processes drops all entries, right after the
+  transaction that writes its blocks, deployments and transfers commits. This
+  includes a backfill below the cursor. A detected reorg also drops all
+  entries. There is no TTL.
+- A read that overlaps a block commit is returned but not stored.
+- At most `READ_CACHE_MAX_ENTRIES` results (default 256) are kept; the least
+  recently used result is dropped first. A transfer page holds at most 100 rows.
+- A cache failure falls back to a direct query. It never causes an error response.
+- Set `READ_CACHE_ENABLED=false` to turn the cache off without a code change.
+- The cache does not survive a restart and is not shared between replicas.
+  Run `python -m src.reindex_transfers` only with indexer writes stopped, as
+  documented; the restarted indexer starts with an empty cache.
+
+Metrics: `indexer_read_cache_hits_total{endpoint}`,
+`indexer_read_cache_misses_total{endpoint}`, `indexer_read_cache_evictions_total{reason}`,
+`indexer_read_cache_errors_total{endpoint}`, `indexer_read_cache_entries` and
+`indexer_read_cache_enabled`.
+
+Latency target: p95 of 50 ms or less for `/status`, `/api/transfers` and
+`/api/address/{address}/transfers`. A local measurement used PostgreSQL 18.6
+with 200,000 blocks, 1,000,000 deployments and 1,000,000 transfers. Each endpoint
+received 10 requests per second for 30 s, and a block was committed every 5 s.
+
+| Endpoint | p95 without cache | p95 with cache |
+|---|---|---|
+| `/status` | 62.4 ms | 3.9 ms |
+| `/api/transfers?page=1&limit=20` | 39.4 ms | 1.8 ms |
+| `/api/address/{address}/transfers?page=1&limit=20` | 28.5 ms | 1.4 ms |
+
+A cache miss costs the same as an uncached read. When more than 5% of the
+requests for a key are misses, the p95 is the uncached latency. For example,
+with a block every second at the same request rate, the cached p95 was
+72.2 ms, 34.2 ms and 21.1 ms. Compare `indexer_http_request_duration_seconds`
+on a deployment with these numbers.
 
 ## Development and validation
 
