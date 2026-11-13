@@ -130,6 +130,8 @@ When the last sync-loop read failed or no read succeeded yet, `indexer_node_reac
 - `indexer_sync_duration_seconds`
 - `indexer_node_request_duration_seconds`
 - `indexer_node_reachable`, `indexer_chain_tip_height`, `indexer_chain_tip_observed_timestamp_seconds`
+
+- `indexer_http_request_duration_seconds` (labels `endpoint`, `method`, `status`; `endpoint` is the route template, or `unmatched` for an unknown route)
 - `process_resident_memory_bytes`
 - `process_cpu_seconds_total`
 
