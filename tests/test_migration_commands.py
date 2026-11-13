@@ -534,6 +534,31 @@ async def test_007_upgrade_drops_duplicate_transfer_address_indexes(isolated):
 
 
 @pytest.mark.asyncio
+async def test_007_sql_drops_only_the_public_duplicates(isolated):
+    conn, url = isolated
+    await apply_through(conn, 6)
+    await conn.execute("""
+        CREATE SCHEMA auxiliary;
+        CREATE TABLE auxiliary.other_transfers (from_address text, to_address text);
+        CREATE INDEX idx_transfers_from_address ON auxiliary.other_transfers (from_address);
+        CREATE INDEX idx_transfers_to_address ON auxiliary.other_transfers (to_address);
+        SET search_path TO auxiliary, public, pg_catalog;
+    """)
+    # The documented standalone path: psql runs the file with the caller's path.
+    await conn.execute(SQL_FILES[7].read_text())
+    assert [
+        row["indexname"]
+        for row in await conn.fetch(
+            "SELECT indexname FROM pg_indexes WHERE schemaname = 'auxiliary' ORDER BY 1"
+        )
+    ] == ["idx_transfers_from_address", "idx_transfers_to_address"]
+    assert await address_indexes(conn) == {
+        "from_address": ["idx_transfers_from"],
+        "to_address": ["idx_transfers_to"],
+    }
+
+
+@pytest.mark.asyncio
 async def test_adoption_rejects_an_index_that_the_selected_revision_drops(isolated):
     conn, url = isolated
     await apply_through(conn, 6)

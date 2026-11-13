@@ -5,9 +5,11 @@
 -- This migration drops the *_address copies. idx_transfers_from and
 -- idx_transfers_to remain, and the ORM declares the same index names.
 -- No table, column, data, view or Hasura metadata changes.
+-- The names are schema-qualified: a direct psql run follows the caller's
+-- search_path and must not drop a same-named index of another schema.
 BEGIN;
 
-DROP INDEX IF EXISTS idx_transfers_from_address;
-DROP INDEX IF EXISTS idx_transfers_to_address;
+DROP INDEX IF EXISTS public.idx_transfers_from_address;
+DROP INDEX IF EXISTS public.idx_transfers_to_address;
 
 COMMIT;
