@@ -19,8 +19,6 @@ def main():
     args = parser.parse_args()
     if args.profile not in ("classic", "uint256"):
         parser.error("unknown NODE_PROTOCOL_PROFILE")
-    if args.profile not in ("classic", "uint256"):
-        parser.error("unknown NODE_PROTOCOL_PROFILE")
     source = Path("protos") / ("uint256" if args.profile == "uint256" else "")
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "scalapb").mkdir(exist_ok=True)

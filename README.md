@@ -85,8 +85,8 @@ Raw token amounts are checked Python integers stored as uint256-range
 `NUMERIC(78,0)`. Human-readable amounts use exact decimal strings. Keep
 `HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES=true` and preserve strings in consumers.
 
-The generic Python `NATIVE_TOKEN_DECIMALS` fallback is **8** for legacy compatibility.
-The ASI local Compose example defaults to **18**, matching the environment examples.
+Python, Docker Compose and the environment examples default
+`NATIVE_TOKEN_DECIMALS` to **18** for the ASI network.
 Set `NATIVE_TOKEN_DECIMALS` explicitly to the chain's actual precision, including
 **8** for legacy eight-decimal chains. This setting must match node token metadata;
 choosing the uint256 wire profile does not choose the token's precision.
@@ -250,9 +250,9 @@ curl -fsS http://localhost:9090/status
 PostgreSQL runs SQL migrations 000–006 only when initializing an empty volume.
 The Hasura script changes metadata and permissions; use it for a fresh installation,
 not as a read-only probe or a replacement for reviewing existing custom metadata.
-[deploy.sh](deploy.sh) wraps startup and metadata initialization, but currently
-prints required environment values, including the Hasura secret. Review it before
-use; avoid its destructive `--clean` option for retained data.
+[deploy.sh](deploy.sh) validates configuration before startup and metadata
+initialization. It prints the selected wire profile and precision without printing
+required environment values. Avoid its destructive `--clean` option for retained data.
 
 | Local service | Address / storage |
 |---|---|
@@ -277,7 +277,9 @@ Read [POSTGRES_UPGRADE.md](POSTGRES_UPGRADE.md) and the
 - If your legacy installation relied on the implicit `classic` profile, pin
   `NODE_PROTOCOL_PROFILE=classic` in `.env` **before rebuilding**, and keep it set
   for runtime. Explicitly set `NATIVE_TOKEN_DECIMALS=8` for an eight-decimal chain;
-  Compose now defaults to `uint256` and 18 decimals when these settings are absent.
+  Python, Compose and `deploy.sh` now default to `uint256` and 18 decimals when
+  these settings are absent. The deploy wrapper validates the selected settings
+  and Compose configuration before changing containers, including with `--clean`.
   For standalone Docker, build with `--build-arg NODE_PROTOCOL_PROFILE=classic`;
   for local Python, set the profile before both generating bindings and running.
   Select both settings from the node contract and metadata before a coordinated

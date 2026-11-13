@@ -5,11 +5,25 @@ import sys
 import pytest
 
 from src.config import Settings
+from src.migration_support import ROOT
 
 
 def test_unset_profile_uses_uint256(monkeypatch):
     monkeypatch.delenv("NODE_PROTOCOL_PROFILE", raising=False)
     assert Settings(_env_file=None).node_protocol_profile == "uint256"
+
+
+def test_unset_precision_uses_native18(monkeypatch):
+    monkeypatch.delenv("NATIVE_TOKEN_DECIMALS", raising=False)
+    assert Settings(_env_file=None).native_token_decimals == 18
+
+
+@pytest.mark.parametrize("decimals", [0, 8, 18, 77])
+def test_explicit_precision_is_independent_of_wire_profile(monkeypatch, decimals):
+    monkeypatch.setenv("NATIVE_TOKEN_DECIMALS", str(decimals))
+    for profile in ("classic", "uint256"):
+        selected = Settings(_env_file=None, node_protocol_profile=profile)
+        assert selected.native_token_decimals == decimals
 
 
 @pytest.mark.parametrize("profile", ["classic", "uint256"])
@@ -33,11 +47,11 @@ def test_generator_selects_complete_profile(tmp_path, environment, argument, exp
     if environment is not None:
         env["NODE_PROTOCOL_PROFILE"] = environment
     output = tmp_path / "stubs"
-    command = [sys.executable, "scripts/generate-protos.py", "--output", str(output)]
+    command = [sys.executable, str(ROOT / "scripts/generate-protos.py"), "--output", str(output)]
     if argument is not None:
         command.extend(["--profile", argument])
     subprocess.run(
-        command, env=env, check=True, capture_output=True, text=True, timeout=30
+        command, cwd=ROOT, env=env, check=True, capture_output=True, text=True, timeout=30
     )
     assert (output / "protocol_profile.txt").read_text() == expected
 

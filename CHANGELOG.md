@@ -9,6 +9,7 @@ All notable changes to the ASI-Chain Indexer project will be documented in this 
 - ✅ **Lifecycle lookups by deploy use indexes** — tracked migration 006 adds an index on `native_transfer_results(deploy_id)` and links results and aliases to calls with `UNION ALL`. A lookup by `initiation_deploy_id` or `completion_deploy_id` no longer reads every native transfer result (about 1 s → under 1 ms on 450,000 results).
 
 ### Changed
+- Default to the `uint256` wire profile and 18 native-token decimals in Python, Compose and the ASI environment templates. Legacy operators must set `NODE_PROTOCOL_PROFILE=classic` before rebuilding and at runtime, and `NATIVE_TOKEN_DECIMALS=8` for eight-decimal chains. Rebuild/regenerate bindings when changing profiles; existing amounts and recorded precision are not rescaled. `deploy.sh` keeps these defaults and validates settings and Compose configuration before container changes, including `--clean`, without printing environment secrets.
 - Add explicit Alembic status/upgrade/adopt commands around existing SQL migrations, with revision tracking, schema validation, transactional rollback and concurrent-run protection.
 - Upgrade the supported Docker and CI interpreter to Python 3.14.10 after clean-image and PostgreSQL/Hasura compatibility validation.
 - Upgrade the Docker/CI baseline to Python 3.13.18, lock transitive Python dependencies with hashes, and separate production packages from test/development tools.

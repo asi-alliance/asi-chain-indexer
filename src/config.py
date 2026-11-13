@@ -11,7 +11,7 @@ from sqlalchemy.exc import ArgumentError
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
-    native_token_decimals: int = Field(default=8, ge=0, le=77)
+    native_token_decimals: int = Field(default=18, ge=0, le=77)
 
     node_protocol_profile: Literal["classic", "uint256"] = "uint256"
 
