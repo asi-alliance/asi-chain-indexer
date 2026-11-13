@@ -133,6 +133,8 @@ When the last sync-loop read failed or no read succeeded yet, `indexer_node_reac
 - `indexer_read_cache_hits_total`, `indexer_read_cache_misses_total` (label `endpoint`: `status`, `transfers`, `address_transfers`)
 - `indexer_read_cache_evictions_total` (label `reason`: `block`, `reorg`, `capacity`)
 - `indexer_read_cache_errors_total`, `indexer_read_cache_entries`, `indexer_read_cache_enabled`
+
+- `indexer_http_request_duration_seconds` (labels `endpoint`, `method`, `status`; `endpoint` is the route template, or `unmatched` for an unknown route)
 - `process_resident_memory_bytes`
 - `process_cpu_seconds_total`
 

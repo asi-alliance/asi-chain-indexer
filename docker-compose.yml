@@ -19,6 +19,7 @@ services:
       - ./migrations/004_uint256_phlo_prices.sql:/docker-entrypoint-initdb.d/004_uint256_phlo_prices.sql
       - ./migrations/005_network_metrics_empty_range.sql:/docker-entrypoint-initdb.d/005_network_metrics_empty_range.sql
       - ./migrations/006_native_transfer_lifecycle_plans.sql:/docker-entrypoint-initdb.d/006_native_transfer_lifecycle_plans.sql
+      - ./migrations/007_transfer_index_names.sql:/docker-entrypoint-initdb.d/007_transfer_index_names.sql
     ports:
       - "5432:5432"
     healthcheck:

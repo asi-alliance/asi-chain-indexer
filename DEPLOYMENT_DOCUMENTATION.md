@@ -69,14 +69,19 @@ Remote ASI Network (13.251.66.61:40452 gRPC / 40453 HTTP)
 
 3. **Configure Hasura (for Explorer frontend):**
    
-   After the indexer is running, configure Hasura GraphQL for the frontend:
+   After the indexer is running, configure Hasura GraphQL for the frontend.
+   Run these commands and the checks in step 4 from the repository root in the
+   same shell. The first command loads `.env` into the shell, as
+   `scripts/full-init-hasura.sh` does, so `$HASURA_ADMIN_SECRET` is set for the
+   `curl` examples below.
    
    ```bash
-   # Setup Hasura configuration
-   ./scripts/configure-hasura.sh
+   # Load .env (including HASURA_ADMIN_SECRET) into this shell
+   set -o allexport; source <(sed 's/\r$//' .env); set +o allexport
    
-   # Setup GraphQL relationships
-   ./scripts/setup-hasura-relationships.sh
+   # Track tables, views and relationships, and grant public read access.
+   # On fresh metadata only: the script stops at the first tracked object.
+   bash scripts/full-init-hasura.sh
    ```
 
 4. **Verify Indexer:**
@@ -84,11 +89,11 @@ Remote ASI Network (13.251.66.61:40452 gRPC / 40453 HTTP)
    # Check indexer status
    curl http://localhost:9090/status | jq .
    
-   # Test GraphQL with nested query
+   # Test GraphQL with nested query (as admin; requires the .env loaded in step 3)
    curl http://localhost:8080/v1/graphql \
      -X POST \
      -H "Content-Type: application/json" \
-     -H "x-hasura-admin-secret: myadminsecretkey" \
+     -H "x-hasura-admin-secret: $HASURA_ADMIN_SECRET" \
      -d '{"query":"{ blocks(limit: 1) { block_number deployments { deploy_id } validator_bonds { stake } } }"}'
    ```
 
@@ -214,13 +219,15 @@ docker ps | grep asi-
 
 2. **GraphQL Schema Issues:**
    ```bash
-   # Run Hasura configuration scripts
-   ./scripts/configure-hasura.sh
-   ./scripts/setup-hasura-relationships.sh
+   # Load .env (including HASURA_ADMIN_SECRET) into this shell
+   set -o allexport; source <(sed 's/\r$//' .env); set +o allexport
+   
+   # Fresh metadata: run the Hasura initialization script
+   bash scripts/full-init-hasura.sh
    
    # Or reload GraphQL metadata manually
    curl -X POST http://localhost:8080/v1/metadata \
-     -H "X-Hasura-Admin-Secret: myadminsecretkey" \
+     -H "X-Hasura-Admin-Secret: $HASURA_ADMIN_SECRET" \
      -d '{"type": "reload_metadata", "args": {}}'
    ```
 

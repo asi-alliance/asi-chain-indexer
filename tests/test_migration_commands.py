@@ -85,7 +85,7 @@ async def test_empty_upgrade_and_repeat_do_not_replay_sql(isolated):
     for _ in range(2):
         code, _, error = await cli(url, "upgrade")
         assert code == 0, error
-        assert await conn.fetchval("SELECT version_num FROM alembic_version") == "006"
+        assert await conn.fetchval("SELECT version_num FROM alembic_version") == "007"
     assert (
         await conn.fetchval(
             "SELECT data_type FROM information_schema.columns "
@@ -100,10 +100,10 @@ async def test_empty_upgrade_and_repeat_do_not_replay_sql(isolated):
         )
         == "0"
     )
-    assert await cli(url, "status") == (0, "006\n", "")
+    assert await cli(url, "status") == (0, "007\n", "")
 
 
-@pytest.mark.parametrize("revision", range(7))
+@pytest.mark.parametrize("revision", range(8))
 @pytest.mark.asyncio
 async def test_adoption_and_upgrade_preserve_history_and_repair_flag(
     isolated, revision
@@ -124,7 +124,7 @@ async def test_adoption_and_upgrade_preserve_history_and_repair_flag(
     assert await conn.fetchrow("SELECT amount_dust,amount_asi FROM transfers") == before
     code, _, error = await cli(url, "upgrade")
     assert code == 0, error
-    assert await conn.fetchval("SELECT version_num FROM alembic_version") == "006"
+    assert await conn.fetchval("SELECT version_num FROM alembic_version") == "007"
     assert await conn.fetchrow("SELECT amount_dust,amount_asi FROM transfers") == before
     assert await conn.fetchval("SELECT token_decimals FROM transfers") == 8
     assert await conn.fetchval("SELECT count(*) FROM blocks") == 1
@@ -175,7 +175,9 @@ async def test_partial_schema_is_not_stamped(isolated, change):
     assert await conn.fetchval("SELECT to_regclass('alembic_version')") is None
 
 
-@pytest.mark.parametrize("revision", [3, 4, 5, 6], ids=["003", "004", "005", "006"])
+@pytest.mark.parametrize(
+    "revision", [3, 4, 5, 6, 7], ids=["003", "004", "005", "006", "007"]
+)
 @pytest.mark.parametrize(
     "table,mode",
     [
@@ -204,7 +206,9 @@ async def test_adoption_rejects_changed_fk_enforcement(isolated, revision, table
     assert await conn.fetchval("SELECT count(*) FROM transfers") == 1
 
 
-@pytest.mark.parametrize("revision", [0, 4, 5, 6], ids=["000", "004", "005", "006"])
+@pytest.mark.parametrize(
+    "revision", [0, 4, 5, 6, 7], ids=["000", "004", "005", "006", "007"]
+)
 @pytest.mark.parametrize(
     "change",
     [
@@ -390,7 +394,7 @@ async def test_005_upgrade_replaces_failing_network_metrics_on_tracked_004(isola
     assert (await cli(url, "adopt", "--revision", "004"))[0] == 0
     code, _, error = await cli(url, "upgrade")
     assert code == 0, error
-    assert await cli(url, "status") == (0, "006\n", "")
+    assert await cli(url, "status") == (0, "007\n", "")
     assert len(await network_metrics(conn)) == 6
 
 
@@ -438,7 +442,7 @@ async def test_006_upgrade_keeps_lifecycle_rows_and_drops_self_aliases(isolated)
     assert (await cli(url, "adopt", "--revision", "005"))[0] == 0
     code, _, error = await cli(url, "upgrade")
     assert code == 0, error
-    assert await cli(url, "status") == (0, "006\n", "")
+    assert await cli(url, "status") == (0, "007\n", "")
     assert await lifecycle(conn) == before
     assert await conn.fetch(
         "SELECT result_id, call_id FROM native_transfer_result_aliases"
@@ -488,3 +492,98 @@ async def test_006_lifecycle_lookup_by_deploy_uses_indexes(isolated, column):
     assert results
     for node in results:
         assert "Index Cond" in node, node["Node Type"]
+
+
+TRANSFER_INDEXES = """
+    SELECT indexname, indexdef FROM pg_indexes
+    WHERE schemaname = 'public' AND tablename = 'transfers'
+"""
+
+
+async def address_indexes(conn):
+    rows = await conn.fetch(TRANSFER_INDEXES)
+    return {
+        column: sorted(name for name, definition in rows if definition.endswith(f"({column})"))
+        for column in ("from_address", "to_address")
+    }
+
+
+@pytest.mark.asyncio
+async def test_007_upgrade_drops_duplicate_transfer_address_indexes(isolated):
+    conn, url = isolated
+    await apply_through(conn, 6)
+    assert await address_indexes(conn) == {
+        "from_address": ["idx_transfers_from", "idx_transfers_from_address"],
+        "to_address": ["idx_transfers_to", "idx_transfers_to_address"],
+    }
+    before = await conn.fetchrow("SELECT * FROM transfers")
+    assert (await cli(url, "adopt", "--revision", "006"))[0] == 0
+    code, _, error = await cli(url, "upgrade")
+    assert code == 0, error
+    assert await cli(url, "status") == (0, "007\n", "")
+    assert await address_indexes(conn) == {
+        "from_address": ["idx_transfers_from"],
+        "to_address": ["idx_transfers_to"],
+    }
+    assert await conn.fetchrow("SELECT * FROM transfers") == before
+    plan = await conn.fetchval(
+        "EXPLAIN (FORMAT JSON) SELECT * FROM transfers "
+        "WHERE from_address = 'sender' OR to_address = 'sender'"
+    )
+    assert "idx_transfers_from_address" not in plan
+
+
+@pytest.mark.asyncio
+async def test_007_sql_drops_only_the_public_duplicates(isolated):
+    conn, url = isolated
+    await apply_through(conn, 6)
+    await conn.execute("""
+        CREATE SCHEMA auxiliary;
+        CREATE TABLE auxiliary.other_transfers (from_address text, to_address text);
+        CREATE INDEX idx_transfers_from_address ON auxiliary.other_transfers (from_address);
+        CREATE INDEX idx_transfers_to_address ON auxiliary.other_transfers (to_address);
+        SET search_path TO auxiliary, public, pg_catalog;
+    """)
+    # The documented standalone path: psql runs the file with the caller's path.
+    await conn.execute(SQL_FILES[7].read_text())
+    assert [
+        row["indexname"]
+        for row in await conn.fetch(
+            "SELECT indexname FROM pg_indexes WHERE schemaname = 'auxiliary' ORDER BY 1"
+        )
+    ] == ["idx_transfers_from_address", "idx_transfers_to_address"]
+    assert await address_indexes(conn) == {
+        "from_address": ["idx_transfers_from"],
+        "to_address": ["idx_transfers_to"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_adoption_rejects_an_index_that_the_selected_revision_drops(isolated):
+    conn, url = isolated
+    await apply_through(conn, 6)
+    code, _, error = await cli(url, "adopt", "--revision", "007")
+    assert code != 0 and "index:idx_transfers_from_address" in error
+    assert await conn.fetchval("SELECT to_regclass('alembic_version')") is None
+
+
+@pytest.mark.asyncio
+async def test_orm_declares_the_transfer_indexes_of_the_migrations(isolated):
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from src.models import Base
+
+    conn, url = isolated
+    engine = create_async_engine(url.replace("postgresql://", "postgresql+asyncpg://", 1))
+    try:
+        async with engine.begin() as orm:
+            await orm.run_sync(Base.metadata.create_all)
+    finally:
+        await engine.dispose()
+    profile = json.loads((ROOT / "migration_env/profiles/007.json").read_text())
+    migrated = {
+        key.split(":", 1)[1]: json.loads(value)[0]
+        for key, value in profile.items()
+        if key.startswith("index:") and " ON public.transfers " in value
+    }
+    assert dict(await conn.fetch(TRANSFER_INDEXES)) == migrated

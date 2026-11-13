@@ -2,7 +2,7 @@
 
 ## Tracked migration commands
 
-Alembic wraps the unchanged SQL files 000–006 as forward-only revisions. Commands
+Alembic wraps the unchanged SQL files 000–007 as forward-only revisions. Commands
 use the explicitly set DATABASE_URL and the installed runtime requirements; no
 psql executable or node connection is needed. They do not run on indexer startup.
 Back up the actual database, stop indexer writers and rehearse upgrades first.
@@ -15,7 +15,7 @@ make migration-status PYTHON=python
 make migrate PYTHON=python
 ```
 
-On an empty public schema, upgrade creates 000–006 and alembic_version. Subsequent
+On an empty public schema, upgrade creates 000–007 and alembic_version. Subsequent
 runs apply only pending revisions. The whole command, including version updates,
 is transactional and holds a per-database advisory lock; a concurrent command is
 rejected. Lock waits are bounded to five seconds and each SQL statement defaults
@@ -44,14 +44,17 @@ owned by managed columns are rejected. Sequence allocation state (`last_value`
 and `is_called`) is retained as data and is not compared with a fresh database.
 A wrong level, missing object or changed owned column is rejected before writing
 a version.
-Unrelated objects and additional indexes are retained. Review custom schemas and
+Unrelated objects and additional indexes are retained. An exception is an
+index that a shipped revision creates and a later revision drops, for example
+the two transfer address indexes that 007 drops. Such an index identifies the
+level, so it must be absent when the selected revision does not have it. Review custom schemas and
 permissions separately; this structure check does not validate historical data,
 row-level permissions, Hasura metadata or whether history repair was performed.
 The profiles were generated and tested on PostgreSQL 18.6; verify other server
 versions in a disposable rehearsal before adopting them.
 
-Fresh Compose databases still initialize through the seven SQL mounts. After that
-initialization, adopt revision 006 once to begin version tracking. Existing Compose
+Fresh Compose databases still initialize through the eight SQL mounts. After that
+initialization, adopt revision 007 once to begin version tracking. Existing Compose
 volumes need adoption of their actual level and an explicit upgrade command, for
 example docker compose run --rm --no-deps indexer python -m src.migrate status
 (with PostgreSQL already running). Do not run native alembic stamp as a shortcut:
@@ -89,6 +92,7 @@ Apply these migrations in order to a new database:
 5. `004_uint256_phlo_prices.sql`: widen included/pending fee prices with uint256 checks.
 6. `005_network_metrics_empty_range.sql`: return empty network metric buckets for a database without data.
 7. `006_native_transfer_lifecycle_plans.sql`: index lifecycle lookups by initiating and completing deploy.
+8. `007_transfer_index_names.sql`: drop the duplicate transfer address indexes.
 
 ```bash
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/000_comprehensive_initial_schema.sql
@@ -98,10 +102,11 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/003_native_transfer_calls.
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/004_uint256_phlo_prices.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/005_network_metrics_empty_range.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/006_native_transfer_lifecycle_plans.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/007_transfer_index_names.sql
 ```
 
 For an existing version 000 database, back up the database, stop indexer writes,
-and apply **001, 002, 003, 004, 005 and 006, once each**. The migration takes table locks while widening
+and apply **001, 002, 003, 004, 005, 006 and 007, once each**. The migration takes table locks while widening
 columns and rebuilding generated balance totals and `transaction_history_view`.
 Reload Hasura metadata after migration and before deploying the matching explorer.
 Compose runs these migrations only when initializing an empty PostgreSQL volume;
@@ -158,7 +163,6 @@ table, column or data, and Hasura metadata does not need a reload.
 
 ### Lifecycle query plans migration 006
 
-The Alembic head is 006, matching the SQL initialized by current Compose.
 Hasura exposes `native_transfer_lifecycle` to the public role, and the explorer
 reads it by initiating and by completing deploy. Before 006, each such lookup read
 every native transfer result: the `UNION` that links results and aliases to
@@ -181,6 +185,28 @@ A tracked 005 database obtains the change through `upgrade`. For an untracked
 SQL installation at version 005, apply only 006. An unversioned database already
 initialized through SQL 006 uses `adopt --revision 006`. The index build locks
 writes to `native_transfer_results`. Stop the indexer during the upgrade.
+
+### Transfer index names migration 007
+
+The Alembic head is 007, matching the SQL initialized by current Compose.
+Migration 000 creates two identical btree indexes on each transfer address
+column: `idx_transfers_from` and `idx_transfers_from_address` on `from_address`,
+and `idx_transfers_to` and `idx_transfers_to_address` on `to_address`. Each
+transfer insert updated both copies, and the planner used only one of them.
+Migration 007 drops `idx_transfers_from_address` and `idx_transfers_to_address`.
+`idx_transfers_from` and `idx_transfers_to` remain. No table, column, data, view
+or function changes, and Hasura metadata does not need a reload.
+
+`src/models.py` now declares the same six named `transfers` indexes as the
+migrations. Before, `create_all()` (used only by `python -m src.main --reset`)
+created different names and further indexes on `from_public_key`, `status` and
+`timestamp`, which no migration creates.
+
+A tracked 006 database obtains the change through `upgrade`. For an untracked
+SQL installation at version 006, apply only 007. An unversioned database already
+initialized through SQL 007 uses `adopt --revision 007`. A database at 006 cannot
+adopt 007, because it still has the two dropped indexes. `DROP INDEX` briefly
+locks `transfers`. Stop the indexer during the upgrade.
 
 The separate [adoption review findings](https://github.com/asi-alliance/asi-chain-indexer/pull/37#issuecomment-6736839084)
 on internal FK-trigger enforcement and owned-sequence structure remain open.

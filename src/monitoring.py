@@ -4,6 +4,7 @@ from src.time_utils import utc_now
 from typing import Dict, Any, List
 from decimal import Decimal
 import json
+import time
 
 from aiohttp import web
 from prometheus_client import Counter, Gauge, Histogram, generate_latest, REGISTRY
@@ -73,13 +74,49 @@ chain_tip_observed = Gauge(
 
 UNKNOWN = float("nan")
 
+http_request_duration = Histogram(
+    "indexer_http_request_duration_seconds",
+    "Time taken to serve a monitoring or API request, by route template",
+    ["endpoint", "method", "status"],
+    buckets=[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
+)
+
+# Bounded label values: the route template (never the raw path) and a fixed method set.
+_UNMATCHED_ENDPOINT = "unmatched"
+_LABELLED_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
+
+
+def _endpoint_label(request) -> str:
+    route = request.match_info.route if request.match_info is not None else None
+    resource = route.resource if route is not None else None
+    return resource.canonical if resource is not None else _UNMATCHED_ENDPOINT
+
+
+@web.middleware
+async def observe_request_duration(request, handler):
+    """Record the serving time of every request under its route template."""
+    started = time.perf_counter()
+    status = 500
+    try:
+        response = await handler(request)
+        status = response.status
+        return response
+    except web.HTTPException as e:
+        status = e.status
+        raise
+    finally:
+        method = request.method if request.method in _LABELLED_METHODS else "OTHER"
+        http_request_duration.labels(
+            _endpoint_label(request), method, str(status)
+        ).observe(time.perf_counter() - started)
+
 
 class MonitoringServer:
     """HTTP server for monitoring endpoints."""
 
     def __init__(self, indexer):
         self.indexer = indexer
-        self.app = web.Application()
+        self.app = web.Application(middlewares=[observe_request_duration])
         self._setup_routes()
 
     def _client(self):
