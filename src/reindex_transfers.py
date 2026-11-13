@@ -12,7 +12,6 @@ from src.config import settings
 from src.database import db
 from src.grpc_node_client import GrpcNodeClient
 from src.models import BalanceState, Block, Deployment, Transfer
-from src.transfer_reports import block_events
 from src.native_transfers import (
     reconcile_block, reconcile_completed_duplicates, require_indexed_parents,
 )
@@ -62,9 +61,8 @@ async def repair():
                     await indexer._process_genesis_transfers(session, info)
                     await indexer._process_genesis_balance_states(session, info)
             elif deploys:
-                report = await client.get_block_report(block.block_hash)
-                traces = block_events(
-                    report, block.block_hash, [d["sig"] for d in deploys]
+                traces = await client.get_block_events(
+                    block.block_hash, [d["sig"] for d in deploys]
                 )
                 async with db.session() as session:
                     movements = await reconcile_block(session, info, deploys, traces, client)

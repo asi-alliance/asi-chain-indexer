@@ -18,6 +18,8 @@ from google.protobuf.unknown_fields import UnknownFieldSet
 
 from src.config import settings
 from src.amounts import amount, canonical_signed_decimal
+from src.off_loop import run_off_loop
+from src.transfer_reports import trace_events
 
 logger = structlog.get_logger(__name__)
 
@@ -215,16 +217,17 @@ class GrpcNodeClient:
             logger.error(f"Failed to get block details for {block_hash}: {e}")
             return None
 
-    async def get_block_report(self, block_hash: str) -> Dict[str, Any]:
-        """Read the full BigInt-capable report; failures must retry the block."""
+    async def get_block_events(self, block_hash: str, deploy_ids: List[str]) -> List[Any]:
+        """Read the block's BigInt-capable replay trace; failures must retry the block.
+
+        A trace can be tens of megabytes, so a worker process parses it and extracts its events.
+        """
         url = f"http://{self.node_host}:{self.http_port}/reporting/trace"
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout)) as session:
             async with session.get(url, params={"blockHash": block_hash}) as response:
                 response.raise_for_status()
-                data = await response.json()
-        if data.get("type") != "block-traces-report" or not isinstance(data.get("report"), dict):
-            raise ValueError("Observer did not return a replay trace")
-        return data["report"]
+                body = await response.read()
+        return await run_off_loop(trace_events, body, block_hash, list(deploy_ids))
 
     async def get_pending_deploys(self, deployer_pubkey: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Fetch the node's pending deploy snapshot via the getPendingDeploys RPC.

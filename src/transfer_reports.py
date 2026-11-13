@@ -210,6 +210,17 @@ def block_events(report, block_hash, deploy_ids):
     return [(d["deployInfo"]["sig"], deploy_events(d)) for d in reports]
 
 
+def trace_events(body, block_hash, deploy_ids):
+    data = json.loads(body)
+    if (
+        not isinstance(data, dict)
+        or data.get("type") != "block-traces-report"
+        or not isinstance(data.get("report"), dict)
+    ):
+        raise ValueError("Observer did not return a replay trace")
+    return block_events(data["report"], block_hash, deploy_ids)
+
+
 def block_transfers(report, block_hash, deploy_ids):
     block_events(report, block_hash, deploy_ids)
     return {d["deployInfo"]["sig"]: transfer_results(d) for d in report["deploys"]}
