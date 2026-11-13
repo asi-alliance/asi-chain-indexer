@@ -3,7 +3,7 @@
 import asyncio
 import re
 import statistics
-from datetime import datetime
+from datetime import UTC, datetime
 
 from src.time_utils import utc_now
 from typing import Dict, List, Optional
@@ -106,7 +106,8 @@ class BlockIndexer:
         self._stuck_height: Optional[int] = None
         self._stuck_cycles = 0
         # Last finalized height seen by the sync loop. /metrics and /status read
-        # these instead of calling the node on every request.
+        # these instead of calling the node on every request. The observation
+        # time is timezone-aware UTC; it is never stored in the database.
         self.chain_tip: Optional[int] = None
         self.chain_tip_observed_at: Optional[datetime] = None
         self.node_reachable = False
@@ -336,7 +337,7 @@ class BlockIndexer:
                 return
 
             self.chain_tip = latest_block_number
-            self.chain_tip_observed_at = utc_now()
+            self.chain_tip_observed_at = datetime.now(UTC)
             self.node_reachable = True
 
             self._track_lag(max(0, latest_block_number - last_indexed))
