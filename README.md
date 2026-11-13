@@ -314,8 +314,8 @@ A plain `docker compose restart` does not replace the container's environment.
 |---|---|
 | `GET /health` | Basic HTTP-process response; does not check dependencies or sync progress |
 | `GET /readiness` (alias `/ready`) | Checks a database query and a last-finalized-block read; returns 200 or 503 |
-| `GET /status` | Database/cursor statistics and node observations; inspect the response content |
-| `GET /metrics` | Prometheus exposition with request-time dynamic updates |
+| `GET /status` | Database/cursor statistics and the last node observation of the sync loop; inspect the response content |
+| `GET /metrics` | Prometheus exposition; the sync lag uses the last finalized height that the sync loop observed |
 | `GET /api/blocks`, `/api/blocks/{block_number}`, `/api/blocks/search` | Block reads/search; a height is not a unique DAG identity |
 | `GET /api/deployments`, `/api/deployments/{deploy_id}`, `/api/deployments/search` | Deploy reads/search |
 | `GET /api/transfers`, `/api/address/{address}/transfers` | Successful ledger movements |
@@ -345,8 +345,17 @@ each HTTP request. Its `endpoint` label is the route template, for example
 `/api/address/{address}/transfers`, never the raw path. Unknown routes share
 the `unmatched` value.
 Health/readiness/metrics success alone does not prove continuing finalization;
-compare fresh observations over time. Requests to status/readiness/metrics may
-query the node; they are not an independent fleet monitor.
+compare fresh observations over time. Only `/readiness` queries the node on each
+request. `/status` and `/metrics` use the last finalized height that the sync loop
+observed, so a scrape never calls the node more often than the sync loop. None of
+these endpoints is an independent fleet monitor.
+
+`indexer_node_reachable` is 0 before the first successful sync-loop read and after
+a failed read. Then `indexer_sync_lag_blocks` is NaN, not a stale or default zero.
+`indexer_chain_tip_height` and `indexer_chain_tip_observed_timestamp_seconds` keep
+the last successful read. Alert on its age, for example
+`time() - indexer_chain_tip_observed_timestamp_seconds > 120`, so that a sync cycle
+stuck after an old read does not hide behind a lag of zero.
 
 ## Development and validation
 

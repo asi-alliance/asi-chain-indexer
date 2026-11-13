@@ -3,7 +3,7 @@
 import asyncio
 import re
 import statistics
-from datetime import datetime
+from datetime import UTC, datetime
 
 from src.time_utils import utc_now
 from typing import Dict, List, Optional
@@ -104,6 +104,12 @@ class BlockIndexer:
         self._lag_history: List[int] = []
         self._stuck_height: Optional[int] = None
         self._stuck_cycles = 0
+        # Last finalized height seen by the sync loop. /metrics and /status read
+        # these instead of calling the node on every request. The observation
+        # time is timezone-aware UTC; it is never stored in the database.
+        self.chain_tip: Optional[int] = None
+        self.chain_tip_observed_at: Optional[datetime] = None
+        self.node_reachable = False
 
     async def start(self):
         """Start the enhanced indexer."""
@@ -317,15 +323,21 @@ class BlockIndexer:
             # Get latest finalized block
             last_finalized_data = await self.client.get_last_finalized_block()
             if not last_finalized_data:
+                self.node_reachable = False
                 logger.warning("Could not get last finalized block")
                 self._track_node_availability(False, "could not get last finalized block")
                 return
 
             latest_block_number = last_finalized_data.get("blockNumber")
             if latest_block_number is None:
+                self.node_reachable = False
                 logger.warning("No block number in finalized block data")
                 self._track_node_availability(False, "could not get latest block number")
                 return
+
+            self.chain_tip = latest_block_number
+            self.chain_tip_observed_at = datetime.now(UTC)
+            self.node_reachable = True
 
             self._track_lag(max(0, latest_block_number - last_indexed))
 

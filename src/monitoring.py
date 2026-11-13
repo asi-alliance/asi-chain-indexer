@@ -55,6 +55,24 @@ node_request_duration = Histogram(
     buckets=[0.1, 0.25, 0.5, 1, 2, 5]
 )
 
+node_reachable = Gauge(
+    "indexer_node_reachable",
+    "1 when the last sync-loop read of the last finalized block succeeded, 0 otherwise"
+)
+
+chain_tip_height = Gauge(
+    "indexer_chain_tip_height",
+    "Last finalized height from the last successful sync-loop read; NaN before the first"
+)
+
+chain_tip_observed = Gauge(
+    "indexer_chain_tip_observed_timestamp_seconds",
+    "Unix time of the last successful sync-loop read of the last finalized block; "
+    "NaN before the first"
+)
+
+UNKNOWN = float("nan")
+
 http_request_duration = Histogram(
     "indexer_http_request_duration_seconds",
     "Time taken to serve a monitoring or API request, by route template",
@@ -103,6 +121,16 @@ class MonitoringServer:
     def _client(self):
         # reuse the indexer's client: opening one per request leaks a grpc channel every time
         return self.indexer.client if self.indexer else None
+
+    def _chain_tip(self):
+        """Last finalized height and its observation time, as the sync loop saw them.
+
+        /metrics and /status use this instead of a node RPC per request, so a
+        scrape never reaches the node more often than the sync loop does.
+        """
+        if not self.indexer or not getattr(self.indexer, "node_reachable", False):
+            return None, getattr(self.indexer, "chain_tip_observed_at", None)
+        return self.indexer.chain_tip, self.indexer.chain_tip_observed_at
 
     def _json_response(self, data, status=200):
         """Create a JSON response with custom serialization."""
@@ -230,20 +258,25 @@ class MonitoringServer:
         return web.json_response(status_data)
 
     async def _update_metrics(self):
-        """Update dynamic metrics values."""
+        """Update dynamic metrics values.
+
+        The tip comes from the sync loop, not from a node RPC. Without a valid
+        observation the lag is NaN, never a stale or default zero. The age of a
+        valid observation is time() - indexer_chain_tip_observed_timestamp_seconds.
+        """
+        latest_block, observed_at = self._chain_tip()
+        last_tip = getattr(self.indexer, "chain_tip", None)
+        node_reachable.set(0 if latest_block is None else 1)
+        chain_tip_height.set(UNKNOWN if last_tip is None else last_tip)
+        chain_tip_observed.set(UNKNOWN if observed_at is None else observed_at.timestamp())
         try:
-            # Get last indexed block
             last_indexed = await db.get_last_indexed_block()
             last_block_height.set(last_indexed)
-
-            # Get chain height and calculate lag
-            client = self._client()
-            last_finalized = await client.get_last_finalized_block() if client else None
-            if last_finalized and "blockNumber" in last_finalized:
-                latest_block = last_finalized["blockNumber"]
-                lag = max(0, latest_block - last_indexed)
-                sync_lag.set(lag)
+            sync_lag.set(
+                UNKNOWN if latest_block is None else max(0, latest_block - last_indexed)
+            )
         except Exception as e:
+            sync_lag.set(UNKNOWN)
             logger.error("Failed to update metrics", error=str(e))
 
     async def _get_status(self) -> Dict[str, Any]:
@@ -267,24 +300,16 @@ class MonitoringServer:
 
             stats = dict(db_stats[0]) if db_stats else {}
 
-            # Node status
-            node_status = {}
-            try:
-                client = self._client()
-                last_finalized = await client.get_last_finalized_block() if client else None
-                if last_finalized:
-                    node_status = {
-                        "connected": True,
-                        "latest_block": last_finalized.get("blockNumber")
-                    }
-                else:
-                    node_status = {"connected": False}
-            except Exception:
-                node_status = {"connected": False}
+            # Node status as the sync loop last observed it; no node RPC here
+            latest_block, observed_at = self._chain_tip()
+            node_status = {
+                "connected": latest_block is not None,
+                "latest_block": latest_block,
+                "latest_block_observed_at": observed_at.isoformat() if observed_at else None,
+            }
 
             # Calculate sync status
             last_indexed = int(stats.get("last_indexed_block") or -1)
-            latest_block = node_status.get("latest_block", 0)
 
             return {
                 "indexer": {
@@ -318,7 +343,8 @@ class MonitoringServer:
                     "host": settings.node_host,
                     # "grpc_port": settings.grpc_port,
                     # "http_port": settings.http_port,
-                    "latest_block": node_status.get("latest_block")
+                    "latest_block": node_status.get("latest_block"),
+                    "latest_block_observed_at": node_status.get("latest_block_observed_at")
                 },
                 "timestamp": utc_now().isoformat()
             }
