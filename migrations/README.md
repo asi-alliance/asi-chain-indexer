@@ -114,8 +114,9 @@ restarting Compose does not migrate an existing volume.
 
 The migration preserves existing raw units and human amounts, labels historical
 rows with `token_decimals=8`, and stringifies historical bond amounts in JSONB.
-New ORM rows explicitly record `NATIVE_TOKEN_DECIMALS` (default 8; configure 18 for
-an 18-decimal chain). SQL inserts that omit precision retain the legacy default 8.
+New ORM rows explicitly record `NATIVE_TOKEN_DECIMALS` (default 18 for ASI in
+Python, Compose and the deploy wrapper; configure 8 for a legacy eight-decimal
+chain). SQL inserts that omit precision retain the legacy default 8.
 No balance multiplication or automatic chain denomination change occurs.
 
 Raw monetary columns use `NUMERIC(78,0)` with a uint256 range check. Display columns

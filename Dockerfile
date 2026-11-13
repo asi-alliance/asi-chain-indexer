@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir --require-hashes --prefix=/install -r requirement
 
 # regenerates the gRPC client from protos/; installed without --user so it never reaches runtime
 RUN pip install --no-cache-dir --require-hashes -r requirements-dev.lock
-ARG NODE_PROTOCOL_PROFILE=classic
+ARG NODE_PROTOCOL_PROFILE=uint256
 COPY protos/ protos/
 COPY scripts/generate-protos.py scripts/generate-protos.py
 RUN python scripts/generate-protos.py --profile "$NODE_PROTOCOL_PROFILE" --output /stubs
@@ -44,7 +44,7 @@ RUN chown -R indexer:indexer /app
 
 USER indexer
 
-ARG NODE_PROTOCOL_PROFILE=classic
+ARG NODE_PROTOCOL_PROFILE=uint256
 ENV NODE_PROTOCOL_PROFILE=$NODE_PROTOCOL_PROFILE
 ENV PYTHONPATH=/app
 ENV PATH="/home/indexer/.local/bin:${PATH}"

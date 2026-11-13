@@ -85,18 +85,23 @@ Raw token amounts are checked Python integers stored as uint256-range
 `NUMERIC(78,0)`. Human-readable amounts use exact decimal strings. Keep
 `HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES=true` and preserve strings in consumers.
 
-`NATIVE_TOKEN_DECIMALS` defaults to **8** and must match node token metadata.
-Set **18** only for a chain declaring 18 decimals. Startup checks this setting;
-legacy nodes without token metadata support the eight-decimal profile. Each row
-retains its recorded precision; changing the setting does not rescale historical
-balances or change the chain denomination.
+Python, Docker Compose and the environment examples default
+`NATIVE_TOKEN_DECIMALS` to **18** for the ASI network.
+Set `NATIVE_TOKEN_DECIMALS` explicitly to the chain's actual precision, including
+**8** for legacy eight-decimal chains. This setting must match node token metadata;
+choosing the uint256 wire profile does not choose the token's precision.
+Startup checks the configured precision. Legacy nodes without token metadata
+support the eight-decimal profile. Each row retains its recorded precision;
+changing the setting does not rescale historical balances or change the chain
+denomination.
 
-Select the wire contract explicitly with `NODE_PROTOCOL_PROFILE`:
+The default wire contract is `uint256`. For legacy nodes, explicitly select
+`NODE_PROTOCOL_PROFILE=classic` at build and runtime:
 
 | Profile | Pinned node schema | Monetary wire fields |
 |---|---|---|
-| `classic` (default) | [#896 at 92903a1](https://github.com/F1R3FLY-io/f1r3node-rust/commit/92903a1d81c49fa0a035fb7ee729002e38428280) | Legacy int64 stakes/prices; exact transfer negotiation and authoritative `amountRaw` |
-| `uint256` | [merged #881 at 6233501](https://github.com/F1R3FLY-io/f1r3node-rust/commit/6233501064492d0cac9c7ebc598daf70c501a215) | Decimal-string stakes/prices/`amountRaw`; 32-byte big-endian pending deploy prices; no exact-transfer flags |
+| `uint256` (default) | [merged #881 at 6233501](https://github.com/F1R3FLY-io/f1r3node-rust/commit/6233501064492d0cac9c7ebc598daf70c501a215) | Decimal-string stakes/prices/`amountRaw`; 32-byte big-endian pending deploy prices; no exact-transfer flags |
+| `classic` (explicit legacy profile) | [#896 at 92903a1](https://github.com/F1R3FLY-io/f1r3node-rust/commit/92903a1d81c49fa0a035fb7ee729002e38428280) | Legacy int64 stakes/prices; exact transfer negotiation and authoritative `amountRaw` |
 
 This includes the exact-transfer and replay-history hardening from
 [#22](https://github.com/asi-alliance/asi-chain-indexer/pull/22). Missing or malformed
@@ -104,18 +109,26 @@ compact transfer amounts stay unknown; replay remains authoritative for the ledg
 Signed rejected attempts are preserved, including requests outside uint256.
 `GRPC_MAX_RECEIVE_MESSAGE_BYTES` bounds responses (default 64 MiB, range 1–2147483647).
 
-For a uint256 image and local Compose installation:
+For the default uint256 image and local Compose installation:
 
 ```bash
-# Set NODE_PROTOCOL_PROFILE=uint256 in .env alongside the node's actual precision.
 docker compose build indexer
 # After the reviewed database/metadata upgrade:
 docker compose up -d --force-recreate indexer
 ```
 
-For a standalone build use `docker build --build-arg NODE_PROTOCOL_PROFILE=uint256 .`.
-For local Python use `NODE_PROTOCOL_PROFILE=uint256 make protos PYTHON=python` and
-run with the same environment setting. The image retains its build profile as the
+Standalone `docker build .` and local `make protos PYTHON=python` also default to
+uint256 when `NODE_PROTOCOL_PROFILE` is unset. Compose honors an existing profile
+selection in `.env`.
+
+For a legacy node, set `NODE_PROTOCOL_PROFILE=classic` in `.env` before the Compose
+build and keep it set for runtime. For a standalone legacy image, use
+`docker build --build-arg NODE_PROTOCOL_PROFILE=classic .`. For local Python, export
+`NODE_PROTOCOL_PROFILE=classic` before both generating bindings and running the
+indexer. The legacy profile keeps the existing `classic` name.
+
+Rebuild the image or regenerate bindings when changing profiles. A runtime override
+alone cannot change compiled bindings. The image retains its build profile as the
 runtime default. An environment/binding mismatch fails immediately. Monetary
 messages reject incompatible wire fields on every read, including after a node
 schema switch or reconnect; rejected blocks cannot advance the sync cursor.
@@ -210,7 +223,7 @@ HTTP_PORT=40403
 DATABASE_URL=postgresql://indexer:indexer_pass@postgres:5432/asichain
 HASURA_ADMIN_SECRET=replace-with-a-long-random-secret
 HASURA_BASE=http://localhost:8080
-NATIVE_TOKEN_DECIMALS=8
+NATIVE_TOKEN_DECIMALS=18
 ```
 
 Replace the observer hostname and verify the node's actual host port mappings.
@@ -237,9 +250,9 @@ curl -fsS http://localhost:9090/status
 PostgreSQL runs SQL migrations 000–007 only when initializing an empty volume.
 The Hasura script changes metadata and permissions; use it for a fresh installation,
 not as a read-only probe or a replacement for reviewing existing custom metadata.
-[deploy.sh](deploy.sh) wraps startup and metadata initialization, but currently
-prints required environment values, including the Hasura secret. Review it before
-use; avoid its destructive `--clean` option for retained data.
+[deploy.sh](deploy.sh) validates configuration before startup and metadata
+initialization. It prints the selected wire profile and precision without printing
+required environment values. Avoid its destructive `--clean` option for retained data.
 
 | Local service | Address / storage |
 |---|---|
@@ -261,6 +274,16 @@ Read [POSTGRES_UPGRADE.md](POSTGRES_UPGRADE.md) and the
 - Back up the actual database and Hasura metadata, stop writers and rehearse
   the upgrade. PostgreSQL 14 data requires dump/restore into a new PostgreSQL 18.6
   cluster; retain the old volume and matching images for rollback.
+- If your legacy installation relied on the implicit `classic` profile, pin
+  `NODE_PROTOCOL_PROFILE=classic` in `.env` **before rebuilding**, and keep it set
+  for runtime. Explicitly set `NATIVE_TOKEN_DECIMALS=8` for an eight-decimal chain;
+  Python, Compose and `deploy.sh` now default to `uint256` and 18 decimals when
+  these settings are absent. The deploy wrapper validates the selected settings
+  and Compose configuration before changing containers, including with `--clean`.
+  For standalone Docker, build with `--build-arg NODE_PROTOCOL_PROFILE=classic`;
+  for local Python, set the profile before both generating bindings and running.
+  Select both settings from the node contract and metadata before a coordinated
+  upgrade. Rebuilding or changing defaults does not rescale stored amounts.
 - On an empty database, `python -m src.migrate upgrade` applies tracked revisions
   000–007. For an existing unversioned SQL schema, inspect its actual level, use
   `python -m src.migrate adopt --revision REVISION` once, selecting its actual
