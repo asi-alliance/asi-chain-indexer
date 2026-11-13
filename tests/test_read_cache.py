@@ -288,3 +288,52 @@ async def test_cached_reads_are_dropped_after_a_backfill_and_after_a_reorg(
         )
         await ledger.indexer._verify_main_chain()
         assert await observed() == (2, 2, 2)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_cached_reads_see_a_committed_block_while_its_auxiliary_write_waits(
+    ledger, monkeypatch  # noqa: F811
+):
+    monkeypatch.setattr("src.monitoring.db", ledger.db)
+    await ledger.add(5, "tip", [])
+
+    async with TestClient(TestServer(MonitoringServer(None).app)) as client:
+        async def total_blocks():
+            status = await (await client.get("/status")).json()
+            return status["database"]["total_blocks"]
+
+        assert await total_blocks() == 1
+
+        details = {
+            "blockInfo": {
+                "blockHash": "next",
+                "blockNumber": 6,
+                "timestamp": 6000,
+                "sender": "validator",
+                "bonds": [],
+                "parentsHashList": [],
+                "justifications": [{"validator": "validator", "latestBlockHash": "tip"}],
+            },
+            "deploys": [],
+        }
+        # Hold the auxiliary table so the block_validators insert has to wait.
+        lock = ledger.conn.transaction()
+        await lock.start()
+        await ledger.conn.execute("LOCK TABLE block_validators IN ACCESS EXCLUSIVE MODE")
+        processing = asyncio.ensure_future(ledger.indexer._process_block(details))
+        try:
+            for _ in range(500):
+                if await ledger.conn.fetchval("SELECT count(*) FROM blocks") == 2:
+                    break
+                await asyncio.sleep(0.01)
+            assert await ledger.conn.fetchval("SELECT count(*) FROM blocks") == 2
+            await asyncio.sleep(0.1)
+            assert not processing.done()
+            # The block is committed; the cache must not keep the old count.
+            assert await total_blocks() == 2
+        finally:
+            await lock.rollback()
+            await processing
+
+    assert await ledger.conn.fetchval("SELECT count(*) FROM block_validators") == 1

@@ -359,9 +359,10 @@ The indexer keeps an in-process read-through cache for three read paths: the
 and `GET /api/address/{address}/transfers`. The cursor, the validator count and
 all other endpoints are read live. `/health` and `/readiness` are never cached.
 
-- Every block that the indexer processes drops all entries. This includes a
-  backfill below the cursor. A detected reorg also drops all entries. There is
-  no TTL.
+- Every block that the indexer processes drops all entries, right after the
+  transaction that writes its blocks, deployments and transfers commits. This
+  includes a backfill below the cursor. A detected reorg also drops all
+  entries. There is no TTL.
 - A read that overlaps a block commit is returned but not stored.
 - At most `READ_CACHE_MAX_ENTRIES` results (default 256) are kept; the least
   recently used result is dropped first. A transfer page holds at most 100 rows.

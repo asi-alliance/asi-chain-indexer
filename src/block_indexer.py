@@ -536,8 +536,9 @@ class BlockIndexer:
         try:
             await self._index_block(block_data)
         finally:
-            # Any height, including a backfill below the cursor. Dropping the
-            # cache after a failed block is harmless; missing a commit is not.
+            # Any height, including a backfill below the cursor. _index_block
+            # also drops the cache right at its commit; this covers failures.
+            # Dropping the cache again is harmless; missing a commit is not.
             read_cache.invalidate("block")
 
     async def _index_block(self, block_data: Dict):
@@ -633,6 +634,9 @@ class BlockIndexer:
                 await self._process_genesis_balance_states(session, genesis_block_info)
 
             await session.commit()
+            # Blocks, deployments and transfers changed: drop cached reads now,
+            # not after the block_validators write below, which can wait on locks
+            read_cache.invalidate("block")
 
             # Process block validators from justifications
             if justifications:
