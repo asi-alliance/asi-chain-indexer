@@ -313,10 +313,35 @@ container, for example `MONITORING_PORT` and `DATABASE_POOL_TIMEOUT`.
 Important settings include `NODE_HOST`, `GRPC_PORT`, `HTTP_PORT`,
 `NODE_TIMEOUT`, `GRPC_MAX_RECEIVE_MESSAGE_BYTES`, `DATABASE_URL`, `DATABASE_POOL_SIZE`, `SYNC_INTERVAL`,
 `BATCH_SIZE`, `START_FROM_BLOCK`, `NATIVE_TOKEN_DECIMALS`,
-`ENABLE_ASI_TRANSFER_EXTRACTION`, `ENABLE_PENDING_DEPLOYS_SYNC`,
+`ENABLE_ASI_TRANSFER_EXTRACTION`, `PENDING_DEPLOYS_NODES`,
 `READ_CACHE_ENABLED` and `READ_CACHE_MAX_ENTRIES`.
-The pending-deploy snapshot represents one node's bounded buffers, not a durable
-network-wide queue. `START_FROM_BLOCK` is an initial-history boundary, not a
+
+### Pending deploys
+
+A deploy waits only in the deploy buffer of the validator that received it.
+Nodes do not gossip deploys, and an observer (read-only node) rejects them, so
+an observer's buffer is always empty. `PENDING_DEPLOYS_NODES` lists the gRPC
+addresses (`host:port`, comma-separated, IPv6 in brackets) of every validator
+that clients send deploys to. With an empty list the feature is off: the
+indexer deletes the `pending_deploys` rows and the `pending_deploys_status`
+state, and explorers hide their pending view.
+
+A separate task reads all listed validators every `PENDING_DEPLOYS_INTERVAL`
+seconds (default 1, independent of `SYNC_INTERVAL`), with a
+`PENDING_DEPLOYS_TIMEOUT` (default 2 s) per read. A deploy stays in a buffer
+only until its validator proposes, so a slower read misses most deploys.
+The task merges the buffers by signature and writes `pending_deploys` only
+when the merged set changes; `fetched_at` is the time the indexer first saw
+the deploy. An unreachable validator keeps its last snapshot. The
+`indexer_state` row `pending_deploys_status` holds
+`{"nodes", "reachable", "count", "total_available", "interval_ms"}` and is
+rewritten with each change and at least every 10 s; its `updated_at` shows
+the freshness of the view. `pending_deploys_total_available` keeps the total
+before the per-node cap of 1000. Metrics: `indexer_pending_deploys`,
+`indexer_pending_deploy_nodes_configured` and
+`indexer_pending_deploy_nodes_reachable`.
+
+The view is the validators' bounded buffers, not a durable network-wide queue. `START_FROM_BLOCK` is an initial-history boundary, not a
 command to discard the existing cursor or reindex stored history.
 
 Mattermost alerts are disabled by default. Enabling `ALERTS_ENABLED` requires

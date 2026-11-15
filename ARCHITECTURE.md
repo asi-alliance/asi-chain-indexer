@@ -27,7 +27,7 @@ The indexer service is the core backend component responsible for blockchain dat
    - Handles block synchronization, deployment processing, and validator tracking
    - Implements continuous sync loop with configurable interval
    - Processes blocks in batches for optimal performance
-   - Methods: `start()`, `stop()`, `_sync_blocks()`, `_sync_pending_deploys()`, `_process_block()`, `_process_deployment_enhanced()`, `_extract_transfers()`, `_process_validators()`, `_update_validator_states()`, `_check_epoch_transitions()`, `_update_network_stats()`, `_verify_main_chain()`
+   - Methods: `start()`, `stop()`, `_sync_blocks()`, `_process_block()`, `_process_deployment_enhanced()`, `_extract_transfers()`, `_process_validators()`, `_update_validator_states()`, `_check_epoch_transitions()`, `_update_network_stats()`, `_verify_main_chain()`
 
 2. **GrpcNodeClient** (`grpc_node_client.py`)
    - Client for the node's `DeployServiceV1` gRPC API, plus its HTTP endpoint for active validators
@@ -151,7 +151,7 @@ Key fields:
 
 **pending_deploys**
 
-Ephemeral snapshot of the node's deploy buffers — deploys not yet included in any block. Fully refreshed (DELETE + INSERT) every sync cycle; intentionally no `block_hash`/FK (see Key Design Decisions).
+Ephemeral snapshot of the deploy buffers of the validators in `PENDING_DEPLOYS_NODES` — deploys not yet included in any block. Written by the pending-deploy task (`src/pending_deploys.py`) only when the merged set changes; intentionally no `block_hash`/FK (see Key Design Decisions).
 
 Key fields:
 - `sig` (VARCHAR(160), PK): Hex deploy signature — matches `deployments.deploy_id` once the deploy is included in a block
@@ -166,7 +166,7 @@ Key fields:
 - `language` (VARCHAR(20)): Source language (`rholang` / `metta`)
 - `expiration_timestamp` (BIGINT, NULL = no expiration)
 - `is_rejected` (BOOLEAN): `false` = fresh in deploy_storage; `true` = recovering in rejected-recovery buffer after a merge conflict
-- `fetched_at` (TIMESTAMP): When this snapshot row was written
+- `fetched_at` (TIMESTAMP): When the indexer first saw the deploy in a validator buffer
 
 **transfers**
 
@@ -254,7 +254,7 @@ Key fields:
 - `value` (TEXT): State value
 - `updated_at` (TIMESTAMP): Last update time
 
-Common keys: `last_indexed_block`, `indexer_version`, `schema_version`, `pending_deploys_total_available` (pre-cap pending deploy count, upserted every sync cycle)
+Common keys: `last_indexed_block`, `indexer_version`, `schema_version`, `pending_deploys_total_available` (pre-cap pending deploy count), `pending_deploys_status` (JSON `nodes`, `reachable`, `count`, `total_available`, `interval_ms`; rewritten on change and at least every 10 s, absent when pending deploys are off)
 
 #### Normalization and Relationships
 
@@ -513,9 +513,10 @@ Health check includes:
    - Extract and store transfers
    - Update validator information
 6. Update last_indexed_block in database
-7. Refresh the `pending_deploys` snapshot: call `getPendingDeploys`, then DELETE + INSERT the table contents in one transaction and upsert `pending_deploys_total_available` into `indexer_state` (node failure keeps the last snapshot)
-8. Sleep for SYNC_INTERVAL seconds
-9. Repeat
+7. Sleep for SYNC_INTERVAL seconds
+8. Repeat
+
+Pending deploys run as a separate task (`PendingDeploysPoller`), not as a step of this loop. Every `PENDING_DEPLOYS_INTERVAL` (default 1 s) it calls `getPendingDeploys` on each validator in `PENDING_DEPLOYS_NODES` concurrently, merges the buffers by signature (an unreachable validator keeps its last snapshot) and, only when the merged set changes, deletes rows that left the buffers and upserts new rows in one transaction. With an empty `PENDING_DEPLOYS_NODES` the task does not start and the indexer clears the pending rows and state.
 
 #### Additional Background Tasks
 

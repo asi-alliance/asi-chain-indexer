@@ -138,11 +138,11 @@ A native ASI transfer is a contract operation initiated by a deploy, not a separ
 
 The `deployments` row contains identity/signature, deployer and derived address, source term, timestamp, phlo price/limit/cost, valid-after height, error fields, classification, status, and block association. `deployment_type` is a source-text heuristic; it does not prove that a transfer ran. The normal insertion defaults `status` to `included`; this is not the node's deploy-finalization state. `language`, expiration, and structured parameters are not all retained in confirmed deployment rows.
 
-Pending observations use a separate `pending_deploys` table. With `ENABLE_PENDING_DEPLOYS_SYNC`, the indexer calls `getPendingDeploys` once per cycle and replaces the snapshot in a transaction. No subscription or one request per deploy is needed for this buffer view.
+Pending observations use a separate `pending_deploys` table. With `PENDING_DEPLOYS_NODES`, a task separate from the block sync loop calls `getPendingDeploys` on every listed validator each `PENDING_DEPLOYS_INTERVAL` (1 s by default), merges the buffers by signature and writes the table only when the merged set changes. No one request per deploy is needed for this buffer view.
 
 Important boundaries:
 
-- The node API is **node-local**. The inspected implementation documents that deploys do not gossip and an observer rejects submissions, so an observer's empty buffer is not evidence of an empty network queue. The current indexer polls one configured node.
+- The node API is **node-local**. The inspected implementation documents that deploys do not gossip and an observer rejects submissions, so an observer's empty buffer is not evidence of an empty network queue. The indexer reads the validators listed in `PENDING_DEPLOYS_NODES`; a validator that is not listed contributes nothing.
 - `sig` joins to `deployments.deploy_id`. Snapshot and indexed-ledger timing can overlap or leave a visibility gap.
 - `is_rejected` means provenance from the rejected/recovery buffer, not a terminal failed execution.
 - A failed RPC retains the last snapshot. Use `fetched_at` to communicate observation age; an empty result has no row timestamp to prove freshness.

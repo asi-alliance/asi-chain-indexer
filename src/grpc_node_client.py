@@ -226,7 +226,11 @@ class GrpcNodeClient:
             raise ValueError("Observer did not return a replay trace")
         return data["report"]
 
-    async def get_pending_deploys(self, deployer_pubkey: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    async def get_pending_deploys(
+        self,
+        deployer_pubkey: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Fetch the node's pending deploy snapshot via the getPendingDeploys RPC.
 
         Returns {"deploys": [...], "totalAvailable": N}. Each deploy dict holds
@@ -245,7 +249,9 @@ class GrpcNodeClient:
 
         try:
             query = common.PendingDeploysQuery(deployerPubkey=deployer_bytes)
-            response = await self.stub.getPendingDeploys(query, timeout=self.timeout)
+            response = await self.stub.getPendingDeploys(
+                query, timeout=self.timeout if timeout is None else timeout
+            )
             payload = _unwrap(response, "payload")
 
             deploys = []
@@ -264,7 +270,8 @@ class GrpcNodeClient:
             }
 
         except (grpc.RpcError, ValueError) as e:
-            logger.error(f"Failed to get pending deploys: {e}")
+            # Read every second per validator; the poller logs reachability changes.
+            logger.debug(f"Failed to get pending deploys: {e}")
             return None
 
     async def get_deploy_info(self, deploy_id: str) -> Optional[Dict[str, Any]]:
