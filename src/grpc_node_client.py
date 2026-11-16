@@ -2,7 +2,8 @@ import asyncio
 import base64
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from concurrent.futures.process import BrokenProcessPool
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 import structlog
@@ -217,7 +218,9 @@ class GrpcNodeClient:
             logger.error(f"Failed to get block details for {block_hash}: {e}")
             return None
 
-    async def get_block_events(self, block_hash: str, deploy_ids: List[str]) -> List[Any]:
+    async def get_block_events(
+        self, block_hash: str, deploy_ids: List[str]
+    ) -> List[Tuple[str, List[Tuple[str, Dict[str, Any]]]]]:
         """Read the block's BigInt-capable replay trace; failures must retry the block.
 
         A trace can be tens of megabytes, so a worker process parses it and extracts its events.
@@ -227,7 +230,15 @@ class GrpcNodeClient:
             async with session.get(url, params={"blockHash": block_hash}) as response:
                 response.raise_for_status()
                 body = await response.read()
-        return await run_off_loop(trace_events, body, block_hash, list(deploy_ids))
+        try:
+            return await run_off_loop(trace_events, body, block_hash, list(deploy_ids))
+        except BrokenProcessPool:
+            logger.warning(
+                "Replay trace worker stopped; the block will be retried",
+                block_hash=block_hash,
+                trace_bytes=len(body),
+            )
+            raise
 
     async def get_pending_deploys(self, deployer_pubkey: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Fetch the node's pending deploy snapshot via the getPendingDeploys RPC.

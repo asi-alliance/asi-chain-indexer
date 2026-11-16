@@ -217,7 +217,7 @@ def trace_events(body, block_hash, deploy_ids):
         or data.get("type") != "block-traces-report"
         or not isinstance(data.get("report"), dict)
     ):
-        raise ValueError("Observer did not return a replay trace")
+        raise ReportUnavailable("Observer did not return a replay trace")
     return block_events(data["report"], block_hash, deploy_ids)
 
 

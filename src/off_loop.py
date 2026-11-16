@@ -16,7 +16,11 @@ def _worker_pool() -> ProcessPoolExecutor:
 
 
 async def run_off_loop(function, *args):
-    """Run a module-level function in the worker process and await its result."""
+    """Run a function in the worker process and await its result.
+
+    The function and its arguments must be picklable, so the function must be
+    defined at module level. All callers share one worker, one call at a time.
+    """
     global _worker
     pool = _worker_pool()
     try:
@@ -24,4 +28,5 @@ async def run_off_loop(function, *args):
     except BrokenProcessPool:
         if _worker is pool:
             _worker = None
+        pool.shutdown(wait=False)
         raise

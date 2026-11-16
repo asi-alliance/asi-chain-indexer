@@ -448,6 +448,12 @@ process. The tables held about 20,000 transfers, so this measurement shows the
 effect of a live block rate and replay traces; the synthetic measurement above
 shows the effect of table size.
 
+This was a 30 min window on test networks, not one week on a deployment. In that
+window, the client-side p95 of all three endpoints met the 50 ms target. At a 1 s
+heartbeat, the indexer did not keep up with the chain: it needed about 1.6 s for a
+block with five transfers, and its lag grew to about 280 heights in 30 min. A low
+p95 does not show that the index is current. Check `indexer_sync_lag_blocks`.
+
 ## Development and validation
 
 Use CPython 3.14.10 on Linux, or the Docker targets. With a matching interpreter:
