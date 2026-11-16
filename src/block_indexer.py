@@ -28,7 +28,6 @@ from src.models import (
 )
 from src.grpc_node_client import GrpcNodeClient
 from src.sync_progress import BlockBatchProgress
-from src.transfer_reports import block_events
 from src.native_transfers import (
     reconcile_block, reconcile_completed_duplicates, require_indexed_parents,
 )
@@ -562,8 +561,9 @@ class BlockIndexer:
 
         traces = None
         if settings.enable_asi_transfer_extraction and deployments and block_number != 0:
-            report = await self.client.get_block_report(block_hash)
-            traces = block_events(report, block_hash, [d["sig"] for d in deployments])
+            traces = await self.client.get_block_events(
+                block_hash, [d["sig"] for d in deployments]
+            )
 
         # Process block in transaction
         async with db.session() as session:

@@ -1,17 +1,14 @@
 """Exact native token amounts and decimal-string API values."""
 
-import asyncio
-from concurrent.futures import ProcessPoolExecutor
-from concurrent.futures.process import BrokenProcessPool
 from decimal import MAX_EMAX, MAX_PREC, MIN_EMIN, Context, Decimal, Inexact, Rounded
-import multiprocessing
+
+from src.off_loop import run_off_loop
 
 MAX_AMOUNT = (1 << 256) - 1
 
 _EXACT = Context(prec=MAX_PREC, Emax=MAX_EMAX, Emin=MIN_EMIN, traps=[Inexact, Rounded])
 _DIRECT_BITS = 4096
 _INLINE_BITS = 1 << 16
-_worker = None
 
 
 def _canonical_digits(value: str) -> bool:
@@ -54,27 +51,11 @@ def signed_integer_text(value: int) -> str:
     return "-" + digits if value < 0 else digits
 
 
-def _worker_pool() -> ProcessPoolExecutor:
-    global _worker
-    if _worker is None:
-        _worker = ProcessPoolExecutor(1, mp_context=multiprocessing.get_context("spawn"))
-    return _worker
-
-
 async def signed_integer_text_off_loop(value: int) -> str:
     """Format large integers in a worker process so the event loop keeps serving."""
-    global _worker
     if isinstance(value, bool) or not isinstance(value, int) or value.bit_length() <= _INLINE_BITS:
         return signed_integer_text(value)
-    pool = _worker_pool()
-    try:
-        return await asyncio.get_running_loop().run_in_executor(
-            pool, signed_integer_text, value
-        )
-    except BrokenProcessPool:
-        if _worker is pool:
-            _worker = None
-        raise
+    return await run_off_loop(signed_integer_text, value)
 
 
 def amount(value: int | str | Decimal) -> int:
