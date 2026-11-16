@@ -453,6 +453,8 @@ window, the client-side p95 of all three endpoints met the 50 ms target. At a 1 
 heartbeat, the indexer did not keep up with the chain: it needed about 1.6 s for a
 block with five transfers, and its lag grew to about 280 heights in 30 min. A low
 p95 does not show that the index is current. Check `indexer_sync_lag_blocks`.
+See [#55](https://github.com/asi-alliance/asi-chain-indexer/issues/55) for the
+block throughput.
 
 ## Development and validation
 
