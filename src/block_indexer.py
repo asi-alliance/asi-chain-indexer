@@ -3,6 +3,7 @@
 import asyncio
 import re
 import statistics
+import time
 from datetime import UTC, datetime
 
 from src.time_utils import utc_now
@@ -21,6 +22,7 @@ from src.alerts import AlertedError, AlertEvent, AlertKind, AlertService, descri
 from src.config import settings
 from src.amounts import amount, token_decimal, integer_json
 from src.database import db
+from src.monitoring import block_stage_duration, sync_duration
 from src.read_cache import read_cache
 from src.models import (
     Block, BlockParent, Deployment, PendingDeploy, Transfer, Validator, ValidatorBond,
@@ -389,43 +391,62 @@ class BlockIndexer:
             processed_count = 0
             skipped = []
             last_skip_error = None
-            for block_summary in sorted(block_summaries, key=lambda block: (
+            ordered = sorted(block_summaries, key=lambda block: (
                 block.get("blockNumber") if block.get("blockNumber") is not None else -1,
                 block.get("blockHash") or ""
-            )):
-                block_number = block_summary.get("blockNumber")
-                if block_number is not None and block_number > progress.last_completed_height + 1:
-                    break
-                progress.mark_seen(block_number)
-                try:
-                    # Get full block details
-                    block_hash = block_summary.get("blockHash")
-                    if not block_hash:
-                        logger.warning("Block summary missing hash", block=block_summary)
+            ))
+            # Blocks are written one at a time in this order. Up to
+            # block_prefetch later blocks are read meanwhile.
+            reads = {}
+
+            def read_ahead(index):
+                for ahead in range(index, min(index + settings.block_prefetch + 1, len(ordered))):
+                    ahead_hash = ordered[ahead].get("blockHash")
+                    if ahead not in reads and ahead_hash:
+                        reads[ahead] = asyncio.ensure_future(self._read_block(ahead_hash))
+
+            started = time.perf_counter()
+            try:
+                for index, block_summary in enumerate(ordered):
+                    block_number = block_summary.get("blockNumber")
+                    if block_number is not None and block_number > progress.last_completed_height + 1:
+                        break
+                    progress.mark_seen(block_number)
+                    try:
+                        # Get full block details
+                        block_hash = block_summary.get("blockHash")
+                        if not block_hash:
+                            logger.warning("Block summary missing hash", block=block_summary)
+                            progress.mark_failed(block_number)
+                            skipped.append(block_number)
+                            last_skip_error = "block summary missing hash"
+                            continue
+
+                        read_ahead(index)
+                        full_block, traces = await reads.pop(index)
+                        if not full_block:
+                            logger.warning(f"Could not get details for block {block_hash}")
+                            progress.mark_failed(block_number)
+                            skipped.append(block_number)
+                            last_skip_error = "could not get block details"
+                            continue
+
+                        await self._process_block(full_block, traces)
+                        processed_count += 1
+
+                        # Small delay to avoid overwhelming the node
+                        await asyncio.sleep(settings.delay_before_node)
+
+                    except Exception as e:
                         progress.mark_failed(block_number)
+                        logger.error(f"Failed to process block", error=str(e), block=block_summary)
                         skipped.append(block_number)
-                        last_skip_error = "block summary missing hash"
-                        continue
-
-                    full_block = await self.client.get_block_details(block_hash)
-                    if not full_block:
-                        logger.warning(f"Could not get details for block {block_hash}")
-                        progress.mark_failed(block_number)
-                        skipped.append(block_number)
-                        last_skip_error = "could not get block details"
-                        continue
-
-                    await self._process_block(full_block)
-                    processed_count += 1
-
-                    # Small delay to avoid overwhelming the node
-                    await asyncio.sleep(settings.delay_before_node)
-
-                except Exception as e:
-                    progress.mark_failed(block_number)
-                    logger.error(f"Failed to process block", error=str(e), block=block_summary)
-                    skipped.append(block_number)
-                    last_skip_error = describe_error(e)
+                        last_skip_error = describe_error(e)
+            finally:
+                for read in reads.values():
+                    read.cancel()
+                await asyncio.gather(*reads.values(), return_exceptions=True)
+                sync_duration.observe(time.perf_counter() - started)
 
             completed_height = progress.last_completed_height
             if completed_height >= start:
@@ -530,17 +551,49 @@ class BlockIndexer:
             logger.error(f"Failed to sync pending deploys: {e}", exc_info=True)
             self._record_cycle_failure(e)
 
-    async def _process_block(self, block_data: Dict):
-        """Process a single block with full details."""
+    def _needs_traces(self, block_data: Dict) -> bool:
+        return bool(
+            settings.enable_asi_transfer_extraction
+            and block_data.get("deploys")
+            and block_data.get("blockInfo", {}).get("blockNumber") != 0
+        )
+
+    async def _block_traces(self, block_data: Dict):
+        if not self._needs_traces(block_data):
+            return None
+        return await self.client.get_block_events(
+            block_data["blockInfo"]["blockHash"], [d["sig"] for d in block_data["deploys"]]
+        )
+
+    async def _read_block(self, block_hash: str):
+        """Read a block and its replay events; they do not depend on the database."""
+        with block_stage_duration.labels("details").time():
+            block_data = await self.client.get_block_details(block_hash)
+        if not block_data or not self._needs_traces(block_data):
+            return block_data, None
+        async with db.session() as session:
+            indexed = await session.scalar(
+                select(Block.block_hash).where(Block.block_hash == block_hash).limit(1)
+            )
+        if indexed:
+            return block_data, None
+        return block_data, await self._block_traces(block_data)
+
+    async def _process_block(self, block_data: Dict, traces=None):
+        """Process a single block with full details.
+
+        `traces` are the replay events from `_read_block`. When they are None,
+        the events are read here if the block needs them.
+        """
         try:
-            await self._index_block(block_data)
+            await self._index_block(block_data, traces)
         finally:
             # Any height, including a backfill below the cursor. _index_block
             # also drops the cache right at its commit; this covers failures.
             # Dropping the cache again is harmless; missing a commit is not.
             read_cache.invalidate("block")
 
-    async def _index_block(self, block_data: Dict):
+    async def _index_block(self, block_data: Dict, traces=None):
         block_info = block_data.get("blockInfo", {})
         deployments = block_data.get("deploys", [])
 
@@ -559,13 +612,11 @@ class BlockIndexer:
                 logger.debug("Block already indexed", block_number=block_number)
                 return
 
-        traces = None
-        if settings.enable_asi_transfer_extraction and deployments and block_number != 0:
-            traces = await self.client.get_block_events(
-                block_hash, [d["sig"] for d in deployments]
-            )
+        if traces is None:
+            traces = await self._block_traces(block_data)
 
         # Process block in transaction
+        write_started = time.perf_counter()
         async with db.session() as session:
             # Extract block data
             parent_hashes = block_info.get("parentsHashList") or []
@@ -634,25 +685,27 @@ class BlockIndexer:
                 await self._process_genesis_balance_states(session, genesis_block_info)
 
             await session.commit()
+            block_stage_duration.labels("write").observe(time.perf_counter() - write_started)
             # Blocks, deployments and transfers changed: drop cached reads now,
             # not after the block_validators write below, which can wait on locks
             read_cache.invalidate("block")
 
             # Process block validators from justifications
             if justifications:
-                async with db.session() as validator_session:
-                    for justification in justifications:
-                        validator_key = justification.get("validator", "")
-                        if validator_key:
-                            await validator_session.execute(
-                                text("""
-                                     INSERT INTO block_validators (block_hash, validator_public_key)
-                                     VALUES (:block_hash, :validator_key)
-                                     ON CONFLICT DO NOTHING
-                                     """),
-                                {"block_hash": block_hash, "validator_key": validator_key}
-                            )
-                    await validator_session.commit()
+                with block_stage_duration.labels("validators").time():
+                    async with db.session() as validator_session:
+                        for justification in justifications:
+                            validator_key = justification.get("validator", "")
+                            if validator_key:
+                                await validator_session.execute(
+                                    text("""
+                                         INSERT INTO block_validators (block_hash, validator_public_key)
+                                         VALUES (:block_hash, :validator_key)
+                                         ON CONFLICT DO NOTHING
+                                         """),
+                                    {"block_hash": block_hash, "validator_key": validator_key}
+                                )
+                        await validator_session.commit()
 
         # Special logging for genesis block
         if block_number == 0:

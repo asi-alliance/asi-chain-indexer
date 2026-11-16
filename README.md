@@ -312,9 +312,16 @@ container, for example `MONITORING_PORT` and `DATABASE_POOL_TIMEOUT`.
 
 Important settings include `NODE_HOST`, `GRPC_PORT`, `HTTP_PORT`,
 `NODE_TIMEOUT`, `GRPC_MAX_RECEIVE_MESSAGE_BYTES`, `DATABASE_URL`, `DATABASE_POOL_SIZE`, `SYNC_INTERVAL`,
-`BATCH_SIZE`, `START_FROM_BLOCK`, `NATIVE_TOKEN_DECIMALS`,
-`ENABLE_ASI_TRANSFER_EXTRACTION`, `ENABLE_PENDING_DEPLOYS_SYNC`,
-`READ_CACHE_ENABLED` and `READ_CACHE_MAX_ENTRIES`.
+`BATCH_SIZE`, `START_FROM_BLOCK`, `BLOCK_PREFETCH`, `TRACE_WORKERS`,
+`NATIVE_TOKEN_DECIMALS`, `ENABLE_ASI_TRANSFER_EXTRACTION`,
+`ENABLE_PENDING_DEPLOYS_SYNC`, `READ_CACHE_ENABLED` and `READ_CACHE_MAX_ENTRIES`.
+The indexer writes blocks one at a time, in height order. While it writes a
+block, it reads the details and the replay trace of up to `BLOCK_PREFETCH` later
+blocks of the batch (default 2; 0 reads each block after the previous write).
+`TRACE_WORKERS` worker processes (default 2) parse the traces. A worker holds a
+complete parsed trace in memory: about 0.6 GB for a 23 MB trace. The memory limit
+of the indexer container must allow `TRACE_WORKERS` of these at a time. See
+[Block throughput](#block-throughput) for the measured effect of both settings.
 The pending-deploy snapshot represents one node's bounded buffers, not a durable
 network-wide queue. `START_FROM_BLOCK` is an initial-history boundary, not a
 command to discard the existing cursor or reindex stored history.
@@ -363,13 +370,28 @@ unchanged. Count movements from the transfer ledger, not lifecycle-row counts.
 Exported metrics include `indexer_blocks_indexed_total`,
 `indexer_deployments_indexed_total`, `indexer_transfers_extracted_total`,
 `indexer_sync_lag_blocks`, `indexer_last_block_height`,
-`indexer_sync_duration_seconds`, `indexer_node_request_duration_seconds` and
-`indexer_http_request_duration_seconds`. The last one records the serving time of
-each HTTP request. Its `endpoint` label is the route template, for example
-`/api/address/{address}/transfers`, never the raw path. Unknown routes share
-the `unmatched` value.
-The timer starts when the handler runs, so the histogram does not include the
-time that a request waits for the event loop. Measure that time at the client.
+`indexer_sync_duration_seconds`, `indexer_node_request_duration_seconds`,
+`indexer_block_stage_duration_seconds`, `indexer_event_loop_lag_seconds` and
+`indexer_http_request_duration_seconds`.
+
+- `indexer_sync_duration_seconds` records the time to index one batch of blocks.
+- `indexer_node_request_duration_seconds{request}` records the node requests of
+  the sync loop: `last_finalized_block`, `blocks_by_height`, `block` and `trace`.
+- `indexer_block_stage_duration_seconds{stage}` records each stage of indexing
+  one block: `details` (the `getBlock` request), `trace_fetch` (the download of
+  the replay trace), `trace_parse` (the parse and event extraction in a worker
+  process), `write` (the transaction that writes the block, its deployments and
+  transfers) and `validators` (the `block_validators` rows). With
+  `BLOCK_PREFETCH` above 0, `details`, `trace_fetch` and `trace_parse` overlap the
+  `write` of an earlier block.
+- `indexer_http_request_duration_seconds` records the serving time of each HTTP
+  request. Its `endpoint` label is the route template, for example
+  `/api/address/{address}/transfers`, never the raw path. Unknown routes share
+  the `unmatched` value. The timer starts when the handler runs, so the histogram
+  does not include the time that a request waits for the event loop.
+- `indexer_event_loop_lag_seconds` records that wait. A task sleeps for 0.1 s
+  and records how much later than scheduled it wakes up. A request that arrives
+  during a stall waits for up to the recorded lag before its handler runs.
 Health/readiness/metrics success alone does not prove continuing finalization;
 compare fresh observations over time. Only `/readiness` queries the node on each
 request. `/status` and `/metrics` use the last finalized height that the sync loop
@@ -449,12 +471,53 @@ effect of a live block rate and replay traces; the synthetic measurement above
 shows the effect of table size.
 
 This was a 30 min window on test networks, not one week on a deployment. In that
-window, the client-side p95 of all three endpoints met the 50 ms target. At a 1 s
-heartbeat, the indexer did not keep up with the chain: it needed about 1.6 s for a
-block with five transfers, and its lag grew to about 280 heights in 30 min. A low
-p95 does not show that the index is current. Check `indexer_sync_lag_blocks`.
-See [#55](https://github.com/asi-alliance/asi-chain-indexer/issues/55) for the
-block throughput.
+window, the client-side p95 of all three endpoints met the 50 ms target. A low
+p95 does not show that the index is current. Check `indexer_sync_lag_blocks`;
+see [Block throughput](#block-throughput).
+
+### Block throughput
+
+The indexer reads the replay trace of every block that has deployments. A block
+with five native transfers has a trace of about 23 MB. One measurement used a live
+F1R3node test network: node `dev` at `9d4425179`, three validators and an observer
+(8 CPU, the testbed default of 2 Tokio worker threads), a 1 s heartbeat and native
+transfers about six times per second. The chain produced about 70 blocks per
+minute. The indexer read the observer, and an API client sent 10 requests per
+second to each of `/status`, `/api/transfers` and
+`/api/address/{address}/transfers`.
+
+Stage times per block with `BLOCK_PREFETCH=0`, from
+`indexer_block_stage_duration_seconds`:
+
+| Stage | Mean |
+|---|---|
+| `details` | 0.08 s |
+| `trace_fetch` | 0.55 s |
+| `trace_parse` | 0.68 s |
+| `write` | 0.11 s |
+| `validators` | 0.003 s |
+
+| Setting | Indexed blocks per minute |
+|---|---|
+| `BLOCK_PREFETCH=0` (one block at a time) | 40 |
+| `BLOCK_PREFETCH=2`, `TRACE_WORKERS=2` (defaults) | 60 |
+
+With the defaults, the stage that limits the rate is `trace_fetch`. With one
+request at a time, the observer returned a trace in 0.55 s on average. With three
+requests at a time, each took 1.6 s, that is, about one trace per second in total.
+For the first hour, three indexers with different settings read the same
+observer. In that hour, `BLOCK_PREFETCH=4` with `TRACE_WORKERS=3` did not index
+more blocks than the defaults. For the last 25 min, the indexer with the defaults
+read the observer alone and indexed 59 blocks per minute. So the observer sets
+the supported rate: on this observer, about 60 blocks per minute with five
+transfers each. At 70 blocks per minute the indexer lag grew by about 5 heights
+per minute. A slower chain, or blocks with fewer transfers, stays within this
+rate.
+
+During the measurement, 99% of the `indexer_event_loop_lag_seconds` samples were
+below 50 ms and none was above 250 ms. The client-side p95 of the three
+endpoints was 6–18 ms. A trace worker reached a peak of about 0.6 GB of memory
+for a 23 MB trace.
 
 ## Development and validation
 

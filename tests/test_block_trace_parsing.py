@@ -7,13 +7,26 @@ import time
 
 from aiohttp import web
 from aiohttp.test_utils import TestServer
+from prometheus_client import REGISTRY
 import pytest
 from structlog.testing import capture_logs
 
-from src import off_loop
-from src.grpc_node_client import GrpcNodeClient
+from src.grpc_node_client import GrpcNodeClient, trace_workers
+from src.off_loop import WorkerPool
 from src.transfer_reports import ReportUnavailable, block_events, trace_events
 from test_transfer_reports import payment, report
+
+
+STAGES = (
+    ("indexer_block_stage_duration_seconds_count", "stage", "trace_fetch"),
+    ("indexer_block_stage_duration_seconds_count", "stage", "trace_parse"),
+    ("indexer_node_request_duration_seconds_count", "request", "trace"),
+)
+
+
+def sample(name):
+    metric, label, value = name
+    return REGISTRY.get_sample_value(metric, {label: value}) or 0.0
 
 
 def replay(padding=0):
@@ -60,6 +73,7 @@ async def test_large_trace_keeps_the_event_loop_responsive():
         assert request.query["blockHash"] == "hash"
         return web.Response(body=payload, content_type="application/json")
 
+    stages = {name: sample(name) for name in STAGES}
     app = web.Application()
     app.router.add_get("/reporting/trace", trace)
     async with TestServer(app) as server:
@@ -79,14 +93,18 @@ async def test_large_trace_keeps_the_event_loop_responsive():
             await client.close()
     assert ticks > 1
     assert worst < min(0.25, inline / 2)
+    assert {name: sample(name) - before for name, before in stages.items()} == {
+        name: 1.0 for name in STAGES
+    }
 
 
 @pytest.mark.asyncio
 async def test_a_stopped_worker_is_replaced_on_the_next_call():
+    pool = WorkerPool(1)
     with pytest.raises(BrokenProcessPool):
-        await off_loop.run_off_loop(os._exit, 1)
-    assert off_loop._worker is None
-    assert await off_loop.run_off_loop(abs, -5) == 5
+        await pool.run(os._exit, 1)
+    assert pool._executor is None
+    assert await pool.run(abs, -5) == 5
 
 
 @pytest.mark.asyncio
@@ -99,7 +117,7 @@ async def test_a_stopped_worker_is_logged_with_the_block_hash(monkeypatch):
     async def stopped(*args):
         raise BrokenProcessPool("worker stopped")
 
-    monkeypatch.setattr("src.grpc_node_client.run_off_loop", stopped)
+    monkeypatch.setattr(trace_workers, "run", stopped)
     app = web.Application()
     app.router.add_get("/reporting/trace", trace)
     async with TestServer(app) as server:
