@@ -81,6 +81,18 @@ class Settings(BaseSettings):
         default=0,
         description="Block number to start syncing from"
     )
+    block_prefetch: int = Field(
+        default=2,
+        ge=0,
+        le=16,
+        description="Blocks whose details and replay traces are read ahead of the block being written"
+    )
+    trace_workers: int = Field(
+        default=2,
+        ge=1,
+        le=16,
+        description="Worker processes that parse replay traces"
+    )
 
     # Monitoring
     monitoring_port: int = Field(
