@@ -318,9 +318,12 @@ Important settings include `NODE_HOST`, `GRPC_PORT`, `HTTP_PORT`,
 The indexer writes blocks one at a time, in height order. While it writes a
 block, it reads the details and the replay trace of up to `BLOCK_PREFETCH` later
 blocks of the batch (default 2; 0 reads each block after the previous write).
-`TRACE_WORKERS` worker processes (default 2) parse the traces. A worker holds a
-complete parsed trace in memory: about 0.6 GB for a 23 MB trace. The memory limit
-of the indexer container must allow `TRACE_WORKERS` of these at a time. See
+`TRACE_WORKERS` worker processes (default 2) parse the traces. When more traces
+wait for a worker, the lowest height gets the next free worker. A parse that
+already runs continues after its read is cancelled, and its worker stays taken
+until it ends. A worker holds a complete parsed trace in memory: about 0.6 GB for
+a 23 MB trace. The memory limit of the indexer container must allow
+`TRACE_WORKERS` of these at a time. See
 [Block throughput](#block-throughput) for the measured effect of both settings.
 The pending-deploy snapshot represents one node's bounded buffers, not a durable
 network-wide queue. `START_FROM_BLOCK` is an initial-history boundary, not a
@@ -379,11 +382,12 @@ Exported metrics include `indexer_blocks_indexed_total`,
   the sync loop: `last_finalized_block`, `blocks_by_height`, `block` and `trace`.
 - `indexer_block_stage_duration_seconds{stage}` records each stage of indexing
   one block: `details` (the `getBlock` request), `trace_fetch` (the download of
-  the replay trace), `trace_parse` (the parse and event extraction in a worker
+  the replay trace), `trace_queue` (the wait for a free trace worker),
+  `trace_parse` (the parse and event extraction, timed inside the worker
   process), `write` (the transaction that writes the block, its deployments and
   transfers) and `validators` (the `block_validators` rows). With
-  `BLOCK_PREFETCH` above 0, `details`, `trace_fetch` and `trace_parse` overlap the
-  `write` of an earlier block.
+  `BLOCK_PREFETCH` above 0, the read stages overlap the `write` of an earlier
+  block.
 - `indexer_http_request_duration_seconds` records the serving time of each HTTP
   request. Its `endpoint` label is the route template, for example
   `/api/address/{address}/transfers`, never the raw path. Unknown routes share
@@ -496,6 +500,10 @@ Stage times per block with `BLOCK_PREFETCH=0`, from
 | `trace_parse` | 0.68 s |
 | `write` | 0.11 s |
 | `validators` | 0.003 s |
+
+This `trace_parse` value was measured before the `trace_queue` stage existed. It
+has no wait for a worker, because `BLOCK_PREFETCH=0` parses one trace at a time,
+but it includes the transfer of the trace to the worker process.
 
 | Setting | Indexed blocks per minute |
 |---|---|

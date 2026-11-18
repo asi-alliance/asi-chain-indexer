@@ -25,7 +25,7 @@ from test_node_exact_api import BLOCK_HASH, DEPLOY_ID, node_api
 def replaying(source):
     """Serve get_block_events from a replay report, a lookup by block hash or a failure."""
 
-    def events(block_hash, deploy_ids):
+    def events(block_hash, deploy_ids, priority=0):
         report = source(block_hash) if callable(source) else source
         if isinstance(report, Exception):
             raise report
@@ -281,7 +281,7 @@ async def test_huge_rejected_attempt_preserves_replay_history_and_advances_curso
 
     assert await ledger.db.get_last_indexed_block() == height
     ledger.indexer.client.get_block_events.assert_awaited_once_with(
-        "completion", ["finish"]
+        "completion", ["finish"], priority=height
     )
     lifecycle = await ledger.conn.fetchrow("SELECT * FROM native_transfer_lifecycle")
     assert lifecycle["requested_amount"] == exact

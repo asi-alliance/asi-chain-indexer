@@ -225,11 +225,12 @@ class GrpcNodeClient:
             return None
 
     async def get_block_events(
-        self, block_hash: str, deploy_ids: List[str]
+        self, block_hash: str, deploy_ids: List[str], priority: int = 0
     ) -> List[Tuple[str, List[Tuple[str, Dict[str, Any]]]]]:
         """Read the block's BigInt-capable replay trace; failures must retry the block.
 
         A trace can be tens of megabytes, so a worker process parses it and extracts its events.
+        A parse with a lower `priority` gets the next free worker first.
         """
         url = f"http://{self.node_host}:{self.http_port}/reporting/trace"
         with block_stage_duration.labels("trace_fetch").time(), \
@@ -239,8 +240,9 @@ class GrpcNodeClient:
                     response.raise_for_status()
                     body = await response.read()
         try:
-            with block_stage_duration.labels("trace_parse").time():
-                return await trace_workers.run(trace_events, body, block_hash, list(deploy_ids))
+            waited, parsed, events = await trace_workers.run_timed(
+                trace_events, body, block_hash, list(deploy_ids), priority=priority
+            )
         except BrokenProcessPool:
             logger.warning(
                 "Replay trace worker stopped; the block will be retried",
@@ -248,6 +250,9 @@ class GrpcNodeClient:
                 trace_bytes=len(body),
             )
             raise
+        block_stage_duration.labels("trace_queue").observe(waited)
+        block_stage_duration.labels("trace_parse").observe(parsed)
+        return events
 
     async def get_pending_deploys(self, deployer_pubkey: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Fetch the node's pending deploy snapshot via the getPendingDeploys RPC.

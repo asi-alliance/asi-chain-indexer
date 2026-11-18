@@ -40,6 +40,7 @@ class TimelineClient:
         self.read = read
         self.missing = set(missing)
         self.cancelled = []
+        self.priorities = {}
 
     async def get_last_finalized_block(self):
         return {"blockNumber": self.blocks[-1]["blockNumber"]}
@@ -57,7 +58,8 @@ class TimelineClient:
             "deploys": [{"sig": f"deploy-{number}"}],
         }
 
-    async def get_block_events(self, block_hash, deploy_ids):
+    async def get_block_events(self, block_hash, deploy_ids, priority=0):
+        self.priorities[block_hash] = priority
         self.timeline.append(("read", block_hash))
         try:
             await asyncio.sleep(self.read)
@@ -104,6 +106,7 @@ async def test_later_blocks_are_read_while_a_block_is_written(monkeypatch):
         ]
     assert timeline.index(("read", "block-11")) < timeline.index(("written", "block-10"))
     assert timeline.index(("read", "block-12")) < timeline.index(("written", "block-10"))
+    assert client.priorities == {"block-10": 10, "block-11": 11, "block-12": 12}
 
 
 @pytest.mark.asyncio

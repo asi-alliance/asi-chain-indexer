@@ -561,8 +561,11 @@ class BlockIndexer:
     async def _block_traces(self, block_data: Dict):
         if not self._needs_traces(block_data):
             return None
+        block_info = block_data["blockInfo"]
         return await self.client.get_block_events(
-            block_data["blockInfo"]["blockHash"], [d["sig"] for d in block_data["deploys"]]
+            block_info["blockHash"],
+            [d["sig"] for d in block_data["deploys"]],
+            priority=block_info.get("blockNumber") or 0,
         )
 
     async def _read_block(self, block_hash: str):
