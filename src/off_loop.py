@@ -82,12 +82,13 @@ class WorkerPool:
         queued = time.perf_counter()
         await self._acquire(priority)
         waited = time.perf_counter() - queued
-        pool = self._pool()
+        pool = None
         try:
+            pool = self._pool()
             job = pool.submit(timed, function, *args)
         except BaseException as error:
             self._release()
-            if isinstance(error, BrokenProcessPool):
+            if pool is not None and isinstance(error, BrokenProcessPool):
                 self._drop(pool)
             raise
 

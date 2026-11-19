@@ -1,5 +1,6 @@
 import asyncio
 from concurrent.futures.process import BrokenProcessPool
+import errno
 import gc
 import json
 import os
@@ -12,6 +13,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from src.grpc_node_client import GrpcNodeClient, trace_workers
+from src import off_loop
 from src.off_loop import WorkerPool
 from src.transfer_reports import ReportUnavailable, block_events, trace_events
 from test_transfer_reports import payment, report
@@ -106,6 +108,23 @@ async def test_a_stopped_worker_is_replaced_on_the_next_call():
         await pool.run(os._exit, 1)
     assert pool._executor is None
     assert await pool.run(abs, -5) == 5
+
+
+@pytest.mark.asyncio
+async def test_a_failed_pool_start_releases_the_worker(monkeypatch):
+    started = off_loop.ProcessPoolExecutor
+
+    def fails_once(*args, **kwargs):
+        monkeypatch.setattr(off_loop, "ProcessPoolExecutor", started)
+        raise OSError(errno.EMFILE, "Too many open files")
+
+    monkeypatch.setattr(off_loop, "ProcessPoolExecutor", fails_once)
+    pool = WorkerPool(1)
+    with pytest.raises(OSError):
+        await pool.run(abs, -5)
+    assert pool._executor is None
+    assert await asyncio.wait_for(pool.run(abs, -5), 30) == 5
+    assert pool._busy == 0
 
 
 @pytest.mark.asyncio
