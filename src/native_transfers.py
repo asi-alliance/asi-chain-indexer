@@ -69,21 +69,32 @@ class MissingParent(ReportUnavailable):
         self.details = details
 
 
-async def require_indexed_parents(session, block_info, client=None):
-    if block_info["blockNumber"] <= settings.start_from_block:
-        return
-    boundary = (
+def _history_boundary():
+    return (
         select(BlockParent.parent_hash)
         .join(Block, Block.block_hash == BlockParent.block_hash)
         .where(Block.block_number <= settings.start_from_block)
     )
+
+
+async def unindexed_parent_hashes(session, parents):
+    known = select(Block.block_hash).where(Block.block_hash.in_(parents))
+    if settings.start_from_block > 0:
+        known = known.union(_history_boundary().where(BlockParent.parent_hash.in_(parents)))
+    indexed = set(await session.scalars(known))
+    return [parent for parent in dict.fromkeys(parents) if parent not in indexed]
+
+
+async def require_indexed_parents(session, block_info, client=None):
+    if block_info["blockNumber"] <= settings.start_from_block:
+        return
     missing = await session.scalars(
         select(BlockParent.parent_hash)
         .outerjoin(Block, Block.block_hash == BlockParent.parent_hash)
         .where(
             BlockParent.block_hash == block_info["blockHash"],
             Block.block_hash.is_(None),
-            BlockParent.parent_hash.not_in(boundary),
+            BlockParent.parent_hash.not_in(_history_boundary()),
         )
     )
     for parent_hash in missing:

@@ -34,12 +34,10 @@ from src.sync_progress import BlockBatchProgress
 from src.transfer_reports import ReportUnavailable
 from src.native_transfers import (
     MissingParent, reconcile_block, reconcile_completed_duplicates, require_indexed_parents,
+    unindexed_parent_hashes,
 )
 
 logger = structlog.get_logger(__name__)
-
-# Bound by-hash reads and the number of block reports held for one child.
-MAX_RECOVERY_ANCESTORS = 64
 
 
 def classify_failure(error: Exception) -> Optional[AlertKind]:
@@ -382,6 +380,16 @@ class BlockIndexer:
             self.chain_tip_observed_at = datetime.now(UTC)
             self.node_reachable = True
 
+            steps = iter(range(settings.ancestor_recovery_steps))
+            path = await db.get_recovery_path()
+            if path:
+                try:
+                    if not await self._recover_path(path, steps):
+                        return
+                except Exception as error:
+                    self._track_cursor(last_indexed, latest_block_number, 1, str(error))
+                    raise
+
             self._track_lag(max(0, latest_block_number - last_indexed))
 
             if last_indexed >= latest_block_number:
@@ -432,6 +440,7 @@ class BlockIndexer:
             processed_count = 0
             skipped = []
             last_skip_error = None
+            recovery_deferred = False
             ordered = sorted(block_summaries, key=lambda block: (
                 block.get("blockNumber") if block.get("blockNumber") is not None else -1,
                 block.get("blockHash") or ""
@@ -472,7 +481,10 @@ class BlockIndexer:
                             last_skip_error = "could not get block details"
                             continue
 
-                        await self._process_with_parents(full_block, traces)
+                        if not await self._process_with_parents(full_block, traces, path, steps):
+                            progress.mark_failed(block_number)
+                            recovery_deferred = True
+                            break
                         processed_count += 1
 
                         # Small delay to avoid overwhelming the node
@@ -483,6 +495,8 @@ class BlockIndexer:
                         logger.error(f"Failed to process block", error=str(e), block=block_summary)
                         skipped.append(block_number)
                         last_skip_error = describe_error(e)
+                        if path:
+                            break
             finally:
                 for read in reads.values():
                     read.cancel()
@@ -493,6 +507,8 @@ class BlockIndexer:
             if completed_height >= start:
                 await db.set_last_indexed_block(completed_height)
 
+            if recovery_deferred:
+                return
             self._track_cursor(completed_height, end, len(skipped), last_skip_error)
 
             if completed_height < end:
@@ -544,42 +560,76 @@ class BlockIndexer:
             return block_data, None
         return block_data, await self._block_traces(block_data)
 
-    async def _process_with_parents(self, block_data: Dict, traces):
-        """Retry a child after committing its missing ancestors, parent first."""
-        pending = [(block_data, traces)]
-        fetched = set()
-        while pending:
-            block, events = pending[-1]
-            try:
-                await self._process_block(block, events)
-            except MissingParent as missing:
-                # The failed write has rolled back. Do node I/O outside that transaction.
-                parent_hash, parent = missing.parent_hash, missing.details
-            else:
-                pending.pop()
-                continue
+    async def _process_with_parents(self, block, traces, path, steps):
+        try:
+            await self._process_block(block, traces)
+            return True
+        except MissingParent as missing:
+            # Record the child too: the next range response may omit it.
+            info = block["blockInfo"]
+            block_hash, height = info["blockHash"], info["blockNumber"]
+            path.extend([(block_hash, height + 1, False), (missing.parent_hash, height, False)])
+            supplied = {block_hash: (block, traces)}
+            if missing.details:
+                supplied[missing.parent_hash] = (missing.details, None)
+        return await self._recover_path(path, steps, supplied)
 
-            if parent_hash in fetched:
-                raise ReportUnavailable(f"Repeated missing parent during recovery: {parent_hash}")
-            if len(fetched) >= MAX_RECOVERY_ANCESTORS:
-                raise ReportUnavailable(f"Ancestor recovery limit reached at {parent_hash}")
-            fetched.add(parent_hash)
-            if parent is None:
-                parent = await self.client.get_block_details(parent_hash)
-            info = (parent or {}).get("blockInfo", {})
-            if info.get("blockHash") != parent_hash:
-                raise ReportUnavailable(f"Node did not return the requested ancestor {parent_hash}")
-            # A full-history walk must meet an already indexed block. In
-            # particular, never insert a different genesis during recovery.
-            height = info.get("blockNumber")
-            if (type(height) is not int or height < max(1, settings.start_from_block)
-                    or height >= block["blockInfo"]["blockNumber"] or not info.get("parentsHashList")):
-                raise ReportUnavailable(f"Invalid ancestry for recovered block {parent_hash}")
-            deploys = parent.get("deploys")
-            if not isinstance(deploys, list) or info.get("deployCount", len(deploys)) != len(deploys):
-                raise ReportUnavailable(f"Incomplete deployment data for ancestor {parent_hash}")
-            parent_events = await self._block_traces(parent)
-            pending.append((parent, parent_events))
+    async def _recover_path(self, path, steps, supplied=None):
+        """Resume a depth-first walk. Frames contain (hash, child height, expanded)."""
+        supplied = supplied or {}
+        try:
+            for _ in steps:
+                await self._visit_recovery_block(path, supplied)
+                if not path:
+                    return True
+            logger.info("Continuing ancestor recovery next cycle",
+                        work_items_remaining=len(path), next_block=path[-1][0])
+            return False
+        finally:
+            # Only identifiers survive a yield. Each block write is already atomic,
+            # so re-reading an older checkpoint after a crash is safe.
+            await db.save_recovery_path(path)
+
+    async def _visit_recovery_block(self, path, supplied):
+        block_hash, child_height, expanded = path[-1]
+        async with db.session() as session:
+            present = await session.scalar(select(Block.block_hash).where(Block.block_hash == block_hash))
+        if present:
+            # A previous attempt may have committed before saving its checkpoint.
+            path.pop()
+            return
+
+        block, events = supplied.get(block_hash, (None, None))
+        if block is None:
+            block = await self.client.get_block_details(block_hash)
+        info = (block or {}).get("blockInfo", {})
+        if info.get("blockHash") != block_hash:
+            raise ReportUnavailable(f"Node did not return the requested ancestor {block_hash}")
+        height = info.get("blockNumber")
+        if type(height) is not int or not 0 <= height < child_height:
+            raise ReportUnavailable(f"Invalid ancestry for recovered block {block_hash}")
+        if len(path) == 1 and height != child_height - 1:
+            raise ReportUnavailable(f"Recovery child height changed for {block_hash}")
+        if height < settings.start_from_block:
+            path.pop()
+            return
+        parents = info.get("parentsHashList")
+        if not height or not parents:
+            raise ReportUnavailable(f"Invalid ancestry for recovered block {block_hash}")
+        deploys = block.get("deploys")
+        if not isinstance(deploys, list) or info.get("deployCount", len(deploys)) != len(deploys):
+            raise ReportUnavailable(f"Incomplete deployment data for ancestor {block_hash}")
+
+        if not expanded and height > settings.start_from_block:
+            async with db.session() as session:
+                missing = await unindexed_parent_hashes(session, parents)
+            if missing:
+                # Revisit this block only after its parents are committed.
+                path[-1] = (block_hash, child_height, True)
+                path.extend((parent, height, False) for parent in reversed(missing))
+                return
+        await self._process_block(block, events)
+        path.pop()
 
     async def _process_block(self, block_data: Dict, traces=None):
         """Process a single block with full details.

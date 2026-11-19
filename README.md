@@ -325,6 +325,22 @@ until it ends. A worker holds a complete parsed trace in memory: about 0.6 GB fo
 a 23 MB trace. The memory limit of the indexer container must allow
 `TRACE_WORKERS` of these at a time. See
 [Block throughput](#block-throughput) for the measured effect of both settings.
+
+`ANCESTOR_RECOVERY_STEPS` sets the shared work budget for missing-parent
+recovery in one sync cycle (default 64, minimum 1). A step visits one block:
+it can discover missing parents, write a ready block, or skip a block already
+committed. A block with unresolved parents generally needs a second visit.
+The Indexer checkpoints unfinished hashes, height bounds and traversal flags
+in PostgreSQL and resumes them before the next height scan, including after
+a worker restart. Block bodies and replay reports stay out of the checkpoint.
+The height cursor advances only when the regular scan completes the height.
+
+Choose a budget using measured cycle duration, observer load and trace-worker
+memory on representative blocks. Smaller budgets give other periodic work a
+turn sooner. Larger budgets reduce the number of waits between cycles. A
+single deploy report can dominate a cycle, so the step count alone cannot
+guarantee a time or memory limit.
+
 `START_FROM_BLOCK` is an initial-history boundary, not a
 command to discard the existing cursor or reindex stored history.
 

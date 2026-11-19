@@ -1,6 +1,7 @@
 """Database connection and session management."""
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Dict
 
@@ -110,6 +111,26 @@ class Database:
         """
         async with self.pool.acquire() as conn:
             await conn.execute(query, str(block_number))
+
+    async def get_recovery_path(self) -> list:
+        """Read the unfinished child-to-parent path saved by the sync writer."""
+        async with self.pool.acquire() as conn:
+            value = await conn.fetchval(
+                "SELECT value FROM indexer_state WHERE key='ancestor_recovery_path'"
+            )
+        return json.loads(value) if value else []
+
+    async def save_recovery_path(self, path: list) -> None:
+        async with self.pool.acquire() as conn:
+            if path:
+                await conn.execute(
+                    """INSERT INTO indexer_state (key, value, updated_at)
+                       VALUES ('ancestor_recovery_path', $1, NOW())
+                       ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()""",
+                    json.dumps(path),
+                )
+            else:
+                await conn.execute("DELETE FROM indexer_state WHERE key='ancestor_recovery_path'")
 
 
 class AlertThrottleStore:
