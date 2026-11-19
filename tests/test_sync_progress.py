@@ -5,6 +5,7 @@ import pytest
 
 from src.models import BalanceState, Block, Deployment, Transfer, ValidatorBond
 from src.block_indexer import BlockIndexer
+from src.native_transfers import MissingParent
 from src.sync_progress import BlockBatchProgress
 from src.transfer_reports import ReportUnavailable
 from test_node_exact_api import BLOCK_HASH, node_api
@@ -60,6 +61,41 @@ def test_failed_sibling_blocks_progress_at_its_height() -> None:
 class FakeSession:
     async def scalar(self, _statement: object) -> int:
         return 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("details", [
+    None,
+    {"blockInfo": {"blockHash": "different"}},
+    {"blockInfo": {"blockHash": "parent", "blockNumber": 0}},
+    {"blockInfo": {"blockHash": "parent", "blockNumber": 3, "parentsHashList": ["child"]}},
+    {"blockInfo": {"blockHash": "parent", "blockNumber": 1, "parentsHashList": ["root"],
+                   "deployCount": 1}, "deploys": []},
+])
+async def test_recovery_rejects_unavailable_or_inconsistent_ancestor(details):
+    indexer = BlockIndexer()
+    indexer.client = AsyncMock()
+    indexer.client.get_block_details.return_value = details
+    indexer._process_block = AsyncMock(side_effect=MissingParent("parent"))
+    with pytest.raises(ReportUnavailable, match="parent"):
+        await indexer._process_with_parents({"blockInfo": {"blockNumber": 3}}, None)
+    indexer._process_block.assert_awaited_once()
+    indexer.client.get_block_events.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_recovery_bounds_work_per_child(monkeypatch):
+    monkeypatch.setattr("src.block_indexer.MAX_RECOVERY_ANCESTORS", 1)
+    indexer = BlockIndexer()
+    indexer.client = AsyncMock()
+    indexer.client.get_block_details.return_value = {
+        "blockInfo": {"blockHash": "parent", "blockNumber": 2, "parentsHashList": ["root"]},
+        "deploys": [],
+    }
+    indexer._process_block = AsyncMock(side_effect=[MissingParent("parent"), MissingParent("root")])
+    with pytest.raises(ReportUnavailable, match="limit reached at root"):
+        await indexer._process_with_parents({"blockInfo": {"blockNumber": 3}}, None)
+    indexer.client.get_block_details.assert_awaited_once_with("parent")
 
 
 class FakeDatabase:

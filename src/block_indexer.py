@@ -31,11 +31,15 @@ from src.models import (
 from src.grpc_node_client import GrpcNodeClient
 from src.pending_deploys import PendingDeploysPoller, clear_pending_snapshot
 from src.sync_progress import BlockBatchProgress
+from src.transfer_reports import ReportUnavailable
 from src.native_transfers import (
-    reconcile_block, reconcile_completed_duplicates, require_indexed_parents,
+    MissingParent, reconcile_block, reconcile_completed_duplicates, require_indexed_parents,
 )
 
 logger = structlog.get_logger(__name__)
+
+# Bound by-hash reads and the number of block reports held for one child.
+MAX_RECOVERY_ANCESTORS = 64
 
 
 def classify_failure(error: Exception) -> Optional[AlertKind]:
@@ -468,7 +472,7 @@ class BlockIndexer:
                             last_skip_error = "could not get block details"
                             continue
 
-                        await self._process_block(full_block, traces)
+                        await self._process_with_parents(full_block, traces)
                         processed_count += 1
 
                         # Small delay to avoid overwhelming the node
@@ -539,6 +543,43 @@ class BlockIndexer:
         if indexed:
             return block_data, None
         return block_data, await self._block_traces(block_data)
+
+    async def _process_with_parents(self, block_data: Dict, traces):
+        """Retry a child after committing its missing ancestors, parent first."""
+        pending = [(block_data, traces)]
+        fetched = set()
+        while pending:
+            block, events = pending[-1]
+            try:
+                await self._process_block(block, events)
+            except MissingParent as missing:
+                # The failed write has rolled back. Do node I/O outside that transaction.
+                parent_hash, parent = missing.parent_hash, missing.details
+            else:
+                pending.pop()
+                continue
+
+            if parent_hash in fetched:
+                raise ReportUnavailable(f"Repeated missing parent during recovery: {parent_hash}")
+            if len(fetched) >= MAX_RECOVERY_ANCESTORS:
+                raise ReportUnavailable(f"Ancestor recovery limit reached at {parent_hash}")
+            fetched.add(parent_hash)
+            if parent is None:
+                parent = await self.client.get_block_details(parent_hash)
+            info = (parent or {}).get("blockInfo", {})
+            if info.get("blockHash") != parent_hash:
+                raise ReportUnavailable(f"Node did not return the requested ancestor {parent_hash}")
+            # A full-history walk must meet an already indexed block. In
+            # particular, never insert a different genesis during recovery.
+            height = info.get("blockNumber")
+            if (type(height) is not int or height < max(1, settings.start_from_block)
+                    or height >= block["blockInfo"]["blockNumber"] or not info.get("parentsHashList")):
+                raise ReportUnavailable(f"Invalid ancestry for recovered block {parent_hash}")
+            deploys = parent.get("deploys")
+            if not isinstance(deploys, list) or info.get("deployCount", len(deploys)) != len(deploys):
+                raise ReportUnavailable(f"Incomplete deployment data for ancestor {parent_hash}")
+            parent_events = await self._block_traces(parent)
+            pending.append((parent, parent_events))
 
     async def _process_block(self, block_data: Dict, traces=None):
         """Process a single block with full details.
@@ -630,7 +671,7 @@ class BlockIndexer:
                 for deploy_data in deployments:
                     deploy_data["executedTransfers"] = movements[deploy_data["sig"]]
                     await self._store_transfers(session, block_info, deploy_data)
-            elif settings.enable_asi_transfer_extraction and block_number != 0:
+            elif block_number != 0:
                 await require_indexed_parents(session, block_info, self.client)
 
             if settings.enable_asi_transfer_extraction and block_number != 0:

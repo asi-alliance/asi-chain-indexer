@@ -62,6 +62,13 @@ def equivalent_calls(calls, completed):
     return representatives, resolved, aliases
 
 
+class MissingParent(ReportUnavailable):
+    def __init__(self, parent_hash, details=None):
+        super().__init__(f"Missing parent block {parent_hash}; retry after indexing it")
+        self.parent_hash = parent_hash
+        self.details = details
+
+
 async def require_indexed_parents(session, block_info, client=None):
     if block_info["blockNumber"] <= settings.start_from_block:
         return
@@ -80,6 +87,7 @@ async def require_indexed_parents(session, block_info, client=None):
         )
     )
     for parent_hash in missing:
+        details = None
         if settings.start_from_block > 0 and client is not None:
             details = await client.get_block_details(parent_hash)
             info = (details or {}).get("blockInfo", {})
@@ -90,9 +98,7 @@ async def require_indexed_parents(session, block_info, client=None):
                 and 0 <= height < settings.start_from_block
             ):
                 continue
-        raise ReportUnavailable(
-            f"Missing parent block {parent_hash}; retry after indexing it"
-        )
+        raise MissingParent(parent_hash, details)
 
 
 async def reconcile_completed_duplicates(session, block_info):

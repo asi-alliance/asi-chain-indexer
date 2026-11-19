@@ -710,6 +710,39 @@ async def test_missing_parent_rolls_back_and_retry_preserves_completion(ledger, 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_sync_recovers_late_ancestors_and_retries_child(ledger):
+    await ledger.add(1, "indexed", [])
+    child, _ = await ledger.add(5, "child", [], ["indexed", "late3"], process=False)
+    late3, _ = await ledger.add(3, "late3", [], ["late2"], process=False)
+    late2, replay = await ledger.add(
+        2, "late2", [("payment", report(payment(23)))], ["indexed"], process=False
+    )
+    await ledger.db.set_last_indexed_block(4)
+    client = ledger.indexer.client
+    bodies = {"child": child, "late3": late3, "late2": late2}
+    client.get_block_details = AsyncMock(side_effect=bodies.get)
+    client.get_blocks_by_height = AsyncMock(return_value=[child["blockInfo"]])
+    client.get_last_finalized_block = AsyncMock(return_value={"blockNumber": 5})
+
+    client.get_block_events.side_effect = ReportUnavailable("Replay unavailable")
+    await ledger.indexer._sync_blocks()
+    assert await ledger.db.get_last_indexed_block() == 4
+    assert await ledger.conn.fetchval("SELECT count(*) FROM blocks") == 1
+
+    client.get_block_events.side_effect = replaying(replay)
+    await ledger.indexer._sync_blocks()
+    assert await ledger.db.get_last_indexed_block() == 5
+    assert await ledger.conn.fetchval("SELECT count(*) FROM blocks") == 4
+    assert await ledger.conn.fetchval("SELECT amount_dust FROM transfers") == 23
+    assert await ledger.conn.fetchval("SELECT count(*) FROM transfers") == 1
+    assert [tuple(row) for row in await ledger.conn.fetch(
+        "SELECT parent_index, parent_hash FROM block_parents "
+        "WHERE block_hash='child' ORDER BY parent_index"
+    )] == [(0, "indexed"), (1, "late3")]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_repairing_origin_does_not_erase_later_completion(ledger):
     events = payment(15)
     details, replay = await ledger.add(1, "origin", [("start", report(events[:1]))])
