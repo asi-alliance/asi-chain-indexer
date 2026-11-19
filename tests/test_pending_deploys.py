@@ -9,14 +9,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import ValidationError
 from sqlalchemy import select
-from sqlalchemy.sql.dml import Delete
 
 from src.addr import convert_to_asi_address
 from src.alerts import AlertKind
-from src.config import Settings, parse_nodes
+from src.config import PENDING_STATUS_HEARTBEAT_SECONDS, Settings, parse_nodes
 from src.models import PendingDeploy
 from src.pending_deploys import (
-    HEARTBEAT_SECONDS,
     SNAPSHOT_TTL_SECONDS,
     STATUS_KEY,
     TOTAL_KEY,
@@ -70,6 +68,13 @@ def test_timeout_cannot_exceed_interval_for_enabled_poller():
                  pending_deploys_interval=1, pending_deploys_timeout=2)
 
 
+@pytest.mark.parametrize("interval", [10.01, 60])
+def test_enabled_poll_interval_must_fit_the_status_heartbeat(interval):
+    with pytest.raises(ValidationError, match="PENDING_DEPLOYS_INTERVAL"):
+        Settings(_env_file=None, pending_deploys_nodes="validator:40401", pending_deploys_interval=interval)
+    assert not Settings(_env_file=None, pending_deploys_nodes="", pending_deploys_interval=interval).pending_deploy_nodes
+
+
 def test_ipv6_validator_channel_target(monkeypatch):
     channel = MagicMock()
     monkeypatch.setattr("src.grpc_node_client.grpc.aio.insecure_channel", channel)
@@ -112,8 +117,6 @@ class FakeDb:
 
         class Session:
             async def execute(self, statement, params=None):
-                if isinstance(statement, Delete):
-                    params = statement.compile().params
                 db.statements.append((str(statement), params))
 
             async def commit(self):
@@ -181,11 +184,32 @@ async def test_unchanged_snapshot_writes_only_a_heartbeat(monkeypatch):
     await poller.refresh()
     assert fake.take() == []
 
-    clock.now += HEARTBEAT_SECONDS
+    clock.now += PENDING_STATUS_HEARTBEAT_SECONDS
     await poller.refresh()
     statements = fake.take()
     assert [STATUS_KEY] == list(fake.states(statements))
     assert not any("pending_deploys " in s or "INTO pending_deploys" in s for s, _ in statements)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interval", [6, 10])
+async def test_slow_healthy_poller_writes_before_the_next_read_would_miss_the_heartbeat(monkeypatch, interval):
+    clock = Clock()
+    client = node({"deploys": [], "totalAvailable": 0})
+    poller, fake = poller_with([client], monkeypatch, clock)
+    poller.interval = Settings(_env_file=None, pending_deploys_nodes="v1:40401",
+                               pending_deploys_interval=interval).pending_deploys_interval
+    await poller.refresh()
+    fake.take()
+
+    for _ in range(6):
+        clock.now += interval
+        await poller.refresh()
+        states = fake.states(fake.take())
+        assert list(states) == [STATUS_KEY]
+        status = json.loads(states[STATUS_KEY])
+        assert status["interval_ms"] == interval * 1000
+        assert status["reachable"] == 1
 
 
 @pytest.mark.asyncio
@@ -206,8 +230,8 @@ async def test_only_new_or_flipped_deploys_are_upserted(monkeypatch):
     deletes = [(sql, params) for sql, params in statements if sql.startswith("DELETE FROM pending_deploys")]
     assert len(deletes) == 1
     sql, params = deletes[0]
-    assert "pending_deploys.sig NOT IN" in sql
-    assert list(params.values()) == [["a", "c"]]
+    assert "sig <> ALL" in sql
+    assert params == {"signatures": ["a", "c"]}
     assert poller._written == {"a": True, "c": False}
     assert json.loads(fake.states(statements)[STATUS_KEY])["count"] == 2
 
@@ -368,6 +392,30 @@ async def test_snapshot_rows_keep_first_seen_time(ledger, monkeypatch):  # noqa:
     assert await ledger.conn.fetchval(
         "SELECT count(*) FROM indexer_state WHERE key = ANY($1)", [STATUS_KEY, TOTAL_KEY]
     ) == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_combined_buffers_exceed_the_asyncpg_parameter_limit(ledger, monkeypatch):
+    monkeypatch.setattr("src.pending_deploys.db", ledger.db)
+    count = 32_768
+    clients = {}
+    for start in range(0, count, 1000):
+        deploys = [deploy(str(i)) for i in range(start, min(start + 1000, count))]
+        clients[(f"validator-{start}", 40401)] = node({"deploys": deploys, "totalAvailable": len(deploys)})
+    poller = PendingDeploysPoller(list(clients), 1, 0.5, clients.__getitem__)
+
+    await poller.refresh()
+    assert await ledger.conn.fetchval("SELECT count(*) FROM pending_deploys") == count
+    status = await ledger.conn.fetchval("SELECT value FROM indexer_state WHERE key=$1", STATUS_KEY)
+    assert json.loads(status)["count"] == count
+
+    first = next(iter(clients.values()))
+    first.get_pending_deploys.return_value["deploys"][0] = deploy("replacement")
+    await poller.refresh()
+    assert await ledger.conn.fetchval("SELECT count(*) FROM pending_deploys") == count
+    assert await ledger.conn.fetchval("SELECT count(*) FROM pending_deploys WHERE sig='0'") == 0
+    assert await ledger.conn.fetchval("SELECT count(*) FROM pending_deploys WHERE sig='replacement'") == 1
 
 
 @pytest.mark.integration

@@ -11,7 +11,7 @@ deploy stays in a buffer only until its validator proposes the next block.
 It writes to the database only when the merged snapshot changes, so an idle
 network causes no row writes. `fetched_at` is the time the indexer first saw
 a deploy. The `pending_deploys_status` row in `indexer_state` is the freshness
-signal: it is rewritten with every change and at least every HEARTBEAT_SECONDS.
+signal: it is rewritten with every change and on successful refreshes with a target heartbeat of 10 seconds.
 """
 
 import asyncio
@@ -28,7 +28,7 @@ from sqlalchemy.dialects.postgresql import insert
 from src.addr import convert_to_asi_address
 from src.alerts import AlertEvent, AlertKind, AlertService
 from src.amounts import amount
-from src.config import Node, settings
+from src.config import PENDING_STATUS_HEARTBEAT_SECONDS, Node, settings
 from src.database import db
 from src.models import PendingDeploy
 from src.time_utils import utc_now
@@ -38,7 +38,6 @@ logger = structlog.get_logger(__name__)
 STATUS_KEY = "pending_deploys_status"
 # Kept for explorers that read the pre-cap total from its own key.
 TOTAL_KEY = "pending_deploys_total_available"
-HEARTBEAT_SECONDS = 10.0
 SNAPSHOT_TTL_SECONDS = 30.0
 INSERT_BATCH_ROWS = 500
 
@@ -295,7 +294,8 @@ class PendingDeploysPoller:
         rows_changed = current != self._written
         heartbeat_due = (
             self._status_written_at is None
-            or self._clock() - self._status_written_at >= HEARTBEAT_SECONDS
+            # Write on this refresh if waiting for the next one would miss the heartbeat.
+            or self._clock() - self._status_written_at + self.interval > PENDING_STATUS_HEARTBEAT_SECONDS
         )
         if not rows_changed and status == self._written_status and not heartbeat_due:
             return
@@ -324,7 +324,11 @@ class PendingDeploysPoller:
     async def _write_rows(self, session, merged: Dict[str, dict], current: Dict[str, bool]) -> None:
         # Delete by the current set rather than the last write, so the first
         # write after a restart also removes rows left by the previous process.
-        await session.execute(delete(PendingDeploy).where(PendingDeploy.sig.not_in(list(current))))
+        # One array parameter covers the combined buffers, including an empty snapshot.
+        await session.execute(
+            text("DELETE FROM pending_deploys WHERE sig <> ALL(CAST(:signatures AS varchar[]))"),
+            {"signatures": list(current)},
+        )
         written = self._written or {}
         changed = [sig for sig, rejected in current.items() if written.get(sig) != rejected]
         if not changed:

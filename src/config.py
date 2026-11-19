@@ -8,6 +8,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
 
+PENDING_STATUS_HEARTBEAT_SECONDS = 10.0
 Node = tuple[str, int]
 
 
@@ -294,7 +295,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _check_pending_deadline(self) -> "Settings":
-        if self.pending_deploy_nodes and self.pending_deploys_timeout > self.pending_deploys_interval:
+        if not self.pending_deploy_nodes:
+            return self
+        if self.pending_deploys_interval > PENDING_STATUS_HEARTBEAT_SECONDS:
+            raise ValueError("PENDING_DEPLOYS_INTERVAL must not exceed the 10 s status heartbeat")
+        if self.pending_deploys_timeout > self.pending_deploys_interval:
             raise ValueError("PENDING_DEPLOYS_TIMEOUT must not exceed PENDING_DEPLOYS_INTERVAL")
         return self
 

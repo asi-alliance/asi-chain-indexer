@@ -352,7 +352,7 @@ indexer deletes the `pending_deploys` rows and the `pending_deploys_status`
 state, and explorers hide their pending view.
 
 A separate task reads all listed validators every `PENDING_DEPLOYS_INTERVAL`
-seconds (default 1, independent of `SYNC_INTERVAL`), with a
+seconds (0.2 to 10 when enabled, default 1, independent of `SYNC_INTERVAL`), with a
 `PENDING_DEPLOYS_TIMEOUT` (default 0.5 s, at most the configured interval) per read. A deploy stays in a buffer
 only until its validator proposes, so a slower read misses most deploys.
 The task merges the buffers by signature and writes `pending_deploys` only
