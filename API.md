@@ -332,26 +332,27 @@ List ASI transfers with pagination and filtering.
 }
 ```
 
-### 🆕 GET /api/balance/{address}
-Get balance state for an address.
+### GET /api/address/{address}
 
-**Path Parameters:**
-- `address` (string): ASI address or validator public key
+Look up a full ASI vault address. The indexer asks its configured observer for
+the spendable native balance at the observer's latest finalized block on each
+request. The address can have an empty indexed transfer history.
+`balance` is a decimal string in base units. Use `token_decimals` to display ASI.
+The hash and height identify the block used for that balance.
 
-**Response:**
 ```json
 {
-  "address": "04837a4cff833e31...",
-  "unbonded_balance_dust": 0,
-  "unbonded_balance_asi": "0.00000000",
-  "bonded_balance_dust": 50000000000000,
-  "bonded_balance_asi": "500000.00000000",
-  "total_balance_dust": 50000000000000,
-  "total_balance_asi": "500000.00000000",
-  "block_number": 240,
-  "updated_at": "2025-08-06T08:10:00.000000"
+  "address": "1111x5QCpTeTXakyVzda9zAVyo6vnSG2WTd9TJ3n93LmMYRhzZouR",
+  "balance": "20001000000000000000001",
+  "token_decimals": 18,
+  "block_hash": "1744c38fe4f4a21d7efd95bfb12a83e1bd238cb26f4a4f0e74f0afd475ae4b93",
+  "block_number": 7132
 }
 ```
+
+A confirmed empty vault or valid unused address returns `200` with `"balance": "0"`.
+An invalid address returns `400`. An unavailable or malformed observer snapshot,
+or pending token precision verification during startup, returns `503`.
 
 ### GET /api/address/{address}/transfers
 Get transaction history for a specific address.

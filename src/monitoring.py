@@ -11,6 +11,7 @@ from aiohttp import web
 from prometheus_client import Counter, Gauge, Histogram, generate_latest, REGISTRY
 import structlog
 
+from src.addr import is_valid_vault_address
 from src.config import settings
 from src.database import db
 from src.read_cache import read_cache
@@ -210,6 +211,7 @@ class MonitoringServer:
         self.app.router.add_get("/api/transfers", self.get_transfers)
         self.app.router.add_get("/api/validators", self.get_validators)
         self.app.router.add_get("/api/stats/network", self.get_network_stats)
+        self.app.router.add_get("/api/address/{address}", self.get_address_balance)
         self.app.router.add_get("/api/address/{address}/transfers", self.get_address_transfers)
 
     async def health_check(self, request):
@@ -793,6 +795,16 @@ class MonitoringServer:
             logger.error("Failed to get network stats", error=str(e))
             return web.json_response(INTERNAL_ERROR, status=500)
 
+    async def get_address_balance(self, request):
+        address = request.match_info["address"]
+        if not is_valid_vault_address(address):
+            return web.json_response({"error": "Invalid ASI vault address"}, status=400)
+        client = self._client()
+        snapshot = await client.get_address_balance(address) if client else None
+        if snapshot is None:
+            return web.json_response({"error": "Balance unavailable"}, status=503)
+        return web.json_response(snapshot)
+
     async def get_address_transfers(self, request):
         """Get transfers for a specific address."""
         try:
@@ -856,5 +868,6 @@ class MonitoringServer:
             port=settings.monitoring_port,
             endpoints=["/health", "/readiness", "/metrics", "/status",
                        "/api/blocks", "/api/blocks/search", "/api/deployments", "/api/deployments/search",
-                       "/api/transfers", "/api/validators", "/api/stats/network", "/api/address/{address}/transfers"]
+                       "/api/transfers", "/api/validators", "/api/stats/network",
+                       "/api/address/{address}", "/api/address/{address}/transfers"]
         )

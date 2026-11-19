@@ -15,6 +15,20 @@ TOKENS = {
 }
 
 
+def is_valid_vault_address(address: str) -> bool:
+    # Four prefix bytes, a 32-byte key hash and four checksum bytes.
+    if len(address) > 54 or not address.startswith("1111") or not address.isalnum():
+        return False
+    try:
+        decoded = base58.b58decode(address)
+    except ValueError:
+        return False
+    if len(decoded) != 40 or decoded[:4] != bytes(4):
+        return False
+    checksum = hashlib.blake2b(decoded[:-4], digest_size=32).digest()[:4]
+    return decoded[-4:] == checksum
+
+
 def is_likely_public_key(address: str) -> bool:
     """
     Heuristically determine whether the input string looks like
