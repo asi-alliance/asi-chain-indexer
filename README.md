@@ -314,7 +314,7 @@ Important settings include `NODE_HOST`, `GRPC_PORT`, `HTTP_PORT`,
 `NODE_TIMEOUT`, `GRPC_MAX_RECEIVE_MESSAGE_BYTES`, `DATABASE_URL`, `DATABASE_POOL_SIZE`, `SYNC_INTERVAL`,
 `BATCH_SIZE`, `START_FROM_BLOCK`, `BLOCK_PREFETCH`, `TRACE_WORKERS`,
 `NATIVE_TOKEN_DECIMALS`, `ENABLE_ASI_TRANSFER_EXTRACTION`,
-`ENABLE_PENDING_DEPLOYS_SYNC`, `READ_CACHE_ENABLED` and `READ_CACHE_MAX_ENTRIES`.
+`PENDING_DEPLOYS_NODES`, `READ_CACHE_ENABLED` and `READ_CACHE_MAX_ENTRIES`.
 The indexer writes blocks one at a time, in height order. While it writes a
 block, it reads the details and the replay trace of up to `BLOCK_PREFETCH` later
 blocks of the batch (default 2; 0 reads each block after the previous write).
@@ -325,8 +325,7 @@ until it ends. A worker holds a complete parsed trace in memory: about 0.6 GB fo
 a 23 MB trace. The memory limit of the indexer container must allow
 `TRACE_WORKERS` of these at a time. See
 [Block throughput](#block-throughput) for the measured effect of both settings.
-The pending-deploy snapshot represents one node's bounded buffers, not a durable
-network-wide queue. `START_FROM_BLOCK` is an initial-history boundary, not a
+`START_FROM_BLOCK` is an initial-history boundary, not a
 command to discard the existing cursor or reindex stored history.
 
 Mattermost alerts are disabled by default. Enabling `ALERTS_ENABLED` requires
@@ -341,6 +340,45 @@ docker compose up -d --build indexer
 ```
 
 A plain `docker compose restart` does not replace the container's environment.
+
+### Pending deploys
+
+A deploy waits only in the deploy buffer of the validator that received it.
+Nodes do not gossip deploys, and an observer (read-only node) rejects them, so
+an observer's buffer is always empty. `PENDING_DEPLOYS_NODES` lists the gRPC
+addresses (`host:port`, comma-separated, IPv6 in brackets) of every validator
+that clients send deploys to. With an empty list the feature is off: the
+indexer deletes the `pending_deploys` rows and the `pending_deploys_status`
+state, and explorers hide their pending view.
+
+A separate task reads all listed validators every `PENDING_DEPLOYS_INTERVAL`
+seconds (0.2 to 10 when enabled, default 1, independent of `SYNC_INTERVAL`), with a
+`PENDING_DEPLOYS_TIMEOUT` (default 0.5 s, at most the configured interval) per read. A deploy stays in a buffer
+only until its validator proposes, so a slower read misses most deploys.
+The task merges the buffers by signature and writes `pending_deploys` only
+when the merged set changes; `fetched_at` is the time the indexer first saw
+the deploy. On each refresh, the poller drops any unreachable validator’s
+snapshot aged 30 seconds or more since its last successful read. Signatures
+still present on another validator remain in the view. The
+`indexer_state` row `pending_deploys_status` holds
+`{"nodes", "reachable", "count", "total_available", "interval_ms"}` and is
+updated on change and on a 10 s heartbeat. Its `updated_at` shows when the
+poller last wrote status. When `reachable < nodes`, display the queue as
+partial: cached entries may already have expired or been included. When
+`reachable == 0`, no entries are confirmed by the current poll. `pending_deploys_total_available` keeps the total
+before the per-node cap of 1000. Metrics: `indexer_pending_deploys`,
+`indexer_pending_deploy_nodes_configured` and
+`indexer_pending_deploy_nodes_reachable`. The counter
+`indexer_pending_deploy_refresh_failures_total` increases for a refresh that
+fails or reaches no validators. `indexer_pending_deploy_refresh_duration_seconds`
+measures the last refresh, including database work. With Mattermost alerts
+enabled, the poller signals an outage after `SYNC_STALL_THRESHOLD` consecutive
+refreshes that fail or reach zero validators.
+
+During rollout, set `PENDING_DEPLOYS_NODES` to every validator that accepts
+deploys, verify that the indexer can read each external gRPC endpoint, and
+deploy the explorer version that reads `pending_deploys_status` in the same
+rollout. An empty list clears the pending view at startup.
 
 ## API and monitoring
 

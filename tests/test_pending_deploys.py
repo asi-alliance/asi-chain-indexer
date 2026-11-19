@@ -1,0 +1,444 @@
+"""Pending deploys read from several validators (issue: observer buffers are always empty)."""
+
+import asyncio
+import json
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from pydantic import ValidationError
+from sqlalchemy import select
+
+from src.addr import convert_to_asi_address
+from src.alerts import AlertKind
+from src.config import PENDING_STATUS_HEARTBEAT_SECONDS, Settings, parse_nodes
+from src.models import PendingDeploy
+from src.pending_deploys import (
+    SNAPSHOT_TTL_SECONDS,
+    STATUS_KEY,
+    TOTAL_KEY,
+    PendingDeploysPoller,
+    Snapshot,
+    clear_pending_snapshot,
+    pending_refresh_failures,
+    merge,
+)
+from test_native_transfer_lifecycle import ledger  # noqa: F401
+
+DEPLOYER = "04" + "11" * 64
+
+
+def deploy(sig, rejected=False, **fields):
+    return {"sig": sig, "deployer": DEPLOYER, "term": "Nil", "timestamp": 1,
+            "phloPrice": 1, "isRejected": rejected, **fields}
+
+
+# --- configuration -------------------------------------------------------------
+
+def test_parse_nodes_accepts_names_ipv4_ipv6_and_drops_duplicates():
+    assert parse_nodes(" v1:40412, 10.0.0.2:40422 ,[::1]:40432,v1:40412,") == [
+        ("v1", 40412), ("10.0.0.2", 40422), ("::1", 40432)
+    ]
+    assert parse_nodes("") == []
+
+
+@pytest.mark.parametrize("value", [
+    "v1", "v1:", ":40412", "v1:0", "v1:65536", "v1:port", "::1:40412",
+    "http://v1:40412", "v1 :40412", "[::1]40412",
+])
+def test_parse_nodes_rejects_invalid_entries(value):
+    with pytest.raises(ValueError):
+        parse_nodes(value)
+
+
+def test_settings_validate_pending_nodes_and_default_to_disabled():
+    assert Settings(_env_file=None).pending_deploy_nodes == []
+    settings = Settings(_env_file=None, pending_deploys_nodes="v1:40412,v2:40422")
+    assert settings.pending_deploy_nodes == [("v1", 40412), ("v2", 40422)]
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, pending_deploys_nodes="v1")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, pending_deploys_interval=0.1)
+
+
+def test_timeout_cannot_exceed_interval_for_enabled_poller():
+    with pytest.raises(ValidationError, match="PENDING_DEPLOYS_TIMEOUT"):
+        Settings(_env_file=None, pending_deploys_nodes="v1:40401",
+                 pending_deploys_interval=1, pending_deploys_timeout=2)
+
+
+@pytest.mark.parametrize("interval", [10.01, 60])
+def test_enabled_poll_interval_must_fit_the_status_heartbeat(interval):
+    with pytest.raises(ValidationError, match="PENDING_DEPLOYS_INTERVAL"):
+        Settings(_env_file=None, pending_deploys_nodes="validator:40401", pending_deploys_interval=interval)
+    assert not Settings(_env_file=None, pending_deploys_nodes="", pending_deploys_interval=interval).pending_deploy_nodes
+
+
+def test_ipv6_validator_channel_target(monkeypatch):
+    channel = MagicMock()
+    monkeypatch.setattr("src.grpc_node_client.grpc.aio.insecure_channel", channel)
+    PendingDeploysPoller(parse_nodes("[::1]:40401"), interval=1, timeout=0.5)
+    assert channel.call_args.args == ("[::1]:40401",)
+
+
+# --- merge ---------------------------------------------------------------------
+
+def test_merge_counts_a_deploy_once_and_keeps_a_fresh_copy():
+    merged, total = merge([
+        Snapshot((deploy("a", rejected=True), deploy("b")), 2),
+        Snapshot((deploy("a"), deploy("c", rejected=True)), 2),
+        Snapshot((deploy("c", rejected=True), {"sig": ""}), 2),
+    ])
+    assert sorted(merged) == ["a", "b", "c"]
+    assert merged["a"]["isRejected"] is False
+    assert merged["c"]["isRejected"] is True
+    assert total == 3
+
+
+def test_merge_adds_deploys_beyond_each_node_cap():
+    merged, total = merge([Snapshot((deploy("a"),), 1001), Snapshot((deploy("b"),), 1)])
+    assert len(merged) == 2
+    assert total == 2 + 1000
+
+
+# --- poller without a database ---------------------------------------------------
+
+class FakeDb:
+    """Records statements; a failing commit leaves the poller's state unchanged."""
+
+    def __init__(self):
+        self.statements = []
+        self.fail = False
+
+    @asynccontextmanager
+    async def session(self):
+        db = self
+
+        class Session:
+            async def execute(self, statement, params=None):
+                db.statements.append((str(statement), params))
+
+            async def commit(self):
+                if db.fail:
+                    raise ConnectionError("database down")
+
+        yield Session()
+
+    def take(self):
+        statements, self.statements = self.statements, []
+        return statements
+
+    def states(self, statements):
+        return {p["key"]: p["value"] for s, p in statements if p and "indexer_state" in s}
+
+
+class Clock:
+    def __init__(self):
+        self.now = 100.0
+
+    def __call__(self):
+        return self.now
+
+
+def node(response=None, error=None):
+    client = SimpleNamespace(close=AsyncMock())
+    client.get_pending_deploys = AsyncMock(return_value=response, side_effect=error)
+    return client
+
+
+def poller_with(clients, monkeypatch, clock=None):
+    fake = FakeDb()
+    monkeypatch.setattr("src.pending_deploys.db", fake)
+    nodes = [(f"v{i}", 40402 + 10 * i) for i in range(len(clients))]
+    by_node = dict(zip(nodes, clients))
+    poller = PendingDeploysPoller(
+        nodes, interval=1, timeout=0.5, client_factory=by_node.__getitem__, clock=clock or Clock()
+    )
+    return poller, fake
+
+
+@pytest.mark.asyncio
+async def test_first_refresh_writes_an_empty_snapshot_and_status(monkeypatch):
+    poller, fake = poller_with([node({"deploys": [], "totalAvailable": 0})], monkeypatch)
+    await poller.refresh()
+    statements = fake.take()
+    assert any(s.startswith("DELETE FROM pending_deploys") for s, _ in statements)
+    assert not any("INSERT INTO pending_deploys" in s for s, _ in statements)
+    states = fake.states(statements)
+    assert json.loads(states[STATUS_KEY]) == {
+        "nodes": 1, "reachable": 1, "count": 0, "total_available": 0, "interval_ms": 1000
+    }
+    assert states[TOTAL_KEY] == "0"
+
+
+@pytest.mark.asyncio
+async def test_unchanged_snapshot_writes_only_a_heartbeat(monkeypatch):
+    clock = Clock()
+    response = {"deploys": [deploy("a")], "totalAvailable": 1}
+    poller, fake = poller_with([node(response)], monkeypatch, clock)
+    await poller.refresh()
+    assert any("INSERT INTO pending_deploys" in s for s, _ in fake.take())
+
+    clock.now += 1
+    await poller.refresh()
+    assert fake.take() == []
+
+    clock.now += PENDING_STATUS_HEARTBEAT_SECONDS
+    await poller.refresh()
+    statements = fake.take()
+    assert [STATUS_KEY] == list(fake.states(statements))
+    assert not any("pending_deploys " in s or "INTO pending_deploys" in s for s, _ in statements)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interval", [6, 10])
+async def test_slow_healthy_poller_writes_before_the_next_read_would_miss_the_heartbeat(monkeypatch, interval):
+    clock = Clock()
+    client = node({"deploys": [], "totalAvailable": 0})
+    poller, fake = poller_with([client], monkeypatch, clock)
+    poller.interval = Settings(_env_file=None, pending_deploys_nodes="v1:40401",
+                               pending_deploys_interval=interval).pending_deploys_interval
+    await poller.refresh()
+    fake.take()
+
+    for _ in range(6):
+        clock.now += interval
+        await poller.refresh()
+        states = fake.states(fake.take())
+        assert list(states) == [STATUS_KEY]
+        status = json.loads(states[STATUS_KEY])
+        assert status["interval_ms"] == interval * 1000
+        assert status["reachable"] == 1
+
+
+@pytest.mark.asyncio
+async def test_only_new_or_flipped_deploys_are_upserted(monkeypatch):
+    client = node({"deploys": [deploy("a"), deploy("b")], "totalAvailable": 2})
+    poller, fake = poller_with([client], monkeypatch)
+    await poller.refresh()
+    fake.take()
+
+    client.get_pending_deploys.return_value = {
+        "deploys": [deploy("a", rejected=True), deploy("c")], "totalAvailable": 2
+    }
+    await poller.refresh()
+    statements = fake.take()
+    inserts = [s for s, _ in statements if "INSERT INTO pending_deploys" in s]
+    assert len(inserts) == 1
+    assert "ON CONFLICT (sig) DO UPDATE SET is_rejected" in inserts[0]
+    deletes = [(sql, params) for sql, params in statements if sql.startswith("DELETE FROM pending_deploys")]
+    assert len(deletes) == 1
+    sql, params = deletes[0]
+    assert "sig <> ALL" in sql
+    assert params == {"signatures": ["a", "c"]}
+    assert poller._written == {"a": True, "c": False}
+    assert json.loads(fake.states(statements)[STATUS_KEY])["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_unreachable_validator_keeps_its_last_snapshot(monkeypatch):
+    first = node({"deploys": [deploy("a")], "totalAvailable": 1})
+    second = node({"deploys": [deploy("b")], "totalAvailable": 1})
+    poller, fake = poller_with([first, second], monkeypatch)
+    await poller.refresh()
+    fake.take()
+
+    second.get_pending_deploys.return_value = None
+    before = pending_refresh_failures._value.get()
+    first.get_pending_deploys.side_effect = asyncio.TimeoutError()
+    await poller.refresh()
+    statements = fake.take()
+    assert poller._written == {"a": False, "b": False}
+    status = json.loads(fake.states(statements)[STATUS_KEY])
+    assert pending_refresh_failures._value.get() == before + 1
+    assert status["reachable"] == 0 and status["nodes"] == 2
+    assert first.get_pending_deploys.await_args.kwargs == {"timeout": 0.5}
+
+
+@pytest.mark.asyncio
+async def test_failed_write_is_retried_on_the_next_refresh(monkeypatch):
+    poller, fake = poller_with([node({"deploys": [deploy("a")], "totalAvailable": 1})], monkeypatch)
+    fake.fail = True
+    with pytest.raises(ConnectionError):
+        await poller.refresh()
+    assert poller._written is None
+    fake.fail = False
+    fake.take()
+    await poller.refresh()
+    assert any("INSERT INTO pending_deploys" in s for s, _ in fake.take())
+    assert poller._written == {"a": False}
+
+
+@pytest.mark.asyncio
+async def test_run_survives_errors_and_stops_on_cancel(monkeypatch):
+    poller, fake = poller_with([node({"deploys": [], "totalAvailable": 0})], monkeypatch)
+    poller.interval = 0.01
+    fake.fail = True
+    task = asyncio.create_task(poller.run())
+    await asyncio.sleep(0.05)
+    assert not task.done()
+    fake.fail = False
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert poller._written == {}
+    await poller.close()
+    for client in poller._clients.values():
+        client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_alert_once_per_outage_and_rearm_after_partial_recovery(monkeypatch):
+    alerts = MagicMock()
+    poller = PendingDeploysPoller([("v1", 1), ("v2", 2)], interval=0, timeout=1,
+                                 client_factory=lambda _: node(), alerts=alerts)
+    monkeypatch.setattr("src.pending_deploys.settings.sync_stall_threshold", 2)
+    poller.refresh = AsyncMock(side_effect=[
+        0, ConnectionError(), 0, 1, ConnectionError(), 0, asyncio.CancelledError()
+    ])
+    with pytest.raises(asyncio.CancelledError):
+        await poller.run()
+    events = [call.args[0] for call in alerts.notify.call_args_list]
+    assert [e.kind for e in events] == [AlertKind.PENDING_DEPLOYS_STALLED] * 2
+    assert "ConnectionError" in events[0].error
+    assert "No configured validator" in events[1].error
+
+
+def test_poller_needs_a_node():
+    with pytest.raises(ValueError):
+        PendingDeploysPoller([], interval=1, timeout=1, client_factory=lambda n: None)
+
+
+@pytest.mark.asyncio
+async def test_indexer_disabled_clears_the_pending_view(monkeypatch):
+    from src.block_indexer import BlockIndexer
+
+    fake = FakeDb()
+    monkeypatch.setattr("src.pending_deploys.db", fake)
+    monkeypatch.setattr("src.block_indexer.settings.pending_deploys_nodes", "")
+    indexer = BlockIndexer()
+    await indexer._start_pending_deploys()
+    statements = [s for s, _ in fake.take()]
+    assert indexer._pending_task is None
+    assert statements[0].startswith("DELETE FROM pending_deploys")
+    assert "DELETE FROM indexer_state" in statements[1]
+
+
+@pytest.mark.asyncio
+async def test_indexer_runs_the_poller_beside_the_sync_loop(monkeypatch):
+    from src import block_indexer
+
+    created = []
+
+    class FakePoller:
+        def __init__(self, nodes, interval, timeout, alerts):
+            created.append((nodes, interval, timeout, alerts))
+            self.close = AsyncMock()
+
+        async def run(self):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(block_indexer, "PendingDeploysPoller", FakePoller)
+    monkeypatch.setattr("src.block_indexer.settings.pending_deploys_nodes", "v1:40412,v2:40422")
+    monkeypatch.setattr("src.block_indexer.db", SimpleNamespace(disconnect=AsyncMock()))
+    indexer = block_indexer.BlockIndexer()
+    await indexer._start_pending_deploys()
+    poller = indexer.pending_deploys
+    assert created == [([("v1", 40412), ("v2", 40422)], 1.0, 0.5, indexer.alerts)]
+    assert not indexer._pending_task.done()
+    await indexer.stop()
+    assert indexer._pending_task is None
+    poller.close.assert_awaited_once()
+
+
+# --- PostgreSQL ------------------------------------------------------------------
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_snapshot_rows_keep_first_seen_time(ledger, monkeypatch):  # noqa: F811
+    monkeypatch.setattr("src.pending_deploys.db", ledger.db)
+    client = node({"deploys": [deploy("a"), deploy("b")], "totalAvailable": 2})
+    poller = PendingDeploysPoller(
+        [("v1", 40412)], interval=1, timeout=1, client_factory=lambda n: client
+    )
+    await poller.refresh()
+    first_seen = await ledger.conn.fetchval("SELECT fetched_at FROM pending_deploys WHERE sig='a'")
+
+    client.get_pending_deploys.return_value = {
+        "deploys": [deploy("a", rejected=True), deploy("c")], "totalAvailable": 1001
+    }
+    await poller.refresh()
+    async with ledger.db.session() as session:
+        rows = {r.sig: r for r in (await session.execute(select(PendingDeploy))).scalars()}
+    assert sorted(rows) == ["a", "c"]
+    assert rows["a"].is_rejected is True
+    assert rows["a"].fetched_at == first_seen
+    assert rows["c"].deployer_address == convert_to_asi_address(DEPLOYER)
+    state = dict(await ledger.conn.fetch(
+        "SELECT key, value FROM indexer_state WHERE key = ANY($1)", [STATUS_KEY, TOTAL_KEY]
+    ))
+    assert state[TOTAL_KEY] == "1001"
+    assert json.loads(state[STATUS_KEY])["count"] == 2
+
+    client.get_pending_deploys.return_value = {"deploys": [], "totalAvailable": 0}
+    await poller.refresh()
+    assert await ledger.conn.fetchval("SELECT count(*) FROM pending_deploys") == 0
+    assert await ledger.conn.fetchval("SELECT value FROM indexer_state WHERE key=$1", TOTAL_KEY) == "0"
+
+    await clear_pending_snapshot()
+    assert await ledger.conn.fetchval("SELECT count(*) FROM pending_deploys") == 0
+    assert await ledger.conn.fetchval(
+        "SELECT count(*) FROM indexer_state WHERE key = ANY($1)", [STATUS_KEY, TOTAL_KEY]
+    ) == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_combined_buffers_exceed_the_asyncpg_parameter_limit(ledger, monkeypatch):
+    monkeypatch.setattr("src.pending_deploys.db", ledger.db)
+    count = 32_768
+    clients = {}
+    for start in range(0, count, 1000):
+        deploys = [deploy(str(i)) for i in range(start, min(start + 1000, count))]
+        clients[(f"validator-{start}", 40401)] = node({"deploys": deploys, "totalAvailable": len(deploys)})
+    poller = PendingDeploysPoller(list(clients), 1, 0.5, clients.__getitem__)
+
+    await poller.refresh()
+    assert await ledger.conn.fetchval("SELECT count(*) FROM pending_deploys") == count
+    status = await ledger.conn.fetchval("SELECT value FROM indexer_state WHERE key=$1", STATUS_KEY)
+    assert json.loads(status)["count"] == count
+
+    first = next(iter(clients.values()))
+    first.get_pending_deploys.return_value["deploys"][0] = deploy("replacement")
+    await poller.refresh()
+    assert await ledger.conn.fetchval("SELECT count(*) FROM pending_deploys") == count
+    assert await ledger.conn.fetchval("SELECT count(*) FROM pending_deploys WHERE sig='0'") == 0
+    assert await ledger.conn.fetchval("SELECT count(*) FROM pending_deploys WHERE sig='replacement'") == 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_expired_validator_buffer_leaves_the_ledger_and_total(ledger, monkeypatch):
+    monkeypatch.setattr("src.pending_deploys.db", ledger.db)
+    first = node({"deploys": [deploy("shared"), deploy("old")], "totalAvailable": 1001})
+    second = node({"deploys": [deploy("shared", rejected=True)], "totalAvailable": 1})
+    clients = {("v1", 40401): first, ("v2", 40401): second}
+    clock = Clock()
+    poller = PendingDeploysPoller(list(clients), 1, 0.5, clients.__getitem__, clock)
+
+    await poller.refresh()
+    first.get_pending_deploys.return_value = None
+    clock.now += SNAPSHOT_TTL_SECONDS - 1
+    await poller.refresh()
+    assert await ledger.conn.fetchval("SELECT count(*) FROM pending_deploys") == 2
+    clock.now += 1
+    await poller.refresh()
+    rows = await ledger.conn.fetch("SELECT sig, is_rejected FROM pending_deploys")
+    assert [tuple(row) for row in rows] == [("shared", True)]
+    assert await ledger.conn.fetchval("SELECT value FROM indexer_state WHERE key=$1", TOTAL_KEY) == "1"
+
+    first.get_pending_deploys.return_value = {"deploys": [deploy("new")], "totalAvailable": 1}
+    assert await poller.refresh() == 2
+    assert await ledger.conn.fetchval("SELECT count(*) FROM pending_deploys WHERE sig='new'") == 1

@@ -137,6 +137,8 @@ class GrpcNodeClient:
         http_port: Optional[int] = None,
     ):
         self.node_host = node_host or settings.node_host or "localhost"
+        if ":" in self.node_host and not self.node_host.startswith("["):
+            self.node_host = f"[{self.node_host}]"
         self.grpc_port = grpc_port or settings.grpc_port or 40452
         self.http_port = http_port or settings.http_port or 40453
         self.timeout = settings.node_timeout
@@ -254,7 +256,11 @@ class GrpcNodeClient:
         block_stage_duration.labels("trace_parse").observe(parsed)
         return events
 
-    async def get_pending_deploys(self, deployer_pubkey: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    async def get_pending_deploys(
+        self,
+        deployer_pubkey: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Fetch the node's pending deploy snapshot via the getPendingDeploys RPC.
 
         Returns {"deploys": [...], "totalAvailable": N}. Each deploy dict holds
@@ -273,7 +279,9 @@ class GrpcNodeClient:
 
         try:
             query = common.PendingDeploysQuery(deployerPubkey=deployer_bytes)
-            response = await self.stub.getPendingDeploys(query, timeout=self.timeout)
+            response = await self.stub.getPendingDeploys(
+                query, timeout=self.timeout if timeout is None else timeout
+            )
             payload = _unwrap(response, "payload")
 
             deploys = []
@@ -292,7 +300,8 @@ class GrpcNodeClient:
             }
 
         except (grpc.RpcError, ValueError) as e:
-            logger.error(f"Failed to get pending deploys: {e}")
+            # Read every second per validator; the poller logs reachability changes.
+            logger.debug(f"Failed to get pending deploys: {e}")
             return None
 
     async def get_deploy_info(self, deploy_id: str) -> Optional[Dict[str, Any]]:

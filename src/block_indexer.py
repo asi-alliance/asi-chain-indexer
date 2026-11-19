@@ -25,10 +25,11 @@ from src.database import db
 from src.monitoring import block_stage_duration, sync_duration
 from src.read_cache import read_cache
 from src.models import (
-    Block, BlockParent, Deployment, PendingDeploy, Transfer, Validator, ValidatorBond,
+    Block, BlockParent, Deployment, Transfer, Validator, ValidatorBond,
     EpochTransition, NetworkStats, BalanceState
 )
 from src.grpc_node_client import GrpcNodeClient
+from src.pending_deploys import PendingDeploysPoller, clear_pending_snapshot
 from src.sync_progress import BlockBatchProgress
 from src.native_transfers import (
     reconcile_block, reconcile_completed_duplicates, require_indexed_parents,
@@ -112,6 +113,8 @@ class BlockIndexer:
         self.chain_tip: Optional[int] = None
         self.chain_tip_observed_at: Optional[datetime] = None
         self.node_reachable = False
+        self.pending_deploys: Optional[PendingDeploysPoller] = None
+        self._pending_task: Optional[asyncio.Task] = None
 
     async def start(self):
         """Start the enhanced indexer."""
@@ -153,6 +156,8 @@ class BlockIndexer:
         await self.client.require_native_precision(settings.native_token_decimals)
         logger.info("✅ ASI-Chain node connection established")
 
+        await self._start_pending_deploys()
+
         # Get current indexer state
         last_indexed = await db.get_last_indexed_block()
         logger.info("📈 Current indexer state", last_indexed_block=last_indexed)
@@ -165,7 +170,6 @@ class BlockIndexer:
             self._cycle_kind = None
             try:
                 await self._sync_blocks()
-                await self._sync_pending_deploys()
                 await self._update_validator_states()
                 await self._check_epoch_transitions()
                 await self._update_network_stats()
@@ -310,10 +314,43 @@ class BlockIndexer:
             .with_context("cycles", settings.lag_alert_cycles)
         )
 
+    async def _start_pending_deploys(self):
+        """Start the pending-deploy poller, or clear the pending view when it is off.
+
+        The poller runs beside the sync loop: a deploy stays in a validator's
+        buffer only until that validator's next block, which is shorter than
+        a sync cycle that also indexes blocks.
+        """
+        nodes = settings.pending_deploy_nodes
+        if not nodes:
+            logger.info("Pending deploys disabled: PENDING_DEPLOYS_NODES is empty")
+            await clear_pending_snapshot()
+            return
+        self.pending_deploys = PendingDeploysPoller(
+            nodes,
+            interval=settings.pending_deploys_interval,
+            timeout=settings.pending_deploys_timeout,
+            alerts=self.alerts,
+        )
+        self._pending_task = asyncio.create_task(self.pending_deploys.run(), name="pending-deploys")
+
+    async def _stop_pending_deploys(self):
+        if self._pending_task is not None:
+            self._pending_task.cancel()
+            try:
+                await self._pending_task
+            except asyncio.CancelledError:
+                pass
+            self._pending_task = None
+        if self.pending_deploys is not None:
+            await self.pending_deploys.close()
+            self.pending_deploys = None
+
     async def stop(self):
         """Stop the indexer."""
         logger.info("Stopping enhanced indexer")
         self.running = False
+        await self._stop_pending_deploys()
         await db.disconnect()
 
     async def _sync_blocks(self):
@@ -470,85 +507,6 @@ class BlockIndexer:
 
         except Exception as e:
             logger.error(f"Sync blocks error: {e}", exc_info=True)
-            self._record_cycle_failure(e)
-
-    async def _sync_pending_deploys(self):
-        """Refresh the pending_deploys snapshot from the node's deploy buffers.
-
-        The node's getPendingDeploys returns the current buffer contents
-        (deploy_storage + rejected-recovery buffer), so the table is fully
-        refreshed (DELETE + INSERT) each cycle to stay consistent. Deploys
-        that get included in a block disappear here and show up in the
-        deployments table with the same sig/deploy_id.
-        """
-        if not settings.enable_pending_deploys_sync:
-            return
-
-        try:
-            data = await self.client.get_pending_deploys()
-            if data is None:
-                # Node unreachable or RPC unavailable (e.g. old node version);
-                # keep the last snapshot rather than wiping it.
-                return
-
-            deploys = data.get("deploys", [])
-            total_available = data.get("totalAvailable", len(deploys))
-
-            async with db.session() as session:
-                await session.execute(text("DELETE FROM pending_deploys"))
-
-                for d in deploys:
-                    sig = d.get("sig", "")
-                    if not sig:
-                        logger.warning("Skipping pending deploy without sig", deployer=d.get("deployer", "")[:20])
-                        continue
-
-                    deployer = d.get("deployer", "")
-                    session.add(PendingDeploy(
-                        sig=sig,
-                        deployer=deployer,
-                        deployer_address=convert_to_asi_address(deployer, d),
-                        term=d.get("term", ""),
-                        timestamp=d.get("timestamp", 0),
-                        phlo_price=amount(d.get("phloPrice", 1)),
-                        phlo_limit=d.get("phloLimit", 1000000),
-                        valid_after_block_number=d.get("validAfterBlockNumber"),
-                        shard_id=d.get("shardId"),
-                        sig_algorithm=d.get("sigAlgorithm", "secp256k1"),
-                        language=d.get("language"),
-                        # proto 0 = no expiration
-                        expiration_timestamp=d.get("expirationTimestamp") or None,
-                        is_rejected=d.get("isRejected", False),
-                    ))
-
-                # Persist the pre-cap total so the explorer can detect
-                # truncation (node caps the response at 1000 entries).
-                await session.execute(
-                    text("""
-                         INSERT INTO indexer_state (key, value, updated_at)
-                         VALUES ('pending_deploys_total_available', :value, NOW())
-                         ON CONFLICT (key) DO UPDATE SET value = :value, updated_at = NOW()
-                         """),
-                    {"value": str(total_available)},
-                )
-                await session.commit()
-
-            if len(deploys) < total_available:
-                logger.warning(
-                    "Pending deploys truncated by node cap",
-                    returned=len(deploys),
-                    total_available=total_available,
-                )
-
-            logger.info(
-                "Refreshed pending deploys",
-                count=len(deploys),
-                total_available=total_available,
-                rejected=sum(1 for d in deploys if d.get("isRejected")),
-            )
-
-        except Exception as e:
-            logger.error(f"Failed to sync pending deploys: {e}", exc_info=True)
             self._record_cycle_failure(e)
 
     def _needs_traces(self, block_data: Dict) -> bool:

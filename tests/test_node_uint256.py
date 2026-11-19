@@ -16,6 +16,7 @@ from src.amounts import MAX_AMOUNT
 from src.config import Settings
 from src.grpc_node_client import PROFILE, GrpcNodeClient, _to_dict, common
 from src.models import Deployment, PendingDeploy, ValidatorBond
+from src.pending_deploys import PendingDeploysPoller
 import CasperMessage_pb2 as casper
 import DeployServiceV1_pb2 as service
 from test_native_transfer_lifecycle import ledger  # noqa: F401
@@ -279,7 +280,7 @@ async def test_all_consumed_rpc_paths_decode_wide_money():
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_wide_prices_stakes_and_units_survive_restart(ledger):  # noqa: F811
+async def test_wide_prices_stakes_and_units_survive_restart(ledger, monkeypatch):  # noqa: F811
     # Exercise real block/deploy/bond writes and the pending snapshot transaction.
     details, replay = await ledger.add(
         1,
@@ -297,10 +298,15 @@ async def test_wide_prices_stakes_and_units_survive_restart(ledger):  # noqa: F8
         "timestamp": 1,
         "term": "Nil",
     }
-    ledger.indexer.client.get_pending_deploys = AsyncMock(
-        return_value={"deploys": [pending]}
+    monkeypatch.setattr("src.pending_deploys.db", ledger.db)
+    validator = SimpleNamespace(
+        get_pending_deploys=AsyncMock(return_value={"deploys": [pending]}),
+        close=AsyncMock(),
     )
-    await ledger.indexer._sync_pending_deploys()
+    poller = PendingDeploysPoller(
+        [("validator", 40402)], interval=1, timeout=1, client_factory=lambda node: validator
+    )
+    await poller.refresh()
     await ledger.db.disconnect()
     await ledger.db.connect()
     async with ledger.db.session() as session:
