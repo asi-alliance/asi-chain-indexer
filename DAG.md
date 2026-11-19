@@ -145,7 +145,7 @@ Important boundaries:
 - The node API is **node-local**. The inspected implementation documents that deploys do not gossip and an observer rejects submissions, so an observer's empty buffer is not evidence of an empty network queue. The indexer reads the validators listed in `PENDING_DEPLOYS_NODES`; a validator that is not listed contributes nothing.
 - `sig` joins to `deployments.deploy_id`. Snapshot and indexed-ledger timing can overlap or leave a visibility gap.
 - `is_rejected` means provenance from the rejected/recovery buffer, not a terminal failed execution.
-- A failed RPC retains the last snapshot. Use `fetched_at` to communicate observation age; an empty result has no row timestamp to prove freshness.
+- A failed RPC retains the last snapshot. An empty result has no row timestamp. Check the heartbeat in `pending_deploys_status.updated_at` and compare `reachable` with `nodes` before presenting the queue as current. `fetched_at` records first sighting.
 - The node caps the response at 1000 entries. Compare the returned count with `indexer_state.pending_deploys_total_available`; do not display a truncated snapshot count as a network total.
 - Disappearance from the buffer alone does not prove inclusion, success, rejection, or expiry. The indexer does not maintain an authoritative terminal-status history from these snapshots.
 

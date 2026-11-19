@@ -123,7 +123,7 @@ Hasura permissions: public SELECT, `limit: 5000`, `allow_aggregations: true`.
 
 > Each node caps its response at 1000 entries — the pre-cap total is in `indexer_state` key `pending_deploys_total_available`. Compare with `pending_deploys_aggregate { aggregate { count } }` to detect truncation.
 >
-> `indexer_state` key `pending_deploys_status` holds JSON `{"nodes", "reachable", "count", "total_available", "interval_ms"}`. Its `updated_at` is refreshed at least every 10 s while the indexer reads the validators; an older value means the view is stale. A missing row means the feature is off.
+> `indexer_state` key `pending_deploys_status` holds JSON `{"nodes", "reachable", "count", "total_available", "interval_ms"}`. Its `updated_at` is refreshed at least every 10 s while the poller is running. Check both the heartbeat and `reachable`: a recent heartbeat with `reachable < nodes` means some entries may be stale, and `reachable == 0` means no validator confirmed the queue. A missing row means the feature is off.
 >
 > Clients that show the view live should use a subscription rather than fast polling: Hasura runs one query per refetch interval for all subscribers of the same query, while every polling client sends its own requests. A subscription can select only one root field.
 

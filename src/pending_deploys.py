@@ -21,13 +21,13 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Sequence, Tuple
 
 import structlog
-from prometheus_client import Gauge
+from prometheus_client import Counter, Gauge
 from sqlalchemy import delete, text
 from sqlalchemy.dialects.postgresql import insert
 
 from src.addr import convert_to_asi_address
 from src.amounts import amount
-from src.config import Node, parse_nodes  # noqa: F401  (re-exported for callers)
+from src.config import Node
 from src.database import db
 from src.models import PendingDeploy
 from src.time_utils import utc_now
@@ -51,6 +51,16 @@ pending_nodes_configured = Gauge(
 pending_nodes_reachable = Gauge(
     "indexer_pending_deploy_nodes_reachable",
     "Validators whose deploy buffer was read in the last pending-deploy refresh",
+)
+
+
+pending_refresh_failures = Counter(
+    "indexer_pending_deploy_refresh_failures_total",
+    "Refreshes that failed or could not reach any configured validator",
+)
+pending_refresh_duration = Gauge(
+    "indexer_pending_deploy_refresh_duration_seconds",
+    "Time spent reading and storing the last pending-deploy refresh",
 )
 
 
@@ -164,7 +174,7 @@ class PendingDeploysPoller:
         self._clock = clock
         self._clients = {node: client_factory(node) for node in self.nodes}
         # Last successful snapshot per validator. An unreachable validator keeps
-        # its last snapshot: its deploys cannot leave its buffer while it is down.
+        # its last snapshot until another successful read confirms its buffer contents.
         self._last: Dict[Node, Snapshot] = {}
         self._reachable: Dict[Node, Optional[bool]] = {node: None for node in self.nodes}
         # What the database holds after the last successful write: sig -> is_rejected.
@@ -192,11 +202,14 @@ class PendingDeploysPoller:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                pending_refresh_failures.inc()
                 message = f"{type(e).__name__}: {e}"
                 if message != self._last_error:
                     logger.error("Pending deploys refresh failed", error=message, exc_info=True)
                     self._last_error = message
-            await asyncio.sleep(max(0.0, self.interval - (self._clock() - started)))
+            elapsed = self._clock() - started
+            pending_refresh_duration.set(elapsed)
+            await asyncio.sleep(max(0.0, self.interval - elapsed))
 
     async def close(self) -> None:
         for client in self._clients.values():
@@ -217,6 +230,8 @@ class PendingDeploysPoller:
         merged, total = merge([self._last[node] for node in self.nodes if node in self._last])
         pending_nodes_reachable.set(reachable)
         await self._store(merged, total, reachable)
+        if reachable == 0:
+            pending_refresh_failures.inc()
         pending_deploys_count.set(len(merged))
 
     async def _read(self, node: Node) -> Optional[Snapshot]:

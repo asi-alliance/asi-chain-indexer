@@ -4,11 +4,12 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import ValidationError
 from sqlalchemy import select
+from sqlalchemy.sql.dml import Delete
 
 from src.addr import convert_to_asi_address
 from src.config import Settings, parse_nodes
@@ -20,6 +21,7 @@ from src.pending_deploys import (
     PendingDeploysPoller,
     Snapshot,
     clear_pending_snapshot,
+    pending_refresh_failures,
     merge,
 )
 from test_native_transfer_lifecycle import ledger  # noqa: F401
@@ -60,6 +62,19 @@ def test_settings_validate_pending_nodes_and_default_to_disabled():
         Settings(_env_file=None, pending_deploys_interval=0.1)
 
 
+def test_timeout_cannot_exceed_interval_for_enabled_poller():
+    with pytest.raises(ValidationError, match="PENDING_DEPLOYS_TIMEOUT"):
+        Settings(_env_file=None, pending_deploys_nodes="v1:40401",
+                 pending_deploys_interval=1, pending_deploys_timeout=2)
+
+
+def test_ipv6_validator_channel_target(monkeypatch):
+    channel = MagicMock()
+    monkeypatch.setattr("src.grpc_node_client.grpc.aio.insecure_channel", channel)
+    PendingDeploysPoller(parse_nodes("[::1]:40401"), interval=1, timeout=0.5)
+    assert channel.call_args.args == ("[::1]:40401",)
+
+
 # --- merge ---------------------------------------------------------------------
 
 def test_merge_counts_a_deploy_once_and_keeps_a_fresh_copy():
@@ -95,6 +110,8 @@ class FakeDb:
 
         class Session:
             async def execute(self, statement, params=None):
+                if isinstance(statement, Delete):
+                    params = statement.compile().params
                 db.statements.append((str(statement), params))
 
             async def commit(self):
@@ -184,6 +201,11 @@ async def test_only_new_or_flipped_deploys_are_upserted(monkeypatch):
     inserts = [s for s, _ in statements if "INSERT INTO pending_deploys" in s]
     assert len(inserts) == 1
     assert "ON CONFLICT (sig) DO UPDATE SET is_rejected" in inserts[0]
+    deletes = [(sql, params) for sql, params in statements if sql.startswith("DELETE FROM pending_deploys")]
+    assert len(deletes) == 1
+    sql, params = deletes[0]
+    assert "pending_deploys.sig NOT IN" in sql
+    assert list(params.values()) == [["a", "c"]]
     assert poller._written == {"a": True, "c": False}
     assert json.loads(fake.states(statements)[STATUS_KEY])["count"] == 2
 
@@ -197,11 +219,13 @@ async def test_unreachable_validator_keeps_its_last_snapshot(monkeypatch):
     fake.take()
 
     second.get_pending_deploys.return_value = None
+    before = pending_refresh_failures._value.get()
     first.get_pending_deploys.side_effect = asyncio.TimeoutError()
     await poller.refresh()
     statements = fake.take()
     assert poller._written == {"a": False, "b": False}
     status = json.loads(fake.states(statements)[STATUS_KEY])
+    assert pending_refresh_failures._value.get() == before + 1
     assert status["reachable"] == 0 and status["nodes"] == 2
     assert first.get_pending_deploys.await_args.kwargs == {"timeout": 0.5}
 
@@ -279,7 +303,7 @@ async def test_indexer_runs_the_poller_beside_the_sync_loop(monkeypatch):
     indexer = block_indexer.BlockIndexer()
     await indexer._start_pending_deploys()
     poller = indexer.pending_deploys
-    assert created == [([("v1", 40412), ("v2", 40422)], 1.0, 2.0)]
+    assert created == [([("v1", 40412), ("v2", 40422)], 1.0, 0.5)]
     assert not indexer._pending_task.done()
     await indexer.stop()
     assert indexer._pending_task is None
@@ -315,7 +339,11 @@ async def test_snapshot_rows_keep_first_seen_time(ledger, monkeypatch):  # noqa:
     assert state[TOTAL_KEY] == "1001"
     assert json.loads(state[STATUS_KEY])["count"] == 2
 
-    monkeypatch.setattr("src.pending_deploys.db", ledger.db)
+    client.get_pending_deploys.return_value = {"deploys": [], "totalAvailable": 0}
+    await poller.refresh()
+    assert await ledger.conn.fetchval("SELECT count(*) FROM pending_deploys") == 0
+    assert await ledger.conn.fetchval("SELECT value FROM indexer_state WHERE key=$1", TOTAL_KEY) == "0"
+
     await clear_pending_snapshot()
     assert await ledger.conn.fetchval("SELECT count(*) FROM pending_deploys") == 0
     assert await ledger.conn.fetchval(

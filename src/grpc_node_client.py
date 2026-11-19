@@ -19,10 +19,13 @@ from google.protobuf.unknown_fields import UnknownFieldSet
 
 from src.config import settings
 from src.amounts import amount, canonical_signed_decimal
-from src.off_loop import run_off_loop
+from src.monitoring import block_stage_duration, node_request_duration
+from src.off_loop import WorkerPool
 from src.transfer_reports import trace_events
 
 logger = structlog.get_logger(__name__)
+
+trace_workers = WorkerPool(settings.trace_workers)
 
 PROFILE = settings.node_protocol_profile
 STUB_PROFILE = (Path(__file__).parent / "grpc_stubs" / "protocol_profile.txt").read_text()
@@ -134,6 +137,8 @@ class GrpcNodeClient:
         http_port: Optional[int] = None,
     ):
         self.node_host = node_host or settings.node_host or "localhost"
+        if ":" in self.node_host and not self.node_host.startswith("["):
+            self.node_host = f"[{self.node_host}]"
         self.grpc_port = grpc_port or settings.grpc_port or 40452
         self.http_port = http_port or settings.http_port or 40453
         self.timeout = settings.node_timeout
@@ -165,8 +170,9 @@ class GrpcNodeClient:
             query = common.BlocksQueryByHeight(startBlockNumber=start, endBlockNumber=end)
 
             blocks = []
-            async for response in self.stub.getBlocksByHeights(query, timeout=self.timeout):
-                blocks.append(_to_dict(_unwrap(response, "blockInfo")))
+            with node_request_duration.labels("blocks_by_height").time():
+                async for response in self.stub.getBlocksByHeights(query, timeout=self.timeout):
+                    blocks.append(_to_dict(_unwrap(response, "blockInfo")))
 
             return blocks
 
@@ -176,9 +182,10 @@ class GrpcNodeClient:
 
     async def get_last_finalized_block(self) -> Optional[Dict[str, Any]]:
         try:
-            response = await self.stub.lastFinalizedBlock(
-                _finalized_query(), timeout=self.timeout
-            )
+            with node_request_duration.labels("last_finalized_block").time():
+                response = await self.stub.lastFinalizedBlock(
+                    _finalized_query(), timeout=self.timeout
+                )
             wrapper = _unwrap(response, "blockInfo")
             return _to_dict(wrapper.blockInfo)
 
@@ -211,7 +218,8 @@ class GrpcNodeClient:
     async def get_block_details(self, block_hash: str) -> Optional[Dict[str, Any]]:
         try:
             query = _block_query(block_hash)
-            response = await self.stub.getBlock(query, timeout=self.timeout)
+            with node_request_duration.labels("block").time():
+                response = await self.stub.getBlock(query, timeout=self.timeout)
             return _to_dict(_unwrap(response, "blockInfo"))
 
         except (grpc.RpcError, ValueError) as e:
@@ -219,19 +227,24 @@ class GrpcNodeClient:
             return None
 
     async def get_block_events(
-        self, block_hash: str, deploy_ids: List[str]
+        self, block_hash: str, deploy_ids: List[str], priority: int = 0
     ) -> List[Tuple[str, List[Tuple[str, Dict[str, Any]]]]]:
         """Read the block's BigInt-capable replay trace; failures must retry the block.
 
         A trace can be tens of megabytes, so a worker process parses it and extracts its events.
+        A parse with a lower `priority` gets the next free worker first.
         """
         url = f"http://{self.node_host}:{self.http_port}/reporting/trace"
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout)) as session:
-            async with session.get(url, params={"blockHash": block_hash}) as response:
-                response.raise_for_status()
-                body = await response.read()
+        with block_stage_duration.labels("trace_fetch").time(), \
+                node_request_duration.labels("trace").time():
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout)) as session:
+                async with session.get(url, params={"blockHash": block_hash}) as response:
+                    response.raise_for_status()
+                    body = await response.read()
         try:
-            return await run_off_loop(trace_events, body, block_hash, list(deploy_ids))
+            waited, parsed, events = await trace_workers.run_timed(
+                trace_events, body, block_hash, list(deploy_ids), priority=priority
+            )
         except BrokenProcessPool:
             logger.warning(
                 "Replay trace worker stopped; the block will be retried",
@@ -239,6 +252,9 @@ class GrpcNodeClient:
                 trace_bytes=len(body),
             )
             raise
+        block_stage_duration.labels("trace_queue").observe(waited)
+        block_stage_duration.labels("trace_parse").observe(parsed)
+        return events
 
     async def get_pending_deploys(
         self,

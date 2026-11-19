@@ -111,6 +111,18 @@ class Settings(BaseSettings):
         default=0,
         description="Block number to start syncing from"
     )
+    block_prefetch: int = Field(
+        default=2,
+        ge=0,
+        le=16,
+        description="Blocks whose details and replay traces are read ahead of the block being written"
+    )
+    trace_workers: int = Field(
+        default=2,
+        ge=1,
+        le=16,
+        description="Worker processes that parse replay traces"
+    )
 
     # Monitoring
     monitoring_port: int = Field(
@@ -234,7 +246,7 @@ class Settings(BaseSettings):
         description="Seconds between pending-deploy reads of the listed validators"
     )
     pending_deploys_timeout: float = Field(
-        default=2.0,
+        default=0.5,
         gt=0,
         le=30,
         description="gRPC timeout in seconds for one validator's pending-deploy read"
@@ -279,6 +291,12 @@ class Settings(BaseSettings):
     def _check_pending_deploys_nodes(cls, value: str) -> str:
         parse_nodes(value)
         return value
+
+    @model_validator(mode="after")
+    def _check_pending_deadline(self) -> "Settings":
+        if self.pending_deploy_nodes and self.pending_deploys_timeout > self.pending_deploys_interval:
+            raise ValueError("PENDING_DEPLOYS_TIMEOUT must not exceed PENDING_DEPLOYS_INTERVAL")
+        return self
 
     @property
     def pending_deploy_nodes(self) -> list[tuple[str, int]]:
