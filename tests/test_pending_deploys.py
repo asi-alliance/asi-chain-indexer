@@ -12,10 +12,12 @@ from sqlalchemy import select
 from sqlalchemy.sql.dml import Delete
 
 from src.addr import convert_to_asi_address
+from src.alerts import AlertKind
 from src.config import Settings, parse_nodes
 from src.models import PendingDeploy
 from src.pending_deploys import (
     HEARTBEAT_SECONDS,
+    SNAPSHOT_TTL_SECONDS,
     STATUS_KEY,
     TOTAL_KEY,
     PendingDeploysPoller,
@@ -263,6 +265,23 @@ async def test_run_survives_errors_and_stops_on_cancel(monkeypatch):
         client.close.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_alert_once_per_outage_and_rearm_after_partial_recovery(monkeypatch):
+    alerts = MagicMock()
+    poller = PendingDeploysPoller([("v1", 1), ("v2", 2)], interval=0, timeout=1,
+                                 client_factory=lambda _: node(), alerts=alerts)
+    monkeypatch.setattr("src.pending_deploys.settings.sync_stall_threshold", 2)
+    poller.refresh = AsyncMock(side_effect=[
+        0, ConnectionError(), 0, 1, ConnectionError(), 0, asyncio.CancelledError()
+    ])
+    with pytest.raises(asyncio.CancelledError):
+        await poller.run()
+    events = [call.args[0] for call in alerts.notify.call_args_list]
+    assert [e.kind for e in events] == [AlertKind.PENDING_DEPLOYS_STALLED] * 2
+    assert "ConnectionError" in events[0].error
+    assert "No configured validator" in events[1].error
+
+
 def test_poller_needs_a_node():
     with pytest.raises(ValueError):
         PendingDeploysPoller([], interval=1, timeout=1, client_factory=lambda n: None)
@@ -290,8 +309,8 @@ async def test_indexer_runs_the_poller_beside_the_sync_loop(monkeypatch):
     created = []
 
     class FakePoller:
-        def __init__(self, nodes, interval, timeout):
-            created.append((nodes, interval, timeout))
+        def __init__(self, nodes, interval, timeout, alerts):
+            created.append((nodes, interval, timeout, alerts))
             self.close = AsyncMock()
 
         async def run(self):
@@ -303,7 +322,7 @@ async def test_indexer_runs_the_poller_beside_the_sync_loop(monkeypatch):
     indexer = block_indexer.BlockIndexer()
     await indexer._start_pending_deploys()
     poller = indexer.pending_deploys
-    assert created == [([("v1", 40412), ("v2", 40422)], 1.0, 0.5)]
+    assert created == [([("v1", 40412), ("v2", 40422)], 1.0, 0.5, indexer.alerts)]
     assert not indexer._pending_task.done()
     await indexer.stop()
     assert indexer._pending_task is None
@@ -349,3 +368,29 @@ async def test_snapshot_rows_keep_first_seen_time(ledger, monkeypatch):  # noqa:
     assert await ledger.conn.fetchval(
         "SELECT count(*) FROM indexer_state WHERE key = ANY($1)", [STATUS_KEY, TOTAL_KEY]
     ) == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_expired_validator_buffer_leaves_the_ledger_and_total(ledger, monkeypatch):
+    monkeypatch.setattr("src.pending_deploys.db", ledger.db)
+    first = node({"deploys": [deploy("shared"), deploy("old")], "totalAvailable": 1001})
+    second = node({"deploys": [deploy("shared", rejected=True)], "totalAvailable": 1})
+    clients = {("v1", 40401): first, ("v2", 40401): second}
+    clock = Clock()
+    poller = PendingDeploysPoller(list(clients), 1, 0.5, clients.__getitem__, clock)
+
+    await poller.refresh()
+    first.get_pending_deploys.return_value = None
+    clock.now += SNAPSHOT_TTL_SECONDS - 1
+    await poller.refresh()
+    assert await ledger.conn.fetchval("SELECT count(*) FROM pending_deploys") == 2
+    clock.now += 1
+    await poller.refresh()
+    rows = await ledger.conn.fetch("SELECT sig, is_rejected FROM pending_deploys")
+    assert [tuple(row) for row in rows] == [("shared", True)]
+    assert await ledger.conn.fetchval("SELECT value FROM indexer_state WHERE key=$1", TOTAL_KEY) == "1"
+
+    first.get_pending_deploys.return_value = {"deploys": [deploy("new")], "totalAvailable": 1}
+    assert await poller.refresh() == 2
+    assert await ledger.conn.fetchval("SELECT count(*) FROM pending_deploys WHERE sig='new'") == 1

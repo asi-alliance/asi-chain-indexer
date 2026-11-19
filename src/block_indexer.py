@@ -330,6 +330,7 @@ class BlockIndexer:
             nodes,
             interval=settings.pending_deploys_interval,
             timeout=settings.pending_deploys_timeout,
+            alerts=self.alerts,
         )
         self._pending_task = asyncio.create_task(self.pending_deploys.run(), name="pending-deploys")
 

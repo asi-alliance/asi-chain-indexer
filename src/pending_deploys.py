@@ -26,8 +26,9 @@ from sqlalchemy import delete, text
 from sqlalchemy.dialects.postgresql import insert
 
 from src.addr import convert_to_asi_address
+from src.alerts import AlertEvent, AlertKind, AlertService
 from src.amounts import amount
-from src.config import Node
+from src.config import Node, settings
 from src.database import db
 from src.models import PendingDeploy
 from src.time_utils import utc_now
@@ -38,6 +39,7 @@ STATUS_KEY = "pending_deploys_status"
 # Kept for explorers that read the pre-cap total from its own key.
 TOTAL_KEY = "pending_deploys_total_available"
 HEARTBEAT_SECONDS = 10.0
+SNAPSHOT_TTL_SECONDS = 30.0
 INSERT_BATCH_ROWS = 500
 
 pending_deploys_count = Gauge(
@@ -75,6 +77,11 @@ class Snapshot:
 
     deploys: Tuple[dict, ...]
     total_available: int
+
+
+@dataclass(frozen=True)
+class ValidatorSnapshot(Snapshot):
+    expires_at: float  # Monotonic deadline measured when the read succeeds.
 
 
 def merge(snapshots: Sequence[Snapshot]) -> Tuple[Dict[str, dict], int]:
@@ -159,6 +166,7 @@ class PendingDeploysPoller:
         timeout: float,
         client_factory: Optional[Callable[[Node], object]] = None,
         clock: Callable[[], float] = time.monotonic,
+        alerts: Optional[AlertService] = None,
     ):
         if not nodes:
             raise ValueError("PendingDeploysPoller needs at least one node")
@@ -172,10 +180,9 @@ class PendingDeploysPoller:
         self.interval = interval
         self.timeout = timeout
         self._clock = clock
+        self._alerts = alerts
         self._clients = {node: client_factory(node) for node in self.nodes}
-        # Last successful snapshot per validator. An unreachable validator keeps
-        # its last snapshot until another successful read confirms its buffer contents.
-        self._last: Dict[Node, Snapshot] = {}
+        self._last: Dict[Node, ValidatorSnapshot] = {}
         self._reachable: Dict[Node, Optional[bool]] = {node: None for node in self.nodes}
         # What the database holds after the last successful write: sig -> is_rejected.
         self._written: Optional[Dict[str, bool]] = None
@@ -192,21 +199,30 @@ class PendingDeploysPoller:
             nodes=[node_label(node) for node in self.nodes],
             interval_seconds=self.interval,
         )
+        consecutive_failures = 0
         while True:
             started = self._clock()
             try:
-                await self.refresh()
-                if self._last_error is not None:
+                reachable = await self.refresh()
+                failure = None if reachable else "No configured validator returned its deploy buffer"
+                if reachable and self._last_error is not None:
                     logger.info("Pending deploys refresh recovered")
                     self._last_error = None
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 pending_refresh_failures.inc()
+                failure = f"Pending deploy refresh raised {type(e).__name__}"
                 message = f"{type(e).__name__}: {e}"
                 if message != self._last_error:
                     logger.error("Pending deploys refresh failed", error=message, exc_info=True)
                     self._last_error = message
+            consecutive_failures = consecutive_failures + 1 if failure else 0
+            if consecutive_failures == settings.sync_stall_threshold and self._alerts is not None:
+                self._alerts.notify(
+                    AlertEvent(AlertKind.PENDING_DEPLOYS_STALLED, failure)
+                    .with_context("consecutive_failures", consecutive_failures)
+                )
             elapsed = self._clock() - started
             pending_refresh_duration.set(elapsed)
             await asyncio.sleep(max(0.0, self.interval - elapsed))
@@ -218,23 +234,27 @@ class PendingDeploysPoller:
             except Exception as e:  # closing must not hide the shutdown reason
                 logger.warning("Failed to close pending deploys client", error=str(e))
 
-    async def refresh(self) -> None:
-        """Read every validator once and store the merged snapshot when it changed."""
+    async def refresh(self) -> int:
+        """Store the current view and return the number of validators that answered."""
         results = await asyncio.gather(*(self._read(node) for node in self.nodes))
+        now = self._clock()
         reachable = 0
         for node, snapshot in zip(self.nodes, results):
             self._mark(node, snapshot is not None)
             if snapshot is not None:
                 reachable += 1
                 self._last[node] = snapshot
+            elif node in self._last and self._last[node].expires_at <= now:
+                del self._last[node]
         merged, total = merge([self._last[node] for node in self.nodes if node in self._last])
         pending_nodes_reachable.set(reachable)
         await self._store(merged, total, reachable)
         if reachable == 0:
             pending_refresh_failures.inc()
         pending_deploys_count.set(len(merged))
+        return reachable
 
-    async def _read(self, node: Node) -> Optional[Snapshot]:
+    async def _read(self, node: Node) -> Optional[ValidatorSnapshot]:
         try:
             data = await self._clients[node].get_pending_deploys(timeout=self.timeout)
         except Exception as e:
@@ -243,7 +263,10 @@ class PendingDeploysPoller:
         if data is None:
             return None
         deploys = tuple(data.get("deploys", []))
-        return Snapshot(deploys, int(data.get("totalAvailable", len(deploys))))
+        return ValidatorSnapshot(
+            deploys, int(data.get("totalAvailable", len(deploys))),
+            expires_at=self._clock() + SNAPSHOT_TTL_SECONDS,
+        )
 
     def _mark(self, node: Node, ok: bool) -> None:
         previous = self._reachable[node]
@@ -252,7 +275,7 @@ class PendingDeploysPoller:
             logger.info("Pending deploys node reachable again", node=node_label(node))
         elif not ok and previous is not False:
             logger.warning(
-                "Pending deploys node unreachable; keeping its last snapshot",
+                "Pending deploys node unreachable",
                 node=node_label(node),
                 has_snapshot=node in self._last,
             )

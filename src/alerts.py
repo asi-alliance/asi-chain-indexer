@@ -65,6 +65,7 @@ class AlertKind(Enum):
     NODE_UNREACHABLE = "node_unreachable"
     DATABASE_UNREACHABLE = "database_unreachable"
     SYNC_STALLED = "sync_stalled"
+    PENDING_DEPLOYS_STALLED = "pending_deploys_stalled"
     CHAIN_REORG_DETECTED = "chain_reorg_detected"
     INDEXER_STOPPED = "indexer_stopped"
     BLOCKS_STUCK = "blocks_stuck"
@@ -78,6 +79,7 @@ _TITLES = {
     AlertKind.NODE_UNREACHABLE: "Node unreachable",
     AlertKind.DATABASE_UNREACHABLE: "Database unreachable",
     AlertKind.SYNC_STALLED: "Sync stalled",
+    AlertKind.PENDING_DEPLOYS_STALLED: "Pending deploy refresh stalled",
     AlertKind.CHAIN_REORG_DETECTED: "Chain reorg detected",
     AlertKind.INDEXER_STOPPED: "Indexer stopped",
     AlertKind.BLOCKS_STUCK: "Block sync stuck",

@@ -516,7 +516,7 @@ Health check includes:
 7. Sleep for SYNC_INTERVAL seconds
 8. Repeat
 
-Pending deploys run as a separate task (`PendingDeploysPoller`), not as a step of this loop. Every `PENDING_DEPLOYS_INTERVAL` (default 1 s) it calls `getPendingDeploys` on each validator in `PENDING_DEPLOYS_NODES` concurrently, merges the buffers by signature (an unreachable validator keeps its last snapshot) and, only when the merged set changes, deletes rows that left the buffers and upserts new rows in one transaction. With an empty `PENDING_DEPLOYS_NODES` the task does not start and the indexer clears the pending rows and state.
+Pending deploys run as a separate task (`PendingDeploysPoller`), not as a step of this loop. Every `PENDING_DEPLOYS_INTERVAL` (default 1 s) it calls `getPendingDeploys` on each validator in `PENDING_DEPLOYS_NODES` concurrently, merges the buffers by signature (a failed read retains its last snapshot until its age reaches 30 seconds) and, only when the merged set changes, deletes rows that left the buffers and upserts new rows in one transaction. With an empty `PENDING_DEPLOYS_NODES` the task does not start and the indexer clears the pending rows and state.
 
 #### Additional Background Tasks
 

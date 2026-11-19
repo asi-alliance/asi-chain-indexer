@@ -522,6 +522,7 @@ What triggers each alert (a "cycle" is one pass of the sync loop, every
 | Node unreachable | The startup health check fails (the process then exits); **or** the node returns no data — no last finalized block, or no blocks for a non-empty range — for `NODE_UNREACHABLE_CYCLES` consecutive cycles; **or** node RPC errors (gRPC / HTTP) fail `SYNC_STALL_THRESHOLD` consecutive cycles |
 | Database unreachable | Database errors — asyncpg errors, SQLAlchemy `OperationalError` / `InterfaceError`, or a network failure reaching Postgres (connection refused, DNS, connect timeout) — fail `SYNC_STALL_THRESHOLD` consecutive cycles |
 | Sync stalled | Any other error fails `SYNC_STALL_THRESHOLD` consecutive cycles |
+| Pending deploy refresh stalled | The pending poller raises an error or reaches zero validators for `SYNC_STALL_THRESHOLD` consecutive refreshes. It requests one notification per outage. A successful refresh reaching any validator rearms it. |
 | Block sync stuck | The sync cursor retries the same failing block for `CURSOR_STUCK_CYCLES` cycles |
 | Sync falling behind | Lag stays above `LAG_ALERT_BLOCKS` for a full window of `LAG_ALERT_CYCLES` cycles without shrinking by `LAG_RECOVERY_RATIO` |
 | Chain reorg detected | A stored height does not contain the node's canonical hash for that height (checked at startup, then every 500 indexed blocks) |

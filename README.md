@@ -357,7 +357,9 @@ seconds (default 1, independent of `SYNC_INTERVAL`), with a
 only until its validator proposes, so a slower read misses most deploys.
 The task merges the buffers by signature and writes `pending_deploys` only
 when the merged set changes; `fetched_at` is the time the indexer first saw
-the deploy. An unreachable validator keeps its last snapshot. The
+the deploy. On each refresh, the poller drops any unreachable validator’s
+snapshot aged 30 seconds or more since its last successful read. Signatures
+still present on another validator remain in the view. The
 `indexer_state` row `pending_deploys_status` holds
 `{"nodes", "reachable", "count", "total_available", "interval_ms"}` and is
 updated on change and on a 10 s heartbeat. Its `updated_at` shows when the
@@ -369,7 +371,14 @@ before the per-node cap of 1000. Metrics: `indexer_pending_deploys`,
 `indexer_pending_deploy_nodes_reachable`. The counter
 `indexer_pending_deploy_refresh_failures_total` increases for a refresh that
 fails or reaches no validators. `indexer_pending_deploy_refresh_duration_seconds`
-measures the last refresh, including database work.
+measures the last refresh, including database work. With Mattermost alerts
+enabled, the poller signals an outage after `SYNC_STALL_THRESHOLD` consecutive
+refreshes that fail or reach zero validators.
+
+During rollout, set `PENDING_DEPLOYS_NODES` to every validator that accepts
+deploys, verify that the indexer can read each external gRPC endpoint, and
+deploy the explorer version that reads `pending_deploys_status` in the same
+rollout. An empty list clears the pending view at startup.
 
 ## API and monitoring
 
