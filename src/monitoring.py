@@ -3,6 +3,7 @@
 from src.time_utils import utc_now
 from typing import Dict, Any, List
 from decimal import Decimal
+import asyncio
 import json
 import time
 
@@ -47,14 +48,39 @@ last_block_height = Gauge(
 sync_duration = Histogram(
     "indexer_sync_duration_seconds",
     "Time taken to sync a batch of blocks",
-    buckets=[0.1, 0.5, 1, 2, 5, 10, 30, 60]
+    buckets=[0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600]
 )
 
 node_request_duration = Histogram(
     "indexer_node_request_duration_seconds",
-    "Time taken for node API requests",
-    buckets=[0.1, 0.25, 0.5, 1, 2, 5]
+    "Time taken for node API requests made by the sync loop, by request",
+    ["request"],
+    buckets=[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10]
 )
+
+block_stage_duration = Histogram(
+    "indexer_block_stage_duration_seconds",
+    "Time taken by each stage of indexing one block",
+    ["stage"],
+    buckets=[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30]
+)
+
+EVENT_LOOP_LAG_INTERVAL = 0.1
+
+event_loop_lag = Histogram(
+    "indexer_event_loop_lag_seconds",
+    "How much later than scheduled a task that sleeps 0.1 s wakes up",
+    buckets=[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5]
+)
+
+
+async def sample_event_loop_lag(interval: float = EVENT_LOOP_LAG_INTERVAL):
+    """Record how late the event loop resumes a sleeping task, until cancelled."""
+    loop = asyncio.get_running_loop()
+    while True:
+        due = loop.time() + interval
+        await asyncio.sleep(interval)
+        event_loop_lag.observe(max(0.0, loop.time() - due))
 
 node_reachable = Gauge(
     "indexer_node_reachable",
@@ -117,6 +143,7 @@ class MonitoringServer:
     def __init__(self, indexer):
         self.indexer = indexer
         self.app = web.Application(middlewares=[observe_request_duration])
+        self._event_loop_lag_task = None
         self._setup_routes()
 
     def _client(self):
@@ -818,6 +845,7 @@ class MonitoringServer:
 
     async def start(self):
         """Start the monitoring server."""
+        self._event_loop_lag_task = asyncio.create_task(sample_event_loop_lag())
         runner = web.AppRunner(self.app)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", settings.monitoring_port)
