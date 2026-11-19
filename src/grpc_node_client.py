@@ -202,7 +202,8 @@ class GrpcNodeClient:
             return None
         url = f"http://{self.node_host}:{self.http_port}/api/balance/{address}"
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout)) as session:
+            timeout = aiohttp.ClientTimeout(total=self.timeout)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(url, allow_redirects=False) as response:
                     if response.status != 200:
                         return None

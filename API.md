@@ -335,10 +335,12 @@ List ASI transfers with pagination and filtering.
 ### GET /api/address/{address}
 
 Look up a full ASI vault address. The indexer asks its configured observer for
-the spendable native balance at the observer's latest finalized block on each
-request. The address can have an empty indexed transfer history.
+the spendable native balance at the observer's latest finalized block. Concurrent
+requests for the same address share an in-flight read. Each subsequent lookup
+reads the observer again. The address can have an empty indexed transfer history.
 `balance` is a decimal string in base units. Use `token_decimals` to display ASI.
-The hash and height identify the block used for that balance.
+`block_hash` and `block_number` identify the observer's finalized block for this
+balance. Its height can be ahead of the transfer history processed by the indexer.
 
 ```json
 {
@@ -353,6 +355,9 @@ The hash and height identify the block used for that balance.
 A confirmed empty vault or valid unused address returns `200` with `"balance": "0"`.
 An invalid address returns `400`. An unavailable or malformed observer snapshot,
 or pending token precision verification during startup, returns `503`.
+Each Indexer process runs up to four different address lookups concurrently.
+When all slots are in use, a lookup for another address returns `503` with
+`Retry-After: 1`.
 
 ### GET /api/address/{address}/transfers
 Get transaction history for a specific address.
