@@ -12,6 +12,7 @@ import asyncpg
 import pytest
 import pytest_asyncio
 
+from src.alerts import AlertKind
 from src.amounts import MAX_AMOUNT
 from src.block_indexer import BlockIndexer
 from src.database import Database
@@ -706,6 +707,206 @@ async def test_missing_parent_rolls_back_and_retry_preserves_completion(ledger, 
     if empty:
         await ledger.add(3, "finish", [("finish", report(events[1:]))], ["child"])
     assert await ledger.conn.fetchval("SELECT amount_dust FROM transfers") == 23
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_sync_recovers_late_ancestors_and_retries_child(ledger):
+    await ledger.add(1, "indexed", [])
+    child, _ = await ledger.add(5, "child", [], ["indexed", "late3"], process=False)
+    late3, _ = await ledger.add(3, "late3", [], ["late2"], process=False)
+    late2, replay = await ledger.add(
+        2, "late2", [("payment", report(payment(23)))], ["indexed"], process=False
+    )
+    await ledger.db.set_last_indexed_block(4)
+    client = ledger.indexer.client
+    bodies = {"child": child, "late3": late3, "late2": late2}
+    client.get_block_details = AsyncMock(side_effect=bodies.get)
+    client.get_blocks_by_height = AsyncMock(return_value=[child["blockInfo"]])
+    client.get_last_finalized_block = AsyncMock(return_value={"blockNumber": 5})
+
+    client.get_block_events.side_effect = ReportUnavailable("Replay unavailable")
+    await ledger.indexer._sync_blocks()
+    assert await ledger.db.get_last_indexed_block() == 4
+    assert await ledger.conn.fetchval("SELECT count(*) FROM blocks") == 1
+
+    client.get_block_events.side_effect = replaying(replay)
+    await ledger.indexer._sync_blocks()
+    assert await ledger.db.get_last_indexed_block() == 5
+    assert await ledger.conn.fetchval("SELECT count(*) FROM blocks") == 4
+    assert await ledger.conn.fetchval("SELECT amount_dust FROM transfers") == 23
+    assert await ledger.conn.fetchval("SELECT count(*) FROM transfers") == 1
+    assert [tuple(row) for row in await ledger.conn.fetch(
+        "SELECT parent_index, parent_hash FROM block_parents "
+        "WHERE block_hash='child' ORDER BY parent_index"
+    )] == [(0, "indexed"), (1, "late3")]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("depth,budget", [(1, 1), (63, 64), (64, 64), (65, 64),
+                                         (130, 16), (130, 64), (130, 128)])
+async def test_recovery_resumes_long_chain_after_worker_restart(ledger, monkeypatch, depth, budget):
+    monkeypatch.setattr("src.block_indexer.settings.ancestor_recovery_steps", budget)
+    monkeypatch.setattr("src.block_indexer.settings.delay_before_node", 0)
+    await ledger.add(1, "anchor", [])
+    bodies = {}
+    parent = "anchor"
+    for height in range(2, depth + 3):
+        block_hash = f"late-{height}"
+        bodies[block_hash], _ = await ledger.add(height, block_hash, [], [parent], process=False)
+        parent = block_hash
+    child = bodies[parent]["blockInfo"]
+    tip = child["blockNumber"]
+    await ledger.db.set_last_indexed_block(tip - 1)
+    client = ledger.indexer.client
+    client.get_block_details = AsyncMock(side_effect=bodies.get)
+    client.get_blocks_by_height = AsyncMock(return_value=[child])
+    client.get_last_finalized_block = AsyncMock(return_value={"blockNumber": tip})
+
+    # Each internal ancestor needs a discovery visit and a write visit. The
+    # anchor is already indexed, so the deepest ancestor takes one visit.
+    expected_visits = 2 * depth
+    cycles = (expected_visits + budget - 1) // budget
+    for cycle in range(cycles):
+        indexer = BlockIndexer()
+        indexer.client = client
+        visit = AsyncMock(wraps=indexer._visit_recovery_block)
+        indexer._visit_recovery_block = visit
+        await indexer._sync_blocks()
+        assert visit.await_count == min(budget, expected_visits - cycle * budget)
+        if cycle < cycles - 1:
+            assert await ledger.db.get_last_indexed_block() == tip - 1
+            path = await ledger.db.get_recovery_path()
+            assert path and all(len(frame) == 3 for frame in path)
+    assert await ledger.db.get_last_indexed_block() == tip
+    assert await ledger.db.get_recovery_path() == []
+    assert await ledger.conn.fetchval("SELECT count(*) FROM blocks") == depth + 2
+    assert await ledger.conn.fetchval("SELECT count(*) FROM block_parents") == depth + 1
+    client.get_block_events.assert_not_awaited()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_recovery_without_transfer_extraction_tracks_deferred_cycles(ledger, monkeypatch):
+    monkeypatch.setattr("src.block_indexer.settings.enable_asi_transfer_extraction", False)
+    monkeypatch.setattr("src.block_indexer.settings.start_from_block", 1)
+    monkeypatch.setattr("src.block_indexer.settings.ancestor_recovery_steps", 1)
+    await ledger.add(1, "anchor", [], ["before-start"])
+    bodies = {}
+    for height, name, parent in [(2, "older", "anchor"), (3, "late", "older"), (4, "child", "late")]:
+        entries = [("payment", report(payment(23)))] if name == "older" else []
+        bodies[name], _ = await ledger.add(height, name, entries, [parent], process=False)
+    await ledger.db.set_last_indexed_block(3)
+    indexer = ledger.indexer
+    client = indexer.client
+    client.get_block_details = AsyncMock(side_effect=bodies.get)
+    client.get_last_finalized_block = AsyncMock(return_value={"blockNumber": 4})
+    client.get_blocks_by_height = AsyncMock(return_value=[bodies["child"]["blockInfo"]])
+    monkeypatch.setattr("src.block_indexer.settings.lag_alert_blocks", 0)
+    monkeypatch.setattr("src.block_indexer.settings.lag_alert_cycles", 3)
+    monkeypatch.setattr("src.block_indexer.settings.cursor_stuck_cycles", 3)
+    alerts = []
+    monkeypatch.setattr(indexer.alerts, "notify", alerts.append)
+    for cycle in range(1, 4):
+        indexer._node_unavailable_cycles = 1
+        await indexer._sync_blocks()
+        assert indexer._stuck_cycles == cycle
+        assert indexer._node_unavailable_cycles == 0
+        assert await ledger.db.get_last_indexed_block() == 3
+    assert {event.kind for event in alerts} == {AlertKind.BLOCKS_STUCK, AlertKind.SYNC_FALLING_BEHIND}
+    await indexer._sync_blocks()
+    assert indexer._stuck_cycles == 0
+    assert await ledger.db.get_last_indexed_block() == 4
+    assert await ledger.conn.fetchval("SELECT count(*) FROM blocks") == 4
+    assert await ledger.conn.fetchval("SELECT count(*) FROM deployments") == 1
+    assert await ledger.conn.fetchval("SELECT count(*) FROM transfers") == 0
+    client.get_block_events.assert_not_awaited()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_recovery_retries_unavailable_branch_and_keeps_shared_parent(ledger, monkeypatch):
+    monkeypatch.setattr("src.block_indexer.settings.ancestor_recovery_steps", 1)
+    await ledger.add(1, "anchor", [])
+    rows = [(2, "shared", ["anchor"]), (3, "left", ["shared"]),
+            (3, "right", ["shared"]), (4, "child", ["left", "right"])]
+    bodies = {}
+    for height, block_hash, parents in rows:
+        bodies[block_hash], _ = await ledger.add(height, block_hash, [], parents, process=False)
+    child = bodies["child"]["blockInfo"]
+    shared = bodies.pop("shared")
+    await ledger.db.set_last_indexed_block(3)
+    client = ledger.indexer.client
+    client.get_block_details = AsyncMock(side_effect=bodies.get)
+    client.get_blocks_by_height = AsyncMock(return_value=[child])
+    client.get_last_finalized_block = AsyncMock(return_value={"blockNumber": 4})
+    for _ in range(3):
+        await ledger.indexer._sync_blocks()
+    path = await ledger.db.get_recovery_path()
+    assert path[-1][0] == "shared"
+    assert await ledger.db.get_last_indexed_block() == 3
+    bodies["shared"] = shared
+    for _ in range(12):
+        await ledger.indexer._sync_blocks()
+        if await ledger.db.get_last_indexed_block() == 4:
+            break
+    assert await ledger.db.get_last_indexed_block() == 4
+    assert await ledger.db.get_recovery_path() == []
+    assert await ledger.conn.fetchval("SELECT count(*) FROM blocks") == 5
+    assert [tuple(r) for r in await ledger.conn.fetch(
+        "SELECT parent_hash, parent_index FROM block_parents WHERE block_hash='child' ORDER BY parent_index"
+    )] == [("left", 0), ("right", 1)]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_siblings_share_cycle_budget_and_saved_child_survives_range_change(ledger, monkeypatch):
+    monkeypatch.setattr("src.block_indexer.settings.ancestor_recovery_steps", 2)
+    await ledger.add(1, "anchor", [])
+    bodies = {}
+    for prefix in ("a", "b"):
+        parent = prefix + "-parent"
+        bodies[parent], _ = await ledger.add(2, parent, [], ["anchor"], process=False)
+        bodies[prefix], _ = await ledger.add(3, prefix, [], [parent], process=False)
+    await ledger.db.set_last_indexed_block(2)
+    client = ledger.indexer.client
+    client.get_last_finalized_block = AsyncMock(return_value={"blockNumber": 3})
+    client.get_blocks_by_height = AsyncMock(return_value=[bodies[k]["blockInfo"] for k in ("a", "b")])
+    client.get_block_details = AsyncMock(side_effect=bodies.get)
+
+    await ledger.indexer._sync_blocks()
+    assert await ledger.db.get_last_indexed_block() == 2
+    assert set(r[0] for r in await ledger.conn.fetch("SELECT block_hash FROM blocks")) == {
+        "anchor", "a-parent", "a"
+    }
+    assert (await ledger.db.get_recovery_path())[0][0] == "b"
+    client.get_blocks_by_height.return_value = [bodies["a"]["blockInfo"]]
+    await ledger.indexer._sync_blocks()
+    assert await ledger.db.get_last_indexed_block() == 3
+    assert await ledger.db.get_recovery_path() == []
+    assert await ledger.conn.fetchval("SELECT count(*) FROM blocks") == 5
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_old_checkpoint_after_commit_skips_already_indexed_work(ledger, monkeypatch):
+    monkeypatch.setattr("src.block_indexer.settings.ancestor_recovery_steps", 1)
+    await ledger.add(1, "anchor", [])
+    await ledger.add(2, "parent", [], ["anchor"])
+    await ledger.add(3, "child", [], ["parent"])
+    await ledger.db.set_last_indexed_block(3)
+    # Crash after committing the child, before clearing the previous checkpoint.
+    await ledger.db.save_recovery_path([("child", 4, True), ("parent", 3, True)])
+    client = ledger.indexer.client
+    client.get_last_finalized_block = AsyncMock(return_value={"blockNumber": 3})
+    client.get_block_details = AsyncMock(side_effect=AssertionError("block already committed"))
+    for _ in range(2):
+        await ledger.indexer._sync_blocks()
+    assert await ledger.db.get_recovery_path() == []
+    assert await ledger.db.get_last_indexed_block() == 3
+    assert await ledger.conn.fetchval("SELECT count(*) FROM block_parents") == 2
+    client.get_block_details.assert_not_awaited()
 
 
 @pytest.mark.integration

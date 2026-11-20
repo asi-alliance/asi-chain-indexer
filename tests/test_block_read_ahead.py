@@ -19,6 +19,9 @@ class FakeDatabase:
         self.last_indexed = last_indexed
         self.set_calls = []
 
+    async def get_recovery_path(self):
+        return []
+
     async def get_last_indexed_block(self):
         return self.last_indexed
 
