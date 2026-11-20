@@ -6,6 +6,8 @@ import pytest
 from src.models import BalanceState, Block, Deployment, Transfer, ValidatorBond
 from src.block_indexer import BlockIndexer
 from src.sync_progress import BlockBatchProgress
+from src.transfer_reports import ReportUnavailable
+from test_node_exact_api import BLOCK_HASH, node_api
 
 
 def test_block_hash_is_the_only_block_primary_key() -> None:
@@ -60,10 +62,48 @@ class FakeSession:
         return 1
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("details,reason", [
+    (None, "Node did not return the requested ancestor"),
+    ({"blockInfo": {"blockHash": "different"}}, "Node did not return the requested ancestor"),
+    ({"blockInfo": {"blockHash": "parent", "blockNumber": 0}}, "Invalid ancestry"),
+    ({"blockInfo": {"blockHash": "parent", "blockNumber": 3, "parentsHashList": ["child"]}},
+     "Invalid ancestry"),
+    ({"blockInfo": {"blockHash": "parent", "blockNumber": 1, "parentsHashList": ["root"],
+                    "deployCount": 1}, "deploys": []}, "Incomplete deployment data"),
+])
+async def test_recovery_rejects_unavailable_or_inconsistent_ancestor(details, reason, monkeypatch):
+    monkeypatch.setattr("src.block_indexer.db", FakeDatabase())
+    monkeypatch.setattr(FakeSession, "scalar", AsyncMock(return_value=None))
+    indexer = BlockIndexer()
+    indexer.client = AsyncMock()
+    indexer.client.get_block_details.return_value = details
+    indexer._process_block = AsyncMock()
+    with pytest.raises(ReportUnavailable, match=f"^{reason}"):
+        await indexer._visit_recovery_block([("child", 4, False), ("parent", 3, False)], {})
+    indexer._process_block.assert_not_awaited()
+    indexer.client.get_block_events.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_recovery_preserves_read_error_if_checkpoint_also_fails(monkeypatch):
+    indexer = BlockIndexer()
+    indexer._visit_recovery_block = AsyncMock(side_effect=ReportUnavailable("missing ancestor"))
+    save = AsyncMock(side_effect=ConnectionError("database unavailable"))
+    monkeypatch.setattr("src.block_indexer.db.save_recovery_path", save)
+    path = [("child", 4, False)]
+    with pytest.raises(ReportUnavailable, match="missing ancestor"):
+        await indexer._recover_path(path, iter(range(1)))
+    save.assert_awaited_once_with(path)
+
+
 class FakeDatabase:
     def __init__(self) -> None:
         self.last_indexed = 9
         self.set_calls: list[int] = []
+
+    async def get_recovery_path(self):
+        return []
 
     async def get_last_indexed_block(self) -> int:
         return self.last_indexed
@@ -136,4 +176,43 @@ async def test_sync_retries_a_failed_sibling_before_advancing(
 
     assert fake_database.last_indexed == 12
     assert fake_database.set_calls == [12]
-    assert indexer._process_block.await_count == 7
+    assert indexer._process_block.await_count == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("replay_available", [False, True])
+async def test_ambiguous_summary_allows_sync_only_after_block_processing(
+    monkeypatch, legacy, replay_available
+):
+    database = FakeDatabase()
+    database.last_indexed = 11
+    monkeypatch.setattr("src.block_indexer.db", database)
+    monkeypatch.setattr("src.block_indexer.settings.start_from_block", 0)
+    monkeypatch.setattr("src.block_indexer.settings.delay_before_node", 0)
+    async with node_api(-1, legacy=legacy, amount_raw="") as node:
+        node.client.get_blocks_by_height = AsyncMock(
+            return_value=[{"blockNumber": 12, "blockHash": BLOCK_HASH}]
+        )
+        indexer = BlockIndexer()
+        indexer.client = node.client
+        indexer._process_block = AsyncMock(
+            side_effect=(
+                None if replay_available else ReportUnavailable("Replay unavailable")
+            )
+        )
+
+        await indexer._sync_blocks()
+        await indexer._sync_blocks()
+
+        if replay_available:
+            assert database.last_indexed == 12
+            assert database.set_calls == [12]
+            assert indexer._process_block.await_count == 1
+        else:
+            assert database.last_indexed == 11
+            assert database.set_calls == []
+            assert indexer._process_block.await_count == 2
+        processed_block = indexer._process_block.call_args.args[0]
+        transfer = processed_block["deploys"][0]["transfers"][0]
+        assert transfer["amountRaw"] is None

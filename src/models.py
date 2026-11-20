@@ -1,14 +1,30 @@
 """Database models for the indexer."""
 
-from datetime import datetime
+from src.time_utils import utc_now
 
 from sqlalchemy import (
     BigInteger, Boolean, Column, DateTime, ForeignKey, Index, Integer,
-    Numeric, String, Text, UniqueConstraint
+    CheckConstraint, Numeric, String, Text, UniqueConstraint
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.types import TypeDecorator
+
+from src.amounts import MAX_AMOUNT, amount, token_decimal
+from src.config import settings
+
+
+class Amount(TypeDecorator):
+    """Store exact raw units and return Python integers from numeric columns."""
+    impl = Numeric(78, 0)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        return None if value is None else amount(value)
+
+    def process_result_value(self, value, dialect):
+        return None if value is None else amount(value)
+
 
 Base = declarative_base()
 
@@ -26,6 +42,10 @@ class Block(Base):
     state_root_hash = Column(String(64))  # New field
     pre_state_hash = Column(String(64))  # New field
     finalization_status = Column(String(20), nullable=False)  # New field
+    token_decimals = Column(
+        Integer, CheckConstraint("token_decimals BETWEEN 0 AND 77"),
+        nullable=False, default=lambda: settings.native_token_decimals,
+    )
     bonds_map = Column(JSONB)  # New field for storing bonds as JSON
     justifications = Column(JSONB)  # New field for storing justifications
     fault_tolerance = Column(Numeric(5, 4))  # New field
@@ -36,7 +56,7 @@ class Block(Base):
     extra_bytes = Column(Text)
     version = Column(Integer)
     deployment_count = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
 
     # Relationships
     deployments = relationship("Deployment", back_populates="block", cascade="all, delete-orphan",
@@ -60,7 +80,7 @@ class BlockParent(Base):
     block_hash = Column(String(64), ForeignKey("blocks.block_hash", ondelete="CASCADE"), primary_key=True)
     parent_hash = Column(String(64), primary_key=True)
     parent_index = Column(Integer, nullable=False, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
 
     # Relationships
     block = relationship("Block", back_populates="parents", foreign_keys=[block_hash])
@@ -84,7 +104,10 @@ class Deployment(Base):
     timestamp = Column(BigInteger, nullable=False, index=True)
     sig = Column(String(160), nullable=False)  # Increased size
     sig_algorithm = Column(String(20), default="secp256k1")
-    phlo_price = Column(BigInteger, default=1)
+    phlo_price = Column(
+        Amount(), CheckConstraint(f"phlo_price >= 0 AND phlo_price <= {MAX_AMOUNT}"),
+        default=1,
+    )
     phlo_limit = Column(BigInteger, default=1000000)
     phlo_cost = Column(BigInteger, default=0)
     valid_after_block_number = Column(BigInteger)
@@ -94,7 +117,7 @@ class Deployment(Base):
     seq_num = Column(Integer)  # New field
     shard_id = Column(String(20))  # New field
     status = Column(String(20), default="included", index=True)  # New field
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
 
     # Relationships
     block = relationship("Block", back_populates="deployments", foreign_keys=[block_hash])
@@ -112,28 +135,86 @@ class Transfer(Base):
 
     __tablename__ = "transfers"
 
+    token_decimals = Column(
+        Integer, CheckConstraint("token_decimals BETWEEN 0 AND 77"),
+        nullable=False, default=lambda: settings.native_token_decimals,
+    )
+
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    deploy_id = Column(String(140), ForeignKey("deployments.deploy_id"), nullable=False, index=True)
-    block_hash = Column(String(64), ForeignKey("blocks.block_hash"), nullable=False, index=True)
-    block_number = Column(BigInteger, nullable=False, index=True)
-    from_address = Column(String(150), nullable=False, index=True)
-    from_public_key = Column(String(150), nullable=True, index=True)  # Support validator public keys
-    to_address = Column(String(150), nullable=False, index=True)  # Support validator public keys
-    amount_dust = Column(BigInteger, nullable=False)
-    amount_asi = Column(Numeric(20, 8), nullable=False)
-    status = Column(String(20), default="success", index=True)
-    timestamp = Column(BigInteger, nullable=False, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    event_index = Column(Integer, nullable=True)
+    native_result_id = Column(String(64), ForeignKey("native_transfer_results.id"), unique=True)
+    deploy_id = Column(String(140), ForeignKey("deployments.deploy_id"), nullable=False)
+    block_hash = Column(String(64), ForeignKey("blocks.block_hash"), nullable=False)
+    block_number = Column(BigInteger, nullable=False)
+    from_address = Column(String(150), nullable=False)
+    from_public_key = Column(String(150), nullable=True)  # Support validator public keys
+    to_address = Column(String(150), nullable=False)  # Support validator public keys
+    amount_dust = Column(
+        Amount(), CheckConstraint(f"amount_dust >= 0 AND amount_dust <= {MAX_AMOUNT}"),
+        nullable=False,
+    )
+    amount_asi = Column(Numeric(155, 77), nullable=False)
+    status = Column(String(20), default="success")
+    timestamp = Column(BigInteger, nullable=False)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
 
     # Relationships
     deployment = relationship("Deployment", back_populates="transfers")
 
+    # The same names and definitions as migrations 000-007
     __table_args__ = (
+        UniqueConstraint("deploy_id", "event_index", name="uq_transfer_event"),
+        Index("idx_transfers_deploy_id", "deploy_id"),
+        Index("idx_transfers_block_hash", "block_hash"),
+        Index("idx_transfers_block_number", block_number.desc()),
         Index("idx_transfers_from", "from_address"),
         Index("idx_transfers_to", "to_address"),
-        Index("idx_transfers_block", "block_number"),
-        Index("idx_transfers_created", "created_at"),
+        Index("idx_transfers_created_at", created_at.desc()),
     )
+
+
+class NativeTransferCall(Base):
+    __tablename__ = "native_transfer_calls"
+
+    id = Column(String(64), primary_key=True)
+    block_hash = Column(String(64), ForeignKey("blocks.block_hash"), nullable=False)
+    deploy_id = Column(String(160), ForeignKey("deployments.deploy_id"), nullable=False)
+    event_index = Column(Integer, CheckConstraint("event_index >= 0"), nullable=False)
+    return_channel = Column(Text, nullable=False, index=True)
+    from_address = Column(Text)
+    to_address = Column(Text)
+    requested_amount = Column(Text, nullable=False)
+    token_decimals = Column(Integer, CheckConstraint("token_decimals BETWEEN 0 AND 77"), nullable=False)
+    timestamp = Column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("block_hash", "deploy_id", "event_index", name="uq_native_call"),
+        Index("ix_native_transfer_call_identity", "deploy_id", "event_index"),
+    )
+
+
+class NativeTransferResult(Base):
+    __tablename__ = "native_transfer_results"
+
+    id = Column(String(64), primary_key=True)
+    call_id = Column(String(64), ForeignKey("native_transfer_calls.id"), nullable=False, index=True)
+    block_hash = Column(String(64), ForeignKey("blocks.block_hash"), nullable=False)
+    deploy_id = Column(String(160), ForeignKey("deployments.deploy_id"), nullable=False)
+    response_index = Column(Integer, CheckConstraint("response_index >= 0"), nullable=False)
+    phase = Column(String(32), nullable=False)
+    success = Column(Boolean, nullable=False)
+    timestamp = Column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("block_hash", "deploy_id", "response_index", name="uq_native_result"),
+    )
+
+
+class NativeTransferResultAlias(Base):
+    __tablename__ = "native_transfer_result_aliases"
+
+    result_id = Column(String(64), ForeignKey("native_transfer_results.id"), primary_key=True)
+    call_id = Column(String(64), ForeignKey("native_transfer_calls.id"), primary_key=True, index=True)
 
 
 class PendingDeploy(Base):
@@ -153,7 +234,10 @@ class PendingDeploy(Base):
     deployer_address = Column(String(150), nullable=False, index=True)
     term = Column(Text, nullable=False)
     timestamp = Column(BigInteger, nullable=False, index=True)
-    phlo_price = Column(BigInteger, default=1)
+    phlo_price = Column(
+        Amount(), CheckConstraint(f"phlo_price >= 0 AND phlo_price <= {MAX_AMOUNT}"),
+        default=1,
+    )
     phlo_limit = Column(BigInteger, default=1000000)
     valid_after_block_number = Column(BigInteger)
     shard_id = Column(String(20))
@@ -163,7 +247,7 @@ class PendingDeploy(Base):
     expiration_timestamp = Column(BigInteger)
     # true = from rejected_deploy_buffer (recovering after merge conflict)
     is_rejected = Column(Boolean, default=False, index=True)
-    fetched_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    fetched_at = Column(DateTime, default=utc_now, nullable=False)
 
     __table_args__ = (
         Index("idx_pending_deploys_deployer", "deployer"),
@@ -177,14 +261,22 @@ class Validator(Base):
 
     __tablename__ = "validators"
 
+    token_decimals = Column(
+        Integer, CheckConstraint("token_decimals BETWEEN 0 AND 77"),
+        nullable=False, default=lambda: settings.native_token_decimals,
+    )
+
     public_key = Column(String(130), primary_key=True)
     name = Column(String(50))
-    total_stake = Column(BigInteger, default=0)
+    total_stake = Column(
+        Amount(), CheckConstraint(f"total_stake >= 0 AND total_stake <= {MAX_AMOUNT}"),
+        default=0,
+    )
     first_seen_block = Column(BigInteger)
     last_seen_block = Column(BigInteger)
     status = Column(String(20), default="bonded", index=True)  # New field: active/bonded/quarantine/inactive
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
 
     # Relationships
     bonds = relationship("ValidatorBond", back_populates="validator")
@@ -195,11 +287,19 @@ class ValidatorBond(Base):
 
     __tablename__ = "validator_bonds"
 
+    token_decimals = Column(
+        Integer, CheckConstraint("token_decimals BETWEEN 0 AND 77"),
+        nullable=False, default=lambda: settings.native_token_decimals,
+    )
+
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     block_hash = Column(String(64), ForeignKey("blocks.block_hash"), nullable=False)
     block_number = Column(BigInteger, nullable=False)
     validator_public_key = Column(String(130), ForeignKey("validators.public_key"), nullable=False)
-    stake = Column(BigInteger, nullable=False)
+    stake = Column(
+        Amount(), CheckConstraint(f"stake >= 0 AND stake <= {MAX_AMOUNT}"),
+        nullable=False,
+    )
 
     # Relationships
     block = relationship("Block", back_populates="validator_bonds", foreign_keys=[block_hash])
@@ -231,7 +331,7 @@ class IndexerState(Base):
 
     key = Column(String(50), primary_key=True)
     value = Column(Text, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, nullable=False)
 
     # Common keys:
     # - last_indexed_block: Last successfully indexed block number
@@ -245,15 +345,26 @@ class BalanceState(Base):
 
     __tablename__ = "balance_states"
 
+    token_decimals = Column(
+        Integer, CheckConstraint("token_decimals BETWEEN 0 AND 77"),
+        nullable=False, default=lambda: settings.native_token_decimals,
+    )
+
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     address = Column(String(150), nullable=False)  # Support both ASI addresses and validator public keys
     block_hash = Column(String(64), ForeignKey("blocks.block_hash", ondelete="CASCADE"), nullable=False)
     block_number = Column(BigInteger, nullable=False)
-    unbonded_balance_dust = Column(BigInteger, nullable=False, default=0)
-    unbonded_balance_asi = Column(Numeric(20, 8), nullable=False, default=0)
-    bonded_balance_dust = Column(BigInteger, nullable=False, default=0)
-    bonded_balance_asi = Column(Numeric(20, 8), nullable=False, default=0)
-    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    unbonded_balance_dust = Column(
+        Amount(), CheckConstraint(f"unbonded_balance_dust >= 0 AND unbonded_balance_dust <= {MAX_AMOUNT}"),
+        nullable=False, default=0,
+    )
+    unbonded_balance_asi = Column(Numeric(155, 77), nullable=False, default=0)
+    bonded_balance_dust = Column(
+        Amount(), CheckConstraint(f"bonded_balance_dust >= 0 AND bonded_balance_dust <= {MAX_AMOUNT}"),
+        nullable=False, default=0,
+    )
+    bonded_balance_asi = Column(Numeric(155, 77), nullable=False, default=0)
+    updated_at = Column(DateTime, default=utc_now, nullable=False)
 
     # Relationships
     block = relationship("Block", backref="balance_states")
@@ -274,7 +385,7 @@ class BalanceState(Base):
     @property
     def total_balance_asi(self):
         """Calculate total balance in ASI."""
-        return self.unbonded_balance_asi + self.bonded_balance_asi
+        return token_decimal(self.total_balance_dust, self.token_decimals, aggregate=True)
 
 
 class EpochTransition(Base):
@@ -288,7 +399,7 @@ class EpochTransition(Base):
     end_block = Column(BigInteger, nullable=False, index=True)
     active_validators = Column(Integer, nullable=False)
     quarantine_length = Column(Integer, nullable=False)
-    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
+    timestamp = Column(DateTime, default=utc_now, nullable=False)
 
     __table_args__ = (
         Index("idx_epoch_blocks", "start_block", "end_block"),
@@ -307,7 +418,7 @@ class NetworkStats(Base):
     validators_in_quarantine = Column(Integer, default=0)
     consensus_participation = Column(Numeric(5, 2), nullable=False)  # Percentage
     consensus_status = Column(String(20), nullable=False)  # healthy/degraded/critical
-    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    timestamp = Column(DateTime, default=utc_now, nullable=False, index=True)
 
     __table_args__ = (
         Index("idx_network_stats_timestamp", "timestamp"),

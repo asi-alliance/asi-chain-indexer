@@ -31,6 +31,10 @@ env/
 .env
 
 # Debug and test files
+.coverage
+.pytest_cache/
+coverage.xml
+test-results.xml
 debug_*.py
 test_*.py
 *_test.py

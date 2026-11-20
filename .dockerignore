@@ -16,3 +16,9 @@ __pycache__
 .mypy_cache
 .coverage
 htmlcov
+
+.venv
+venv
+ENV
+env
+src/grpc_stubs

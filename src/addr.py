@@ -1,11 +1,14 @@
 import hashlib
 import logging
+import re
 from typing import Optional, Dict
 
 import base58
 from Crypto.Hash import keccak
 
 logger = logging.getLogger(__name__)
+VAULT_PREFIX = bytes(4)
+VAULT_ADDRESS = re.compile(r"1111[1-9A-HJ-NP-Za-km-z]{36,50}")
 
 TOKENS = {
     "firecap": {
@@ -13,6 +16,17 @@ TOKENS = {
         "version": "00"
     }
 }
+
+
+def is_valid_vault_address(address: str) -> bool:
+    # Four prefix bytes, a 32-byte key hash and four checksum bytes.
+    if not VAULT_ADDRESS.fullmatch(address):
+        return False
+    decoded = base58.b58decode(address)
+    if len(decoded) != 40 or decoded[:4] != VAULT_PREFIX:
+        return False
+    checksum = hashlib.blake2b(decoded[:-4], digest_size=32).digest()[:4]
+    return decoded[-4:] == checksum
 
 
 def is_likely_public_key(address: str) -> bool:

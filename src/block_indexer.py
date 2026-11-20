@@ -3,28 +3,39 @@
 import asyncio
 import re
 import statistics
-from datetime import datetime
-from decimal import Decimal
+import time
+from datetime import UTC, datetime
+
+from src.time_utils import utc_now
 from typing import Dict, List, Optional
 
 import aiohttp
 import asyncpg
 import grpc
 import structlog
-from sqlalchemy import select, text
+from sqlalchemy import case, delete, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import InterfaceError, OperationalError
 
 from src.addr import convert_to_asi_address, public_key_to_asi_address
 from src.alerts import AlertedError, AlertEvent, AlertKind, AlertService, describe_error
 from src.config import settings
+from src.amounts import amount, token_decimal, integer_json
 from src.database import db
+from src.monitoring import block_stage_duration, sync_duration
+from src.read_cache import read_cache
 from src.models import (
-    Block, BlockParent, Deployment, PendingDeploy, Transfer, Validator, ValidatorBond,
+    Block, BlockParent, Deployment, Transfer, Validator, ValidatorBond,
     EpochTransition, NetworkStats, BalanceState
 )
 from src.grpc_node_client import GrpcNodeClient
+from src.pending_deploys import PendingDeploysPoller, clear_pending_snapshot
 from src.sync_progress import BlockBatchProgress
+from src.transfer_reports import ReportUnavailable
+from src.native_transfers import (
+    MissingParent, reconcile_block, reconcile_completed_duplicates, require_indexed_parents,
+    unindexed_parent_hashes,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -66,32 +77,6 @@ class BlockIndexer:
     # Indexed blocks between main-chain (reorg) verifications
     MAIN_CHAIN_CHECK_INTERVAL = 500
 
-    # Pattern for extracting ASI transfers from Rholang terms
-    TRANSFER_PATTERNS = [
-        # Standard AsiVault transfer pattern with literal address: @vault!("transfer", "address", amount,
-        r'@vault!\s*\(\s*"transfer"\s*,\s*"([0-9a-zA-Z0-9]{52,56})"\s*,\s*(\d+)\s*,',
-        # Variable-based transfer pattern: @vault!("transfer", recipient, amount,
-        r'@vault!\s*\(\s*"transfer"\s*,\s*(\w+)\s*,\s*(\d+)\s*,',
-        # Match pattern with ASI addresses: match ("from", "to", amount)
-        r'match\s*\(\s*"([0-9a-zA-Z0-9]{52,56})"\s*,\s*"([0-9a-zA-Z0-9]{52,57})"\s*,\s*(\d+)\s*\)',
-        # AsiVault findOrCreate pattern
-        r'ASIVault!\s*\(\s*"findOrCreate"\s*,\s*"([0-9a-zA-Z0-9]{52,57})"\s*,\s*(\d+)\s*\)',
-    ]
-
-    # New pattern specifically for the transfer deployments in blocks 365, 377
-    # Simplified pattern that works with the actual Rholang format
-    DIRECT_TRANSFER_PATTERN = r'match \("(1111[^"]+)", "(1111[^"]+)", (\d+)\)'
-
-    # Pattern to extract address assignments from match statements
-    ADDRESS_BINDING_PATTERNS = [
-        # match "address" { varName =>
-        r'match\s*"([0-9a-zA-Z0-9]{52,56})"\s*\{\s*(\w+)\s*=>',
-        # varName = "address"
-        r'(\w+)\s*=\s*"([0-9a-zA-Z0-9]{52,56})"',
-        # match ("from", "to", amount) { (varFrom, varTo, varAmount) =>
-        r'match\s*\(\s*"([0-9a-zA-Z0-9]{52,56})"\s*,\s*"([0-9a-zA-Z0-9]{52,57})"\s*,\s*\d+\s*\)\s*\{\s*\((\w+)\s*,\s*(\w+)\s*,\s*\w+\)\s*=>',
-    ]
-
     @staticmethod
     def classify_deployment(term: str) -> str:
         """Classify deployment type based on Rholang term content."""
@@ -124,6 +109,14 @@ class BlockIndexer:
         self._lag_history: List[int] = []
         self._stuck_height: Optional[int] = None
         self._stuck_cycles = 0
+        # Last finalized height seen by the sync loop. /metrics and /status read
+        # these instead of calling the node on every request. The observation
+        # time is timezone-aware UTC; it is never stored in the database.
+        self.chain_tip: Optional[int] = None
+        self.chain_tip_observed_at: Optional[datetime] = None
+        self.node_reachable = False
+        self.pending_deploys: Optional[PendingDeploysPoller] = None
+        self._pending_task: Optional[asyncio.Task] = None
 
     async def start(self):
         """Start the enhanced indexer."""
@@ -135,6 +128,13 @@ class BlockIndexer:
         logger.info("📊 Connecting to database...")
         await db.connect()
         await db.create_tables()
+        if settings.enable_asi_transfer_extraction:
+            async with db.session() as session:
+                needs_repair = await session.scalar(text(
+                    "SELECT value FROM indexer_state WHERE key = 'native_transfer_backfill_required'"
+                ))
+                if needs_repair == "1":
+                    raise ValueError("Run python -m src.reindex_transfers before starting transfer indexing")
         logger.info("✅ Database connected and tables ready")
 
         # Initialize gRPC node client
@@ -155,7 +155,10 @@ class BlockIndexer:
             )
             raise AlertedError("Cannot connect to node")
 
+        await self.client.require_native_precision(settings.native_token_decimals)
         logger.info("✅ ASI-Chain node connection established")
+
+        await self._start_pending_deploys()
 
         # Get current indexer state
         last_indexed = await db.get_last_indexed_block()
@@ -169,7 +172,6 @@ class BlockIndexer:
             self._cycle_kind = None
             try:
                 await self._sync_blocks()
-                await self._sync_pending_deploys()
                 await self._update_validator_states()
                 await self._check_epoch_transitions()
                 await self._update_network_stats()
@@ -284,6 +286,12 @@ class BlockIndexer:
             .with_context("cycles", self._stuck_cycles)
         )
 
+    def _track_deferred_recovery(self, height, end, path):
+        self._track_cursor(height, end, 1, "Waiting for ancestor recovery")
+        logger.info("Continuing ancestor recovery next cycle", cursor=height,
+                    cycles_at_cursor=self._stuck_cycles, work_items_remaining=len(path),
+                    next_block=path[-1][0])
+
     def _track_lag(self, lag: int):
         """Alert when lag is deep and has stopped shrinking.
 
@@ -314,10 +322,43 @@ class BlockIndexer:
             .with_context("cycles", settings.lag_alert_cycles)
         )
 
+    async def _start_pending_deploys(self):
+        """Start the pending-deploy poller, or clear the pending view when it is off.
+
+        The poller runs beside the sync loop: a deploy stays in a validator's
+        buffer only until that validator's next block, which is shorter than
+        a sync cycle that also indexes blocks.
+        """
+        nodes = settings.pending_deploy_nodes
+        if not nodes:
+            logger.info("Pending deploys disabled: PENDING_DEPLOYS_NODES is empty")
+            await clear_pending_snapshot()
+            return
+        self.pending_deploys = PendingDeploysPoller(
+            nodes,
+            interval=settings.pending_deploys_interval,
+            timeout=settings.pending_deploys_timeout,
+            alerts=self.alerts,
+        )
+        self._pending_task = asyncio.create_task(self.pending_deploys.run(), name="pending-deploys")
+
+    async def _stop_pending_deploys(self):
+        if self._pending_task is not None:
+            self._pending_task.cancel()
+            try:
+                await self._pending_task
+            except asyncio.CancelledError:
+                pass
+            self._pending_task = None
+        if self.pending_deploys is not None:
+            await self.pending_deploys.close()
+            self.pending_deploys = None
+
     async def stop(self):
         """Stop the indexer."""
         logger.info("Stopping enhanced indexer")
         self.running = False
+        await self._stop_pending_deploys()
         await db.disconnect()
 
     async def _sync_blocks(self):
@@ -329,17 +370,34 @@ class BlockIndexer:
             # Get latest finalized block
             last_finalized_data = await self.client.get_last_finalized_block()
             if not last_finalized_data:
+                self.node_reachable = False
                 logger.warning("Could not get last finalized block")
                 self._track_node_availability(False, "could not get last finalized block")
                 return
 
             latest_block_number = last_finalized_data.get("blockNumber")
             if latest_block_number is None:
+                self.node_reachable = False
                 logger.warning("No block number in finalized block data")
                 self._track_node_availability(False, "could not get latest block number")
                 return
 
+            self.chain_tip = latest_block_number
+            self.chain_tip_observed_at = datetime.now(UTC)
+            self.node_reachable = True
+
             self._track_lag(max(0, latest_block_number - last_indexed))
+            steps = iter(range(settings.ancestor_recovery_steps))
+            path = await db.get_recovery_path()
+            if path:
+                try:
+                    if not await self._recover_path(path, steps):
+                        self._track_node_availability(True)
+                        self._track_deferred_recovery(last_indexed, latest_block_number, path)
+                        return
+                except Exception as error:
+                    self._track_cursor(last_indexed, latest_block_number, 1, str(error))
+                    raise
 
             if last_indexed >= latest_block_number:
                 logger.debug("Already up to date", last_indexed=last_indexed, latest=latest_block_number)
@@ -389,43 +447,76 @@ class BlockIndexer:
             processed_count = 0
             skipped = []
             last_skip_error = None
-            for block_summary in block_summaries:
-                block_number = block_summary.get("blockNumber")
-                progress.mark_seen(block_number)
-                try:
-                    # Get full block details
-                    block_hash = block_summary.get("blockHash")
-                    if not block_hash:
-                        logger.warning("Block summary missing hash", block=block_summary)
+            recovery_deferred = False
+            ordered = sorted(block_summaries, key=lambda block: (
+                block.get("blockNumber") if block.get("blockNumber") is not None else -1,
+                block.get("blockHash") or ""
+            ))
+            # Blocks are written one at a time in this order. Up to
+            # block_prefetch later blocks are read meanwhile.
+            reads = {}
+
+            def read_ahead(index):
+                for ahead in range(index, min(index + settings.block_prefetch + 1, len(ordered))):
+                    ahead_hash = ordered[ahead].get("blockHash")
+                    if ahead not in reads and ahead_hash:
+                        reads[ahead] = asyncio.ensure_future(self._read_block(ahead_hash))
+
+            started = time.perf_counter()
+            try:
+                for index, block_summary in enumerate(ordered):
+                    block_number = block_summary.get("blockNumber")
+                    if block_number is not None and block_number > progress.last_completed_height + 1:
+                        break
+                    progress.mark_seen(block_number)
+                    try:
+                        # Get full block details
+                        block_hash = block_summary.get("blockHash")
+                        if not block_hash:
+                            logger.warning("Block summary missing hash", block=block_summary)
+                            progress.mark_failed(block_number)
+                            skipped.append(block_number)
+                            last_skip_error = "block summary missing hash"
+                            continue
+
+                        read_ahead(index)
+                        full_block, traces = await reads.pop(index)
+                        if not full_block:
+                            logger.warning(f"Could not get details for block {block_hash}")
+                            progress.mark_failed(block_number)
+                            skipped.append(block_number)
+                            last_skip_error = "could not get block details"
+                            continue
+
+                        if not await self._process_with_parents(full_block, traces, path, steps):
+                            progress.mark_failed(block_number)
+                            recovery_deferred = True
+                            break
+                        processed_count += 1
+
+                        # Small delay to avoid overwhelming the node
+                        await asyncio.sleep(settings.delay_before_node)
+
+                    except Exception as e:
                         progress.mark_failed(block_number)
+                        logger.error(f"Failed to process block", error=str(e), block=block_summary)
                         skipped.append(block_number)
-                        last_skip_error = "block summary missing hash"
-                        continue
-
-                    full_block = await self.client.get_block_details(block_hash)
-                    if not full_block:
-                        logger.warning(f"Could not get details for block {block_hash}")
-                        progress.mark_failed(block_number)
-                        skipped.append(block_number)
-                        last_skip_error = "could not get block details"
-                        continue
-
-                    await self._process_block(full_block)
-                    processed_count += 1
-
-                    # Small delay to avoid overwhelming the node
-                    await asyncio.sleep(settings.delay_before_node)
-
-                except Exception as e:
-                    progress.mark_failed(block_number)
-                    logger.error(f"Failed to process block", error=str(e), block=block_summary)
-                    skipped.append(block_number)
-                    last_skip_error = describe_error(e)
+                        last_skip_error = describe_error(e)
+                        if path:
+                            break
+            finally:
+                for read in reads.values():
+                    read.cancel()
+                await asyncio.gather(*reads.values(), return_exceptions=True)
+                sync_duration.observe(time.perf_counter() - started)
 
             completed_height = progress.last_completed_height
             if completed_height >= start:
                 await db.set_last_indexed_block(completed_height)
 
+            if recovery_deferred:
+                self._track_deferred_recovery(completed_height, end, path)
+                return
             self._track_cursor(completed_height, end, len(skipped), last_skip_error)
 
             if completed_height < end:
@@ -446,87 +537,129 @@ class BlockIndexer:
             logger.error(f"Sync blocks error: {e}", exc_info=True)
             self._record_cycle_failure(e)
 
-    async def _sync_pending_deploys(self):
-        """Refresh the pending_deploys snapshot from the node's deploy buffers.
+    def _needs_traces(self, block_data: Dict) -> bool:
+        return bool(
+            settings.enable_asi_transfer_extraction
+            and block_data.get("deploys")
+            and block_data.get("blockInfo", {}).get("blockNumber") != 0
+        )
 
-        The node's getPendingDeploys returns the current buffer contents
-        (deploy_storage + rejected-recovery buffer), so the table is fully
-        refreshed (DELETE + INSERT) each cycle to stay consistent. Deploys
-        that get included in a block disappear here and show up in the
-        deployments table with the same sig/deploy_id.
-        """
-        if not settings.enable_pending_deploys_sync:
+    async def _block_traces(self, block_data: Dict):
+        if not self._needs_traces(block_data):
+            return None
+        block_info = block_data["blockInfo"]
+        return await self.client.get_block_events(
+            block_info["blockHash"],
+            [d["sig"] for d in block_data["deploys"]],
+            priority=block_info.get("blockNumber") or 0,
+        )
+
+    async def _read_details(self, block_hash: str):
+        with block_stage_duration.labels("details").time():
+            return await self.client.get_block_details(block_hash)
+
+    async def _read_block(self, block_hash: str):
+        """Read a block and its replay events; they do not depend on the database."""
+        block_data = await self._read_details(block_hash)
+        if not block_data or not self._needs_traces(block_data):
+            return block_data, None
+        async with db.session() as session:
+            indexed = await session.scalar(
+                select(Block.block_hash).where(Block.block_hash == block_hash).limit(1)
+            )
+        if indexed:
+            return block_data, None
+        return block_data, await self._block_traces(block_data)
+
+    async def _process_with_parents(self, block, traces, path, steps):
+        try:
+            await self._process_block(block, traces)
+            return True
+        except MissingParent as missing:
+            # Record the child too: the next range response may omit it.
+            info = block["blockInfo"]
+            block_hash, height = info["blockHash"], info["blockNumber"]
+            path.extend([(block_hash, height + 1, False), (missing.parent_hash, height, False)])
+            supplied = {block_hash: (block, traces)}
+            if missing.details:
+                supplied[missing.parent_hash] = (missing.details, None)
+        return await self._recover_path(path, steps, supplied)
+
+    async def _recover_path(self, path, steps, supplied=None):
+        """Resume a depth-first walk. Frames contain (hash, child height, expanded)."""
+        supplied = supplied or {}
+        try:
+            for _ in steps:
+                await self._visit_recovery_block(path, supplied)
+                if not path:
+                    break
+        except (Exception, asyncio.CancelledError):
+            try:
+                await db.save_recovery_path(path)
+            except Exception:
+                logger.exception("Failed to checkpoint after ancestor recovery error")
+            raise
+
+        await db.save_recovery_path(path)
+        return not path
+
+    async def _visit_recovery_block(self, path, supplied):
+        block_hash, child_height, expanded = path[-1]
+        async with db.session() as session:
+            present = await session.scalar(select(Block.block_hash).where(Block.block_hash == block_hash))
+        if present:
+            # A previous attempt may have committed before saving its checkpoint.
+            path.pop()
             return
 
-        try:
-            data = await self.client.get_pending_deploys()
-            if data is None:
-                # Node unreachable or RPC unavailable (e.g. old node version);
-                # keep the last snapshot rather than wiping it.
-                return
+        block, events = supplied.get(block_hash, (None, None))
+        if block is None:
+            await asyncio.sleep(settings.delay_before_node)
+            block = await self._read_details(block_hash)
+        info = (block or {}).get("blockInfo", {})
+        if info.get("blockHash") != block_hash:
+            raise ReportUnavailable(f"Node did not return the requested ancestor {block_hash}")
+        height = info.get("blockNumber")
+        if type(height) is not int or not 0 <= height < child_height:
+            raise ReportUnavailable(f"Invalid ancestry for recovered block {block_hash}")
+        if len(path) == 1 and height != child_height - 1:
+            raise ReportUnavailable(f"Recovery child height changed for {block_hash}")
+        if height < settings.start_from_block:
+            path.pop()
+            return
+        parents = info.get("parentsHashList")
+        if not height or not parents:
+            raise ReportUnavailable(f"Invalid ancestry for recovered block {block_hash}")
+        deploys = block.get("deploys")
+        if not isinstance(deploys, list) or info.get("deployCount", len(deploys)) != len(deploys):
+            raise ReportUnavailable(f"Incomplete deployment data for ancestor {block_hash}")
 
-            deploys = data.get("deploys", [])
-            total_available = data.get("totalAvailable", len(deploys))
-
+        if not expanded and height > settings.start_from_block:
             async with db.session() as session:
-                await session.execute(text("DELETE FROM pending_deploys"))
+                missing = await unindexed_parent_hashes(session, parents)
+            if missing:
+                # Revisit this block only after its parents are committed.
+                path[-1] = (block_hash, child_height, True)
+                path.extend((parent, height, False) for parent in reversed(missing))
+                return
+        await self._process_block(block, events)
+        path.pop()
 
-                for d in deploys:
-                    sig = d.get("sig", "")
-                    if not sig:
-                        logger.warning("Skipping pending deploy without sig", deployer=d.get("deployer", "")[:20])
-                        continue
+    async def _process_block(self, block_data: Dict, traces=None):
+        """Process a single block with full details.
 
-                    deployer = d.get("deployer", "")
-                    session.add(PendingDeploy(
-                        sig=sig,
-                        deployer=deployer,
-                        deployer_address=convert_to_asi_address(deployer, d),
-                        term=d.get("term", ""),
-                        timestamp=d.get("timestamp", 0),
-                        phlo_price=d.get("phloPrice", 1),
-                        phlo_limit=d.get("phloLimit", 1000000),
-                        valid_after_block_number=d.get("validAfterBlockNumber"),
-                        shard_id=d.get("shardId"),
-                        sig_algorithm=d.get("sigAlgorithm", "secp256k1"),
-                        language=d.get("language"),
-                        # proto 0 = no expiration
-                        expiration_timestamp=d.get("expirationTimestamp") or None,
-                        is_rejected=d.get("isRejected", False),
-                    ))
+        `traces` are the replay events from `_read_block`. When they are None,
+        the events are read here if the block needs them.
+        """
+        try:
+            await self._index_block(block_data, traces)
+        finally:
+            # Any height, including a backfill below the cursor. _index_block
+            # also drops the cache right at its commit; this covers failures.
+            # Dropping the cache again is harmless; missing a commit is not.
+            read_cache.invalidate("block")
 
-                # Persist the pre-cap total so the explorer can detect
-                # truncation (node caps the response at 1000 entries).
-                await session.execute(
-                    text("""
-                         INSERT INTO indexer_state (key, value, updated_at)
-                         VALUES ('pending_deploys_total_available', :value, NOW())
-                         ON CONFLICT (key) DO UPDATE SET value = :value, updated_at = NOW()
-                         """),
-                    {"value": str(total_available)},
-                )
-                await session.commit()
-
-            if len(deploys) < total_available:
-                logger.warning(
-                    "Pending deploys truncated by node cap",
-                    returned=len(deploys),
-                    total_available=total_available,
-                )
-
-            logger.info(
-                "Refreshed pending deploys",
-                count=len(deploys),
-                total_available=total_available,
-                rejected=sum(1 for d in deploys if d.get("isRejected")),
-            )
-
-        except Exception as e:
-            logger.error(f"Failed to sync pending deploys: {e}", exc_info=True)
-            self._record_cycle_failure(e)
-
-    async def _process_block(self, block_data: Dict):
-        """Process a single block with full details."""
+    async def _index_block(self, block_data: Dict, traces=None):
         block_info = block_data.get("blockInfo", {})
         deployments = block_data.get("deploys", [])
 
@@ -545,7 +678,11 @@ class BlockIndexer:
                 logger.debug("Block already indexed", block_number=block_number)
                 return
 
+        if traces is None:
+            traces = await self._block_traces(block_data)
+
         # Process block in transaction
+        write_started = time.perf_counter()
         async with db.session() as session:
             # Extract block data
             parent_hashes = block_info.get("parentsHashList") or []
@@ -561,7 +698,7 @@ class BlockIndexer:
                 state_hash=state_root_hash,
                 state_root_hash=state_root_hash,
                 finalization_status="finalized" if block_info.get("isFinalized") else "unfinalized",
-                bonds_map=bonds_map,
+                bonds_map=integer_json(bonds_map),
                 seq_num=block_info.get("seqNum"),
                 sig=block_info.get("sig"),
                 sig_algorithm=block_info.get("sigAlgorithm"),
@@ -589,33 +726,52 @@ class BlockIndexer:
 
             # Process deployments with enhanced data
             for deploy_data in deployments:
-                await self._process_deployment_enhanced(session, block_info, deploy_data)
+                await self._process_deployment_enhanced(
+                    session, block_info, deploy_data, store_transfers=False
+                )
+
+            if traces is not None:
+                movements = await reconcile_block(session, block_info, deployments, traces, self.client)
+                for deploy_data in deployments:
+                    deploy_data["executedTransfers"] = movements[deploy_data["sig"]]
+                    await self._store_transfers(session, block_info, deploy_data)
+            elif block_number != 0:
+                await require_indexed_parents(session, block_info, self.client)
+
+            if settings.enable_asi_transfer_extraction and block_number != 0:
+                await reconcile_completed_duplicates(session, block_info)
 
             # Process genesis transfers if this is block 0
             if block_number == 0:
                 # Ensure bonds are included in the block_info for genesis processing
                 genesis_block_info = dict(block_info)
                 genesis_block_info['bonds'] = bonds_map
+                genesis_block_info['deploys'] = deployments
                 await self._process_genesis_transfers(session, genesis_block_info)
                 await self._process_genesis_balance_states(session, genesis_block_info)
 
             await session.commit()
+            block_stage_duration.labels("write").observe(time.perf_counter() - write_started)
+            # Blocks, deployments and transfers changed: drop cached reads now,
+            # not after the block_validators write below, which can wait on locks
+            read_cache.invalidate("block")
 
             # Process block validators from justifications
             if justifications:
-                async with db.session() as validator_session:
-                    for justification in justifications:
-                        validator_key = justification.get("validator", "")
-                        if validator_key:
-                            await validator_session.execute(
-                                text("""
-                                     INSERT INTO block_validators (block_hash, validator_public_key)
-                                     VALUES (:block_hash, :validator_key)
-                                     ON CONFLICT DO NOTHING
-                                     """),
-                                {"block_hash": block_hash, "validator_key": validator_key}
-                            )
-                    await validator_session.commit()
+                with block_stage_duration.labels("validators").time():
+                    async with db.session() as validator_session:
+                        for justification in justifications:
+                            validator_key = justification.get("validator", "")
+                            if validator_key:
+                                await validator_session.execute(
+                                    text("""
+                                         INSERT INTO block_validators (block_hash, validator_public_key)
+                                         VALUES (:block_hash, :validator_key)
+                                         ON CONFLICT DO NOTHING
+                                         """),
+                                    {"block_hash": block_hash, "validator_key": validator_key}
+                                )
+                        await validator_session.commit()
 
         # Special logging for genesis block
         if block_number == 0:
@@ -635,7 +791,8 @@ class BlockIndexer:
                 timestamp=datetime.fromtimestamp(block_info.get("timestamp", 0) / 1000)
             )
 
-    async def _process_deployment_enhanced(self, session, block_data: Dict, deploy_data: Dict):
+    async def _process_deployment_enhanced(self, session, block_data: Dict, deploy_data: Dict,
+                                         *, store_transfers=True):
         """Process a deployment; deploy_data already has everything from the block response."""
         deploy_id = deploy_data.get("sig")
         if not deploy_id:
@@ -666,7 +823,7 @@ class BlockIndexer:
             timestamp=deploy_data.get("timestamp", block_data.get("timestamp")),
             sig=deploy_data.get("sig"),
             sig_algorithm=deploy_data.get("sigAlgorithm", "secp256k1"),
-            phlo_price=deploy_data.get("phloPrice", 1),
+            phlo_price=amount(deploy_data.get("phloPrice", 1)),
             phlo_limit=deploy_data.get("phloLimit", 1000000),
             phlo_cost=deploy_data.get("cost", 0),
             valid_after_block_number=deploy_data.get("validAfterBlockNumber"),
@@ -705,56 +862,24 @@ class BlockIndexer:
             await session.flush()  # surface FK/NOT NULL issues early
         except Exception as e:
             logger.warning("deployment upsert failed", deploy_id=deploy_id, err=str(e))
+            raise
 
-        if not settings.enable_asi_transfer_extraction:
+        if not store_transfers or not settings.enable_asi_transfer_extraction:
             return
 
-        transfers = self._extract_transfers(deploy_data, block_data.get("blockNumber"))
-        if not transfers:
-            return
+        if block_data["blockNumber"] == 0:
+            return  # genesis issuance is handled separately
+        await self._store_transfers(session, block_data, deploy_data)
 
-        logger.info("📤 Found transfers", count=len(transfers), deploy=deploy_id[:16] + "...")
-
-        # Load existing transfers for this deploy_id to avoid inserting duplicates
-        existing_rows = await session.execute(
-            select(Transfer.from_address, Transfer.to_address, Transfer.amount_dust, Transfer.block_number)
-            .where(Transfer.deploy_id == deploy_id)
-        )
-        existing_set = {
-            (row[0], row[1], int(row[2]), int(row[3]))
-            for row in existing_rows.fetchall()
-        }
-
-        # Insert only new transfers (pure Python dedup, no unique index required)
-        for t in transfers:
-            key = (t.from_address, t.to_address, int(t.amount_dust), int(t.block_number))
-            if key in existing_set:
-                continue
-            try:
-                # ORM insert is fine here (PK is auto-generated 'id')
-                session.add(Transfer(
-                    deploy_id=t.deploy_id,
-                    block_hash=block_data.get("blockHash"),
-                    block_number=t.block_number,
-                    from_address=t.from_address,
-                    from_public_key=t.from_public_key,
-                    to_address=t.to_address,
-                    amount_dust=t.amount_dust,
-                    amount_asi=t.amount_asi,
-                    status=t.status,
-                    timestamp=t.timestamp,
-                ))
-                # optionally: await session.flush()
-                existing_set.add(key)  # keep the set in sync within this run
-            except Exception as e:
-                logger.warning(
-                    "transfer insert failed",
-                    deploy_id=deploy_id,
-                    from_addr=t.from_address[:16],
-                    to_addr=t.to_address[:16],
-                    amount=t.amount_dust,
-                    err=str(e),
-                )
+    async def _store_transfers(self, session, block_data, deploy_data):
+        # Replace this deploy's old inferred rows atomically. This also makes
+        # historical repair, restart and a deploy in multiple DAG blocks idempotent.
+        transfers = self._extract_transfers(deploy_data, block_data["blockNumber"],
+                                           block_data.get("token_decimals", settings.native_token_decimals))
+        await session.execute(delete(Transfer).where(Transfer.deploy_id == deploy_data["sig"]))
+        for transfer in transfers:
+            transfer.block_hash = block_data["blockHash"]
+            session.add(transfer)
 
     async def _update_validator_states(self):
         """Update validator states from the node's bonds (gRPC) and active validators (HTTP)."""
@@ -765,48 +890,70 @@ class BlockIndexer:
                 return
 
             bonds = bonds_data.get("bonds", [])
+            if not bonds:
+                logger.warning("Finalized block has no bonds; keeping stored validator statuses")
+                return
 
             # Get active validators
             active_validators = await self.client.get_active_validators()
             if active_validators is None:
-                active_validators = []
+                logger.warning("Refreshing stakes without active validator membership")
+            active_keys = (
+                {validator["validator"] for validator in active_validators}
+                if active_validators is not None else None
+            )
+            current_block = await db.get_last_indexed_block()
 
             async with db.session() as session:
                 # Update validator records
                 for bond in bonds:
                     validator_key = bond["validator"]
                     stake = bond["stake"]
-                    is_active = validator_key in active_validators
-
-                    # Get current block number for tracking
-                    current_block = await db.get_last_indexed_block()
+                    status = (
+                        "active" if active_keys is not None and validator_key in active_keys
+                        else "bonded"
+                    )
 
                     stmt = insert(Validator).values(
                         public_key=validator_key,
                         name=validator_key,
                         total_stake=stake,
+                        token_decimals=settings.native_token_decimals,
                         first_seen_block=current_block,
                         last_seen_block=current_block,
-                        status="active" if is_active else "bonded",
-                        updated_at=datetime.utcnow()
+                        status=status,
+                        updated_at=utc_now()
                     )
                     stmt = stmt.on_conflict_do_update(
                         index_elements=["public_key"],
                         set_={
                             "total_stake": stake,
+                            "token_decimals": stmt.excluded.token_decimals,
                             "last_seen_block": current_block,
-                            "status": "active" if is_active else "bonded",
-                            "updated_at": datetime.utcnow()
+                            "status": status if active_keys is not None else case(
+                                (Validator.status == "inactive", "bonded"),
+                                else_=Validator.status,
+                            ),
+                            "updated_at": utc_now()
                         }
                     )
                     await session.execute(stmt)
+
+                await session.execute(
+                    update(Validator)
+                    .where(
+                        Validator.public_key.not_in([bond["validator"] for bond in bonds]),
+                        Validator.status.is_distinct_from("inactive"),
+                    )
+                    .values(status="inactive", updated_at=utc_now())
+                )
 
                 await session.commit()
 
             logger.info(
                 "Updated validator states",
                 total_bonded=len(bonds),
-                active=len(active_validators)
+                active=len(active_validators) if active_validators is not None else None
             )
 
         except Exception as e:
@@ -862,7 +1009,7 @@ class BlockIndexer:
                         end_block=epoch_end,
                         active_validators=active_count,
                         quarantine_length=quarantine_length,
-                        timestamp=datetime.utcnow()
+                        timestamp=utc_now()
                     )
                     session.add(epoch_transition)
                     await session.commit()
@@ -902,7 +1049,7 @@ class BlockIndexer:
                     validators_in_quarantine=consensus.get("validators_in_quarantine", 0),
                     consensus_participation=consensus.get("participation_rate", 0.0),
                     consensus_status=consensus.get("status", "unknown"),
-                    timestamp=datetime.utcnow()
+                    timestamp=utc_now()
                 )
                 session.add(network_stat)
                 await session.commit()
@@ -965,6 +1112,8 @@ class BlockIndexer:
             )
 
             if mismatches:
+                # Cached reads may describe the abandoned branch
+                read_cache.invalidate("reorg")
                 logger.warning(
                     "Main chain mismatch detected",
                     heights=[block_num for block_num, _ in mismatches],
@@ -1000,17 +1149,21 @@ class BlockIndexer:
             # First ensure validator exists in validators table
             result = await session.execute(
                 text("""
-                     INSERT INTO validators (public_key, name, total_stake, status, first_seen_block, last_seen_block)
-                     VALUES (:public_key, :name, :stake, 'active', :block_number,
+                     INSERT INTO validators (public_key, name, total_stake, token_decimals, status, first_seen_block, last_seen_block)
+                     VALUES (:public_key, :name, :stake, :token_decimals, 'bonded', :block_number,
                              :block_number)
-                     ON CONFLICT (public_key) DO UPDATE SET total_stake     = GREATEST(validators.total_stake, :stake),
-                                                            last_seen_block = :block_number,
-                                                            status          = 'active'
+                     ON CONFLICT (public_key) DO UPDATE SET total_stake = CASE
+                         WHEN validators.token_decimals = EXCLUDED.token_decimals
+                         THEN GREATEST(validators.total_stake, EXCLUDED.total_stake)
+                         ELSE EXCLUDED.total_stake END,
+                                                            token_decimals = EXCLUDED.token_decimals,
+                                                            last_seen_block = :block_number
                      """),
                 {
                     "public_key": validator_key,
                     "name": validator_key[:20] + "...",  # Short name for display
-                    "stake": stake,
+                    "stake": amount(stake),
+                    "token_decimals": settings.native_token_decimals,
                     "block_number": block_data["blockNumber"]
                 }
             )
@@ -1024,338 +1177,62 @@ class BlockIndexer:
             )
             session.add(bond)
 
-    def _extract_transfers(self, deploy_data: Dict, block_number: int) -> List[Transfer]:
-        """Extract ASI transfers from deployment term."""
-        transfers = []
-        term = deploy_data.get("term", "")
+    def _extract_transfers(self, deploy_data: Dict, block_number: int, decimals=None) -> List[Transfer]:
+        """Only movements proved by the native replay trace are transfers."""
+        if "executedTransfers" not in deploy_data:
+            raise ValueError("Missing executed transfer report")
+        decimals = settings.native_token_decimals if decimals is None else decimals
+        return [Transfer(
+            deploy_id=deploy_data["sig"], block_number=block_number,
+            event_index=movement["event_index"],
+            native_result_id=movement.get("native_result_id"),
+            from_address=movement["from_address"], to_address=movement["to_address"],
+            from_public_key=(deploy_data.get("deployer") if
+                convert_to_asi_address(deploy_data.get("deployer", ""), deploy_data) == movement["from_address"] else None),
+            amount_dust=movement["amount"],
+            amount_asi=token_decimal(movement["amount"], movement.get("token_decimals", decimals)),
+            token_decimals=movement.get("token_decimals", decimals),
+            status="success", timestamp=movement.get("timestamp", deploy_data["timestamp"]),
+        ) for movement in deploy_data["executedTransfers"]]
 
-        # Log first 200 chars of term for debugging
-        if term and block_number < 10:  # Only log first few blocks
-            logger.debug(f"Deploy term preview: {term[:200]}...")
-
-        # Check if term contains AsiVault operations or match statements with addresses
-        if not term:
-            return transfers
-
-        # Check for direct transfer pattern first (blocks 365, 377 style)
-        direct_matches = re.findall(self.DIRECT_TRANSFER_PATTERN, term)
-        # if block_number in [365, 377]:
-        #     logger.info(f"Block {block_number}: Pattern search result: {len(direct_matches)} matches found")
-        if direct_matches:
-            for match in direct_matches:
-                try:
-                    from_any, to_address, amount_str = match
-                    from_public_key = ''
-                    # Validate addresses (ASI addresses can be 52-57 characters)
-                    if from_any.startswith('1111') and len(from_any) > 51:
-                        from_address = from_any
-                    else:
-                        from_public_key = from_any
-                        from_address = public_key_to_asi_address(from_any)
-
-                    amount_dust = int(amount_str)
-                    if amount_dust > 0:
-                        amount_asi = Decimal(amount_dust) / Decimal(100_000_000)
-
-                        transfer = Transfer(
-                            deploy_id=deploy_data.get("sig"),
-                            timestamp=deploy_data.get("timestamp", 0),
-                            block_number=block_number,
-                            from_address=from_address[:150],
-                            from_public_key=from_public_key[:150],
-                            to_address=to_address[:150],
-                            amount_dust=amount_dust,
-                            amount_asi=amount_asi,
-                            status="success" if not deploy_data.get("errored") else "failed"
-                        )
-                        transfers.append(transfer)
-
-                        logger.info(
-                            "💸 Found direct ASI transfer",
-                            block=block_number,
-                            from_address=from_any[:20] + "...",
-                            to_address=to_address[:20] + "...",
-                            amount_asi=float(amount_asi)
-                        )
-                except (ValueError, IndexError) as e:
-                    logger.warning(f"Failed to parse direct transfer: {e}")
-
-        # If we found direct transfers, return them immediately
-        if transfers:
-            return transfers
-
-        # Otherwise check other patterns if the term contains AsiVault operations
-        if ("ASIVault" not in term and "transfer" not in term) and ("vault" not in term.lower()):
-            return transfers
-
-        # First, extract address bindings from the term
-        address_bindings = {}
-
-        # Debug logging for block 334
-        # if block_number == 334:
-        #     logger.info("Analyzing block 334 deployment", term_length=len(term))
-
-        for pattern in self.ADDRESS_BINDING_PATTERNS:
-            matches = re.findall(pattern, term)
-            for match in matches:
-                if len(match) == 2:
-                    # Could be (address, var) or (var, address) depending on pattern
-                    if match[0].startswith('1111') and len(match[0]) in range(52, 57):
-                        # First element is address
-                        address_bindings[match[1]] = match[0]
-                    elif match[1].startswith('1111') and len(match[1]) in range(52, 57):
-                        # Second element is address
-                        address_bindings[match[0]] = match[1]
-                elif len(match) == 4:
-                    # New pattern: (fromAddr, toAddr, fromVar, toVar)
-                    if match[0].startswith('1111') and match[1].startswith('1111'):
-                        address_bindings[match[2]] = match[0]  # fromVar = fromAddr
-                        address_bindings[match[3]] = match[1]  # toVar = toAddr
-                        # if block_number == 334:
-                        #     logger.info("Found address bindings in block 334", bindings=address_bindings)
-
-        # Try each transfer pattern
-        for pattern in self.TRANSFER_PATTERNS:
-            matches = re.findall(pattern, term)
-
-            # Log pattern matches for debugging
-            if matches and block_number > 330:
-                logger.info(f"Pattern match found", pattern=pattern[:50], matches=matches[:2])
-
-            for match in matches:
-                try:
-                    if len(match) == 2:
-                        # Pattern with just recipient and amount
-                        to_identifier, amount_str = match
-                        from_address = deploy_data.get("deployer", deploy_data.get("sender", ""))
-
-                        # Check if to_identifier is a variable that we have a binding for
-                        if to_identifier in address_bindings:
-                            to_address = address_bindings[to_identifier]
-                        elif to_identifier.startswith('1111') and len(to_identifier) in range(52, 57):
-                            # It's already an address
-                            to_address = to_identifier
-                        else:
-                            # Skip if we can't resolve the address
-                            continue
-
-                    elif len(match) == 3:
-                        # Pattern with sender, recipient, and amount
-                        from_identifier, to_identifier, amount_str = match
-
-                        # Resolve from address
-                        if from_identifier in address_bindings:
-                            from_address = address_bindings[from_identifier]
-                        elif from_identifier.startswith('1111') and len(from_identifier) in range(52, 57):
-                            from_address = from_identifier
-                        else:
-                            from_address = deploy_data.get("deployer", deploy_data.get("sender", ""))
-
-                        # Resolve to address
-                        if to_identifier in address_bindings:
-                            to_address = address_bindings[to_identifier]
-                        elif to_identifier.startswith('1111') and len(to_identifier) in range(52, 57):
-                            to_address = to_identifier
-                        else:
-                            continue
-                    else:
-                        continue
-
-                    # Validate addresses
-                    if not from_address or not to_address:
-                        continue
-
-                    if len(from_address) > 150 or len(to_address) > 150:
-                        logger.error(
-                            "Skipping transfer with invalid address length",
-                            from_len=len(from_address),
-                            to_len=len(to_address)
-                        )
-                        continue
-
-                    # Parse amount
-                    amount_dust = int(amount_str)
-                    if amount_dust <= 0:
-                        continue
-
-                    amount_asi = Decimal(amount_dust) / Decimal(100_000_000)
-
-                    from_addr = convert_to_asi_address(from_address, deploy_data)
-
-                    # Create transfer record
-                    transfer = Transfer(
-                        timestamp=deploy_data["timestamp"],
-                        deploy_id=deploy_data.get("sig"),
-                        block_number=block_number,
-                        from_address=from_addr[:150],  # Use 150 char limit as per schema
-                        from_public_key=from_address[:150],  # Use 150 char limit as per schema
-                        to_address=to_address[:150],
-                        amount_dust=amount_dust,
-                        amount_asi=amount_asi,
-                        status="success" if not deploy_data.get("errored") else "failed"
-                    )
-                    transfers.append(transfer)
-
-                    logger.info(
-                        "💸 Found ASI transfer",
-                        from_address=from_addr[:20] + "...",
-                        to_address=to_address[:20] + "...",
-                        amount_asi=float(amount_asi)
-                    )
-
-                except (ValueError, IndexError) as e:
-                    logger.warning(
-                        "Failed to parse transfer",
-                        pattern=pattern,
-                        match=match,
-                        error=str(e)
-                    )
-
-        return transfers
-
-    async def _extract_genesis_data(self, block_info: Dict) -> Optional[Dict]:
-        """Extract genesis allocations and bonds from the genesis block dynamically."""
-        # Use cached data if available
+    async def _extract_genesis_data(self, block_info: Dict) -> Dict:
+        """Read the immutable genesis generator and that block's bonds only."""
         if self._genesis_data_cache is not None:
             return self._genesis_data_cache
-
-        try:
-            logger.info("🔍 Extracting genesis data from blockchain...")
-
-            # For network-agnostic approach, we extract from blockchain state
-            # rather than parsing deployments which may vary by network
-            return await self._extract_genesis_from_state(block_info)
-
-            allocations = []
-            bonds = []
-
-            # Parse each deployment to extract initial allocations and bonds
-            for deploy in genesis_deployments:
-                deploy_term = deploy.get('term', '')
-
-                # Look for AsiVault initialization patterns
-                if 'initVault' in deploy_term or 'ASIVault' in deploy_term:
-                    # Extract ASI address and amount using regex
-                    # Pattern: initVault!("address", amount)
-                    import re
-                    vault_pattern = r'initVault!\s*\(\s*"([^"]+)"\s*,\s*(\d+)\s*\)'
-                    matches = re.findall(vault_pattern, deploy_term)
-
-                    for address, amount_str in matches:
-                        if address.startswith('1111'):  # ASI addresses start with 1111
-                            amount_dust = int(amount_str)
-                            amount_asi = amount_dust / 100000000  # Convert dust to ASI
-                            allocations.append((address, amount_dust, amount_asi))
-                            logger.info(f"Found genesis allocation: {address} -> {amount_asi} ASI")
-
-                # Look for PoS initialization patterns for bonds
-                elif 'PoS' in deploy_term or 'bond' in deploy_term.lower():
-                    # Extract validator public key and bond amount
-                    # Look for patterns like: (pubkey, amount) in the deployment
-                    bond_pattern = r'\(([0-9a-fA-F]{130}),\s*(\d+)\)'
-                    matches = re.findall(bond_pattern, deploy_term)
-
-                    for pubkey, amount_str in matches:
-                        amount_dust = int(amount_str)
-                        amount_asi = amount_dust / 100000000
-                        bonds.append((pubkey, amount_dust, amount_asi))
-                        logger.info(f"Found genesis bond: {pubkey[:20]}... -> {amount_asi} ASI")
-
-            # If we couldn't parse from deployments, try to get from initial state
-            if not allocations and not bonds:
-                logger.warning("Could not parse genesis data from deployments, trying alternative method...")
-
-                # Get initial validator bonds from the blockchain state
-                initial_bonds = await self.client.get_active_validators()
-                if initial_bonds:
-                    for validator in initial_bonds:
-                        pubkey = validator.get('validator')
-                        stake = validator.get('stake', 0)
-                        if pubkey and stake > 0:
-                            bonds.append((pubkey, stake, stake / 100000000))
-                            logger.info(f"Found validator bond: {pubkey[:20]}... -> {stake / 100000000} ASI")
-
-                # For allocations, we might need to query initial balances
-                # This is network-specific and might require additional logic
-                logger.info("Note: Initial ASI allocations may need to be discovered through balance queries")
-
-            # Cache the result
-            self._genesis_data_cache = {
-                'allocations': allocations,
-                'bonds': bonds
-            }
-            return self._genesis_data_cache
-
-        except Exception as e:
-            logger.error(f"Failed to extract genesis data: {e}")
-            return None
-
-    async def _extract_genesis_from_state(self, block_info: Dict) -> Optional[Dict]:
-        """Extract genesis data from blockchain state as fallback."""
-        try:
-            logger.info("📊 Extracting genesis data from blockchain state...")
-
-            allocations = []
-            bonds = []
-
-            # Step 1: Get bonds from the block_info passed to us (which has bonds_map)
-            if 'bonds' in block_info:
-                # bonds is already parsed from bonds_map JSONB column
-                for bond in block_info['bonds']:
-                    validator_key = bond.get('validator')
-                    stake = bond.get('stake', 0)
-                    if validator_key and stake > 0:
-                        bonds.append((validator_key, stake, stake / 100000000))
-                        logger.info(f"Found validator bond: {validator_key[:20]}... -> {stake / 100000000} ASI")
-            else:
-                # Try to get from client if not in block_info
-                try:
-                    blocks = await self.client.get_blocks_by_height(0, 0)
-                    if blocks and len(blocks) > 0:
-                        genesis_block = blocks[0]
-                        if 'bonds' in genesis_block:
-                            for bond in genesis_block['bonds']:
-                                validator_key = bond.get('validator')
-                                stake = bond.get('stake', 0)
-                                if validator_key and stake > 0:
-                                    bonds.append((validator_key, stake, stake / 100000000))
-                                    logger.info(
-                                        f"Found validator bond: {validator_key[:20]}... -> {stake / 100000000} ASI")
-                except Exception as e:
-                    logger.warning(f"Could not get bonds from genesis block: {e}")
-
-            # Step 2: If no bonds in genesis block, ask the node directly
-            if not bonds:
-                try:
-                    bonds_data = await self.client.get_bonds()
-                    for bond in (bonds_data or {}).get("bonds", []):
-                        validator_key = bond.get("validator")
-                        stake = bond.get("stake", 0)
-                        if validator_key and stake > 0:
-                            bonds.append((validator_key, stake, stake / 100000000))
-                            logger.info(f"Found validator bond: {validator_key[:20]}... -> {stake / 100000000} ASI")
-                except Exception as e:
-                    logger.error(f"Error getting validator bonds: {e}")
-
-            # For a network-agnostic approach, we can try to detect initial allocations
-            # by looking at the first few blocks for large transfers from genesis
-            logger.info("Note: Initial ASI allocations will be discovered as transfers are processed")
-
-            # Cache the result
-            self._genesis_data_cache = {
-                'allocations': allocations,
-                'bonds': bonds
-            }
-            return self._genesis_data_cache
-
-        except Exception as e:
-            logger.error(f"Failed to extract genesis from state: {e}", exc_info=True)
-            return None
+        decimals = block_info.get("token_decimals", settings.native_token_decimals)
+        allocations = []
+        for deploy in block_info.get("deploys", []):
+            term = deploy.get("term", "")
+            # Limit parsing to the standard VaultsGenerator initialization list.
+            # Do not scan arbitrary contracts, comments or current wallet balances.
+            if deploy.get("errored") or 'initVault!(*vault, addr, initialBalance)' not in term:
+                continue
+            term = re.sub(r'/\*.*?\*/|//[^\n]*', '', term, flags=re.S)
+            for match in re.finditer(r'match\s*\[(.*?)\]\s*\{\s*vaults\s*=>', term, re.S):
+                entries = re.findall(r'\(\s*"([1-9A-HJ-NP-Za-km-z]{50,60})"\s*,\s*(\d+)n?\s*\)', match[1])
+                if not entries:
+                    raise ValueError("Unsupported genesis vault allocation list")
+                for address, raw in entries:
+                    raw = amount(int(raw))
+                    allocations.append((address, raw, token_decimal(raw, decimals)))
+        seen = {}
+        for address, raw, _ in allocations:
+            if address in seen and seen[address] != raw:
+                raise ValueError("Ambiguous genesis allocations for repeated address")
+            seen[address] = raw
+        bonds = []
+        for bond in block_info.get("bonds", []):
+            raw = amount(bond["stake"])
+            if raw:
+                bonds.append((bond["validator"], raw, token_decimal(raw, decimals)))
+        self._genesis_data_cache = {"allocations": allocations, "bonds": bonds}
+        return self._genesis_data_cache
 
     async def _process_genesis_transfers(self, session, block_info: Dict):
         """Process genesis transfers for initial ASI allocations and validator bonds."""
         logger.info("💰 Processing genesis transfers and validator bonds")
 
+        decimals = block_info.get("token_decimals", settings.native_token_decimals)
         # Extract genesis data dynamically
         genesis_data = await self._extract_genesis_data(block_info)
 
@@ -1376,9 +1253,8 @@ class BlockIndexer:
                 block_number=0,
                 block_hash=block_info.get("blockHash"),
                 deployer="0000000000000000000000000000000000000000000000000000000000000000",
-                deployer_address=public_key_to_asi_address(
-                    "0000000000000000000000000000000000000000000000000000000000000000"),
-                term=f"Genesis ASI allocation to {address}: {amount_asi:,.0f} ASI",
+                deployer_address="genesis",
+                term=f"Genesis ASI allocation to {address}: {amount_asi:f} ASI",
                 timestamp=block_info.get("timestamp"),
                 sig=deploy_id,
                 deployment_type="genesis_mint",
@@ -1389,14 +1265,14 @@ class BlockIndexer:
 
             # Create genesis allocation transfer
             transfer = Transfer(
+                token_decimals=decimals, event_index=0,
                 timestamp=block_info.get("timestamp", 0),
                 deploy_id=deploy_id,
                 block_hash=block_info.get("blockHash"),
                 block_number=0,
                 # Genesis mint
-                from_address=public_key_to_asi_address(
-                    "0000000000000000000000000000000000000000000000000000000000000000"),
-                from_public_key="0000000000000000000000000000000000000000000000000000000000000000",
+                from_address="genesis",
+                from_public_key=None,
                 to_address=address,
                 amount_dust=amount_dust,
                 amount_asi=amount_asi,
@@ -1418,7 +1294,7 @@ class BlockIndexer:
                 block_hash=block_info.get("blockHash"),
                 deployer=validator_pubkey,
                 deployer_address=public_key_to_asi_address(validator_pubkey),
-                term=f"Genesis validator bond: {amount_asi:,.0f} ASI staked",
+                term=f"Genesis validator bond: {amount_asi:f} ASI staked",
                 timestamp=block_info.get("timestamp"),
                 sig=deploy_id,
                 deployment_type="genesis_bond",
@@ -1429,6 +1305,7 @@ class BlockIndexer:
 
             # Create genesis bond transfer (validator -> PoS contract)
             transfer = Transfer(
+                token_decimals=decimals, event_index=0,
                 timestamp=block_info.get("timestamp", 0),
                 deploy_id=deploy_id,
                 block_hash=block_info.get("blockHash"),
@@ -1451,6 +1328,7 @@ class BlockIndexer:
         """Process genesis balance states for initial allocations and validator bonds."""
         logger.info("⚖️ Processing genesis balance states")
 
+        decimals = block_info.get("token_decimals", settings.native_token_decimals)
         # Extract genesis data dynamically
         genesis_data = await self._extract_genesis_data(block_info)
 
@@ -1462,8 +1340,12 @@ class BlockIndexer:
         genesis_allocations = genesis_data['allocations']
 
         # Add genesis wallet balance states
-        for address, amount_dust, amount_asi in genesis_allocations:
+        # Repeated genesis addresses replace the vault-map entry; never add
+        # duplicate balance rows or sum inaccessible overwritten vaults.
+        balances = {address: (raw, human) for address, raw, human in genesis_allocations}
+        for address, (amount_dust, amount_asi) in balances.items():
             balance_state = BalanceState(
+                token_decimals=decimals,
                 address=address,
                 block_hash=block_info.get("blockHash"),
                 block_number=0,
@@ -1480,6 +1362,7 @@ class BlockIndexer:
         # Add validator balance states
         for validator_pubkey, amount_dust, amount_asi in validator_bonds:
             balance_state = BalanceState(
+                token_decimals=decimals,
                 address=validator_pubkey,
                 block_hash=block_info.get("blockHash"),
                 block_number=0,
@@ -1492,9 +1375,10 @@ class BlockIndexer:
 
         # PoS contract balance state (holds all bonded ASI)
         total_bonded_dust = sum(bond[1] for bond in validator_bonds)
-        total_bonded_asi = sum(bond[2] for bond in validator_bonds)
+        total_bonded_asi = token_decimal(total_bonded_dust, decimals)
 
         pos_balance_state = BalanceState(
+            token_decimals=decimals,
             address="1111gW5kkGxHg7xDg6dRkZx2f7qxTizJzaCH9VEM1oJKWRvSX9Sk5",
             block_hash=block_info.get("blockHash"),
             block_number=0,

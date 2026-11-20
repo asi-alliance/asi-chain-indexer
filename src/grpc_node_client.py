@@ -1,8 +1,10 @@
 import asyncio
 import base64
+import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from concurrent.futures.process import BrokenProcessPool
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 import structlog
@@ -14,22 +16,102 @@ import DeployServiceV1_pb2_grpc as svc
 import DeployServiceCommon_pb2 as common
 from google.protobuf import empty_pb2
 from google.protobuf.descriptor import FieldDescriptor
+from google.protobuf.unknown_fields import UnknownFieldSet
 
 from src.config import settings
+from src.amounts import amount, canonical_signed_decimal
+from src.monitoring import block_stage_duration, node_request_duration
+from src.off_loop import WorkerPool
+from src.transfer_reports import trace_events
 
 logger = structlog.get_logger(__name__)
+BALANCE_TIMEOUT_SECONDS = 5
+
+trace_workers = WorkerPool(settings.trace_workers)
+
+PROFILE = settings.node_protocol_profile
+STUB_PROFILE = (Path(__file__).parent / "grpc_stubs" / "protocol_profile.txt").read_text()
+if STUB_PROFILE != PROFILE:
+    raise RuntimeError("NODE_PROTOCOL_PROFILE differs from generated bindings; regenerate/rebuild")
+
+
+def _block_query(block_hash):
+    options = {"exactTransferAmounts": True} if PROFILE == "classic" else {}
+    return common.BlockQuery(hash=block_hash, **options)
+
+
+def _finalized_query():
+    options = {"exactTransferAmounts": True} if PROFILE == "classic" else {}
+    return common.LastFinalizedBlockQuery(**options)
 
 
 def _unwrap(response, field_name: str):
     which = response.WhichOneof("message")
+    if which is None:
+        raise grpc.RpcError("Node returned no response payload")
     if which == "error":
         raise grpc.RpcError(str(response.error))
     return getattr(response, field_name)
 
 
+def _transfer_to_dict(message) -> Dict[str, Any]:
+    raw: Optional[str]
+    if message.amountRaw:
+        try:
+            raw = canonical_signed_decimal(message.amountRaw)
+        except ValueError:
+            logger.warning(
+                "Invalid transfer amountRaw; keeping unknown amount",
+                amount_raw_length=len(message.amountRaw),
+            )
+            raw = None
+    elif PROFILE == "uint256" or message.amount == -1:
+        # Missing uint256 data, or an ambiguous legacy -1 sentinel, stays unknown.
+        raw = None
+    else:
+        raw = str(message.amount)
+    result = _to_dict(message)
+    result["amountRaw"] = raw
+    return result
+
+
+_MESSAGE_DECODERS = {common.TransferInfo.DESCRIPTOR.full_name: _transfer_to_dict}
+_MONETARY_FIELD_NUMBERS = {
+    "casper.BondInfo": (2, 3),
+    "casper.DeployInfo": (7, 16),
+    "casper.Status": (7, 18),
+    "casper.DeployDataProto": (7, 15),
+    "casper.BondProto": (2, 3),
+    "casper.TransferInfo": (3, 6),
+}
+
+
+def _require_monetary_profile(message):
+    # Check every decoded monetary message, including nested data after reconnects.
+    # Opposite-profile fields survive parsing as unknown fields; otherwise classic
+    # scalar defaults would turn their missing values into plausible zeros.
+    field_numbers = _MONETARY_FIELD_NUMBERS.get(message.DESCRIPTOR.full_name)
+    if field_numbers is None:
+        return
+    # A monetary field of the wrong wire type is also unknown, even at a known
+    # number. Reject it rather than replacing it with the proto3 default.
+    if any(field.field_number in field_numbers for field in UnknownFieldSet(message)):
+        raise ValueError("Node monetary schema does not match NODE_PROTOCOL_PROFILE")
+
+
 def _field_value(field, value):
+    if PROFILE == "uint256":
+        name = (field.containing_type.name, field.name)
+        if name in {("BondInfo", "stake"), ("DeployInfo", "phloPrice"),
+                    ("Status", "minPhloPrice")}:
+            return amount(value)  # Empty/new fields must never become zero.
+        if name in {("DeployDataProto", "phloPrice"), ("BondProto", "stake")}:
+            if len(value) != 32:
+                raise ValueError("uint256 monetary wire field must contain exactly 32 bytes")
+            return int.from_bytes(value, "big")
     if field.type == FieldDescriptor.TYPE_MESSAGE:
-        return _to_dict(value)
+        decode = _MESSAGE_DECODERS.get(field.message_type.full_name, _to_dict)
+        return decode(value)
     if field.type == FieldDescriptor.TYPE_BYTES:
         return base64.b64encode(value).decode()
     return value
@@ -38,6 +120,7 @@ def _field_value(field, value):
 def _to_dict(message) -> Dict[str, Any]:
     # Not MessageToDict: it renders int64 as strings and only unquotes below 2^53,
     # so genesis deploys (phloLimit=2^63-1) would break the BIGINT insert.
+    _require_monetary_profile(message)
     result = {}
     for field in message.DESCRIPTOR.fields:
         value = getattr(message, field.name)
@@ -56,12 +139,33 @@ class GrpcNodeClient:
         http_port: Optional[int] = None,
     ):
         self.node_host = node_host or settings.node_host or "localhost"
+        if ":" in self.node_host and not self.node_host.startswith("["):
+            self.node_host = f"[{self.node_host}]"
         self.grpc_port = grpc_port or settings.grpc_port or 40452
         self.http_port = http_port or settings.http_port or 40453
         self.timeout = settings.node_timeout
+        self._balance_warning_after: dict[int, float] = {}
+        self.verified_token_decimals: Optional[int] = None
 
-        self.channel = grpc.aio.insecure_channel(f"{self.node_host}:{self.grpc_port}")
+        self.channel = grpc.aio.insecure_channel(
+            f"{self.node_host}:{self.grpc_port}",
+            options=[("grpc.max_receive_message_length", settings.grpc_max_receive_message_bytes)],
+        )
         self.stub = svc.DeployServiceStub(self.channel)
+
+    async def require_native_precision(self, expected: int) -> None:
+        response = await self.stub.status(empty_pb2.Empty(), timeout=self.timeout)
+        status = _unwrap(response, "status")
+        _to_dict(status)
+        # Old nodes omit all metadata (proto3 scalar defaults). Their units are 8 decimals.
+        has_metadata = bool(status.nativeTokenName or status.nativeTokenSymbol)
+        actual = status.nativeTokenDecimals if has_metadata else 8
+        if actual != expected:
+            raise ValueError(
+                f"Node native token decimals ({actual}) do not match "
+                f"NATIVE_TOKEN_DECIMALS ({expected})"
+            )
+        self.verified_token_decimals = actual
 
     async def close(self):
         await self.channel.close()
@@ -71,34 +175,74 @@ class GrpcNodeClient:
             query = common.BlocksQueryByHeight(startBlockNumber=start, endBlockNumber=end)
 
             blocks = []
-            async for response in self.stub.getBlocksByHeights(query, timeout=self.timeout):
-                blocks.append(_to_dict(_unwrap(response, "blockInfo")))
+            with node_request_duration.labels("blocks_by_height").time():
+                async for response in self.stub.getBlocksByHeights(query, timeout=self.timeout):
+                    blocks.append(_to_dict(_unwrap(response, "blockInfo")))
 
             return blocks
 
-        except grpc.RpcError as e:
+        except (grpc.RpcError, ValueError) as e:
             logger.error(f"Failed to get blocks by height {start}-{end}: {e}")
             return []
 
     async def get_last_finalized_block(self) -> Optional[Dict[str, Any]]:
         try:
-            response = await self.stub.lastFinalizedBlock(common.LastFinalizedBlockQuery(), timeout=self.timeout)
+            with node_request_duration.labels("last_finalized_block").time():
+                response = await self.stub.lastFinalizedBlock(
+                    _finalized_query(), timeout=self.timeout
+                )
             wrapper = _unwrap(response, "blockInfo")
             return _to_dict(wrapper.blockInfo)
 
-        except grpc.RpcError as e:
+        except (grpc.RpcError, ValueError) as e:
             logger.error(f"Failed to get last finalized block: {e}")
             return None
 
-    async def get_bonds(self) -> Optional[Dict[str, Any]]:
-        try:
-            response = await self.stub.lastFinalizedBlock(common.LastFinalizedBlockQuery(), timeout=self.timeout)
-            wrapper = _unwrap(response, "blockInfo")
-            return {"bonds": _to_dict(wrapper.blockInfo).get("bonds", [])}
-
-        except grpc.RpcError as e:
-            logger.error(f"Failed to get bonds: {e}")
+    async def get_address_balance(self, address: str) -> Optional[Dict[str, Any]]:
+        """Read the balance and its finalized block from one observer snapshot."""
+        if self.verified_token_decimals is None:
             return None
+        url = f"http://{self.node_host}:{self.http_port}/api/balance/{address}"
+        try:
+            timeout = aiohttp.ClientTimeout(total=self.timeout)
+            async with (
+                asyncio.timeout(BALANCE_TIMEOUT_SECONDS),
+                aiohttp.ClientSession(timeout=timeout) as session,
+            ):
+                async with session.get(url, allow_redirects=False) as response:
+                    if response.status != 200:
+                        now = asyncio.get_running_loop().time()
+                        if now >= self._balance_warning_after.get(response.status, now):
+                            logger.warning("Observer rejected balance lookup", status=response.status,
+                                           node_host=self.node_host, http_port=self.http_port)
+                            self._balance_warning_after[response.status] = now + 60
+                        return None
+                    data = await response.json()
+            if not isinstance(data, dict) or data.get("address") != address:
+                return None
+            balance = data.get("balance")
+            block_hash = data.get("blockHash")
+            height = data.get("blockNumber")
+            if not isinstance(balance, str) or len(balance) > 78:
+                return None
+            amount(balance)  # Validate the uint256 string without reformatting it.
+            if not isinstance(block_hash, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", block_hash):
+                return None
+            if type(height) is not int or not 0 <= height < 2**63:
+                return None
+            return {
+                "address": address,
+                "balance": balance,
+                "token_decimals": self.verified_token_decimals,
+                "block_hash": block_hash,
+                "block_number": height,
+            }
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            return None
+
+    async def get_bonds(self) -> Optional[Dict[str, Any]]:
+        block = await self.get_last_finalized_block()
+        return {"bonds": block.get("bonds", [])} if block is not None else None
 
     async def get_active_validators(self) -> Optional[List[Dict[str, Any]]]:
         # activeValidators is PoS contract state, no gRPC RPC exposes it
@@ -110,7 +254,7 @@ class GrpcNodeClient:
                     data = await resp.json()
 
             return [
-                {"validator": v["publicKey"], "stake": v["stake"]}
+                {"validator": v["publicKey"], "stake": amount(v["stake"])}
                 for v in data.get("validators", [])
             ]
 
@@ -120,15 +264,50 @@ class GrpcNodeClient:
 
     async def get_block_details(self, block_hash: str) -> Optional[Dict[str, Any]]:
         try:
-            query = common.BlockQuery(hash=block_hash)
-            response = await self.stub.getBlock(query, timeout=self.timeout)
+            query = _block_query(block_hash)
+            with node_request_duration.labels("block").time():
+                response = await self.stub.getBlock(query, timeout=self.timeout)
             return _to_dict(_unwrap(response, "blockInfo"))
 
-        except grpc.RpcError as e:
+        except (grpc.RpcError, ValueError) as e:
             logger.error(f"Failed to get block details for {block_hash}: {e}")
             return None
 
-    async def get_pending_deploys(self, deployer_pubkey: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    async def get_block_events(
+        self, block_hash: str, deploy_ids: List[str], priority: int = 0
+    ) -> List[Tuple[str, List[Tuple[str, Dict[str, Any]]]]]:
+        """Read the block's BigInt-capable replay trace; failures must retry the block.
+
+        A trace can be tens of megabytes, so a worker process parses it and extracts its events.
+        A parse with a lower `priority` gets the next free worker first.
+        """
+        url = f"http://{self.node_host}:{self.http_port}/reporting/trace"
+        with block_stage_duration.labels("trace_fetch").time(), \
+                node_request_duration.labels("trace").time():
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout)) as session:
+                async with session.get(url, params={"blockHash": block_hash}) as response:
+                    response.raise_for_status()
+                    body = await response.read()
+        try:
+            waited, parsed, events = await trace_workers.run_timed(
+                trace_events, body, block_hash, list(deploy_ids), priority=priority
+            )
+        except BrokenProcessPool:
+            logger.warning(
+                "Replay trace worker stopped; the block will be retried",
+                block_hash=block_hash,
+                trace_bytes=len(body),
+            )
+            raise
+        block_stage_duration.labels("trace_queue").observe(waited)
+        block_stage_duration.labels("trace_parse").observe(parsed)
+        return events
+
+    async def get_pending_deploys(
+        self,
+        deployer_pubkey: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Fetch the node's pending deploy snapshot via the getPendingDeploys RPC.
 
         Returns {"deploys": [...], "totalAvailable": N}. Each deploy dict holds
@@ -147,7 +326,9 @@ class GrpcNodeClient:
 
         try:
             query = common.PendingDeploysQuery(deployerPubkey=deployer_bytes)
-            response = await self.stub.getPendingDeploys(query, timeout=self.timeout)
+            response = await self.stub.getPendingDeploys(
+                query, timeout=self.timeout if timeout is None else timeout
+            )
             payload = _unwrap(response, "payload")
 
             deploys = []
@@ -165,30 +346,34 @@ class GrpcNodeClient:
                 "totalAvailable": payload.totalAvailable,
             }
 
-        except grpc.RpcError as e:
-            logger.error(f"Failed to get pending deploys: {e}")
+        except (grpc.RpcError, ValueError) as e:
+            # Read every second per validator; the poller logs reachability changes.
+            logger.debug(f"Failed to get pending deploys: {e}")
             return None
 
     async def get_deploy_info(self, deploy_id: str) -> Optional[Dict[str, Any]]:
         try:
             query = common.FindDeployQuery(deployId=bytes.fromhex(deploy_id))  # raises ValueError on a non-hex id
             find_response = await self.stub.findDeploy(query, timeout=self.timeout)
-            light_block = _unwrap(find_response, "blockInfo")
+            light_block = _to_dict(_unwrap(find_response, "blockInfo"))
 
-            block_response = await self.stub.getBlock(common.BlockQuery(hash=light_block.blockHash), timeout=self.timeout)
-            full_block = _unwrap(block_response, "blockInfo")
+            block_response = await self.stub.getBlock(
+                _block_query(light_block["blockHash"]),
+                timeout=self.timeout,
+            )
+            full_block = _to_dict(_unwrap(block_response, "blockInfo"))
 
-            for deploy in full_block.deploys:
-                if deploy.sig == deploy_id:
+            for deploy in full_block["deploys"]:
+                if deploy["sig"] == deploy_id:
                     return {
                         "deployId": deploy_id,
-                        "blockHash": light_block.blockHash,
-                        "blockNumber": light_block.blockNumber,
+                        "blockHash": light_block["blockHash"],
+                        "blockNumber": light_block["blockNumber"],
                         "status": "included",
-                        **_to_dict(deploy),
+                        **deploy,
                     }
 
-            logger.warning(f"Deploy {deploy_id} not found in resolved block {light_block.blockHash}")
+            logger.warning(f"Deploy {deploy_id} not found in resolved block {light_block['blockHash']}")
             return None
 
         except (grpc.RpcError, ValueError) as e:
@@ -204,17 +389,17 @@ class GrpcNodeClient:
 
             return main_chain_blocks
 
-        except grpc.RpcError as e:
+        except (grpc.RpcError, ValueError) as e:
             logger.error(f"Failed to show main chain with depth {depth}: {e}")
             return None
 
     async def health_check(self) -> bool:
         try:
             response = await self.stub.status(empty_pb2.Empty(), timeout=self.timeout)
-            _unwrap(response, "status")
+            _to_dict(_unwrap(response, "status"))
             return True
 
-        except grpc.RpcError as e:
+        except (grpc.RpcError, ValueError) as e:
             logger.error(f"Failed health check: {e}")
             return False
 
@@ -242,20 +427,24 @@ class GrpcNodeClient:
     async def get_network_consensus(self) -> Optional[Dict[str, Any]]:
         try:
             lfb = await self.get_last_finalized_block()
-            bonds_data = await self.get_bonds()
+            if lfb is None:
+                return None
             active = await self.get_active_validators()
 
-            if lfb is None or bonds_data is None or active is None:
+            if active is None:
                 return None
 
-            total_bonded = len(bonds_data["bonds"])
+            bonds = lfb["bonds"]
+            total_bonded = len(bonds)
             active_count = len(active)
             in_quarantine = max(0, total_bonded - active_count)
 
-            # stake from bonds_data only: get_bonds/get_active_validators aren't one atomic call
+            # Height and bonds share one finalized snapshot; active membership is separate.
             active_keys = {v["validator"] for v in active}
-            total_stake = sum(b["stake"] for b in bonds_data["bonds"])
-            active_stake = sum(b["stake"] for b in bonds_data["bonds"] if b["validator"] in active_keys)
+            total_stake = sum(b["stake"] for b in bonds)
+            active_stake = sum(
+                b["stake"] for b in bonds if b["validator"] in active_keys
+            )
             participation = (active_stake / total_stake) if total_stake else 0.0
 
             # mirrors the node's own casper.fault-tolerance-threshold (settings.fault_tolerance_threshold)
