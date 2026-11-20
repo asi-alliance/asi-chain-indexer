@@ -112,6 +112,9 @@ class Settings(BaseSettings):
         default=0,
         description="Block number to start syncing from"
     )
+    ancestor_recovery_steps: int = Field(
+        default=64, ge=1, description="Maximum ancestor recovery work items per sync cycle"
+    )
     block_prefetch: int = Field(
         default=2,
         ge=0,
