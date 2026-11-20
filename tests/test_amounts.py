@@ -210,6 +210,7 @@ async def test_precision_checked_against_node_metadata(actual, expected, valid):
     client.stub = SimpleNamespace(status=AsyncMock(return_value=response))
     if valid:
         await client.require_native_precision(expected)
+        assert client.verified_token_decimals == expected
     else:
         with pytest.raises(ValueError, match="NATIVE_TOKEN_DECIMALS"):
             await client.require_native_precision(expected)

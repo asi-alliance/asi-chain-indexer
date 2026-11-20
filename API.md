@@ -332,26 +332,35 @@ List ASI transfers with pagination and filtering.
 }
 ```
 
-### 🆕 GET /api/balance/{address}
-Get balance state for an address.
+### GET /api/address/{address}
 
-**Path Parameters:**
-- `address` (string): ASI address or validator public key
+Look up a full ASI vault address. Configure `NODE_HOST` to point to a read-only
+observer. A validator can return HTTP 400 (`readonly_node_required`), which
+the indexer logs and exposes to the caller as HTTP 503. The indexer asks the observer for
+the spendable native balance at the observer's latest finalized block. Concurrent
+requests for the same address share an in-flight read. Each subsequent lookup
+reads the observer again. The address can have an empty indexed transfer history.
+`balance` is a decimal string in base units. Use `token_decimals` to display ASI.
+`block_hash` and `block_number` identify the observer's finalized block for this
+balance. Its height can be ahead of the transfer history processed by the indexer.
 
-**Response:**
 ```json
 {
-  "address": "04837a4cff833e31...",
-  "unbonded_balance_dust": 0,
-  "unbonded_balance_asi": "0.00000000",
-  "bonded_balance_dust": 50000000000000,
-  "bonded_balance_asi": "500000.00000000",
-  "total_balance_dust": 50000000000000,
-  "total_balance_asi": "500000.00000000",
-  "block_number": 240,
-  "updated_at": "2025-08-06T08:10:00.000000"
+  "address": "1111x5QCpTeTXakyVzda9zAVyo6vnSG2WTd9TJ3n93LmMYRhzZouR",
+  "balance": "20001000000000000000001",
+  "token_decimals": 18,
+  "block_hash": "1744c38fe4f4a21d7efd95bfb12a83e1bd238cb26f4a4f0e74f0afd475ae4b93",
+  "block_number": 7132
 }
 ```
+
+A confirmed empty vault or valid unused address returns `200` with `"balance": "0"`.
+An invalid address returns `400`. An unavailable or malformed observer snapshot,
+or pending token precision verification during startup, returns `503`.
+Each Indexer process runs up to four different address lookups concurrently.
+Each read has a five-second deadline and also respects a shorter `NODE_TIMEOUT`.
+When all slots are in use, a lookup for another address returns `503` with
+`Retry-After: 1`.
 
 ### GET /api/address/{address}/transfers
 Get transaction history for a specific address.
