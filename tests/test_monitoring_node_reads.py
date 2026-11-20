@@ -36,6 +36,7 @@ def stored(monkeypatch):
         return [{"?column?": 1}]
 
     for module in ("src.monitoring.db", "src.block_indexer.db"):
+        monkeypatch.setattr(f"{module}.get_recovery_path", AsyncMock(return_value=[]))
         monkeypatch.setattr(f"{module}.get_last_indexed_block", last_indexed)
         monkeypatch.setattr(f"{module}.execute_raw", execute_raw)
 

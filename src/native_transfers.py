@@ -62,24 +62,43 @@ def equivalent_calls(calls, completed):
     return representatives, resolved, aliases
 
 
-async def require_indexed_parents(session, block_info, client=None):
-    if block_info["blockNumber"] <= settings.start_from_block:
-        return
-    boundary = (
+class MissingParent(ReportUnavailable):
+    def __init__(self, parent_hash, details=None):
+        super().__init__(f"Missing parent block {parent_hash}; retry after indexing it")
+        self.parent_hash = parent_hash
+        self.details = details
+
+
+def _history_boundary():
+    return (
         select(BlockParent.parent_hash)
         .join(Block, Block.block_hash == BlockParent.block_hash)
         .where(Block.block_number <= settings.start_from_block)
     )
+
+
+async def unindexed_parent_hashes(session, parents):
+    known = select(Block.block_hash).where(Block.block_hash.in_(parents))
+    if settings.start_from_block > 0:
+        known = known.union(_history_boundary().where(BlockParent.parent_hash.in_(parents)))
+    indexed = set(await session.scalars(known))
+    return [parent for parent in dict.fromkeys(parents) if parent not in indexed]
+
+
+async def require_indexed_parents(session, block_info, client=None):
+    if block_info["blockNumber"] <= settings.start_from_block:
+        return
     missing = await session.scalars(
         select(BlockParent.parent_hash)
         .outerjoin(Block, Block.block_hash == BlockParent.parent_hash)
         .where(
             BlockParent.block_hash == block_info["blockHash"],
             Block.block_hash.is_(None),
-            BlockParent.parent_hash.not_in(boundary),
+            BlockParent.parent_hash.not_in(_history_boundary()),
         )
     )
     for parent_hash in missing:
+        details = None
         if settings.start_from_block > 0 and client is not None:
             details = await client.get_block_details(parent_hash)
             info = (details or {}).get("blockInfo", {})
@@ -90,9 +109,7 @@ async def require_indexed_parents(session, block_info, client=None):
                 and 0 <= height < settings.start_from_block
             ):
                 continue
-        raise ReportUnavailable(
-            f"Missing parent block {parent_hash}; retry after indexing it"
-        )
+        raise MissingParent(parent_hash, details)
 
 
 async def reconcile_completed_duplicates(session, block_info):

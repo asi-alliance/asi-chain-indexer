@@ -325,6 +325,51 @@ until it ends. A worker holds a complete parsed trace in memory: about 0.6 GB fo
 a 23 MB trace. The memory limit of the indexer container must allow
 `TRACE_WORKERS` of these at a time. See
 [Block throughput](#block-throughput) for the measured effect of both settings.
+
+`ANCESTOR_RECOVERY_STEPS` sets the shared work budget for missing-parent
+recovery in one sync cycle (default 64, minimum 1). A step visits one block:
+it can discover missing parents, write a ready block, or skip a block already
+committed. A block with unresolved parents generally needs a second visit.
+The indexer checkpoints unfinished hashes, height bounds and traversal flags
+in PostgreSQL and resumes them before the next height scan, including after
+a worker restart. Block bodies and replay reports stay out of the checkpoint.
+The height cursor advances only when the regular scan completes the height.
+
+A child previously seen in a height scan is recovered by hash even if a later
+range response omits it. A missing or invalid ancestor keeps the cursor pinned.
+Parent checks also apply with `ENABLE_ASI_TRANSFER_EXTRACTION=false`. This mode
+stores blocks, deploys and parent edges without fetching transfer replay reports.
+With partial history, the writer may look up a missing parent's height by hash
+during its transaction to determine whether it predates `START_FROM_BLOCK`.
+
+Inspect an unfinished recovery in the indexer database with:
+
+```sql
+SELECT value::jsonb AS recovery_path, updated_at FROM indexer_state
+WHERE key = 'ancestor_recovery_path';
+```
+
+The first entry identifies the child and the last identifies the next block to
+visit. Each entry contains the hash, exclusive upper height bound and a flag
+indicating whether the parents were already scheduled. Restore access to the
+missing data and the indexer retries automatically. If you need to discard the
+saved walk and rescan from the durable cursor, stop the indexer writer, record
+the path, run the following statement, then restart the writer:
+
+```sql
+DELETE FROM indexer_state WHERE key = 'ancestor_recovery_path';
+```
+
+Committed blocks and the height cursor are preserved. A rescan can rediscover
+the same missing parent. A child omitted from subsequent scans can be missed
+after its saved path is cleared.
+
+Choose a budget using measured cycle duration, observer load and trace-worker
+memory on representative blocks. Smaller budgets give other periodic work a
+turn sooner. Larger budgets reduce the number of waits between cycles. A
+single deploy report can dominate a cycle, so the step count alone cannot
+guarantee a time or memory limit.
+
 `START_FROM_BLOCK` is an initial-history boundary, not a
 command to discard the existing cursor or reindex stored history.
 
