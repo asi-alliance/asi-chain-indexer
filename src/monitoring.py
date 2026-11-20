@@ -11,6 +11,7 @@ from aiohttp import web
 from prometheus_client import Counter, Gauge, Histogram, generate_latest, REGISTRY
 import structlog
 
+from src.addr import is_valid_vault_address
 from src.config import settings
 from src.database import db
 from src.read_cache import read_cache
@@ -18,6 +19,7 @@ from src.read_cache import read_cache
 logger = structlog.get_logger(__name__)
 
 INTERNAL_ERROR = {"error": "Internal server error"}
+MAX_BALANCE_LOOKUPS = 4
 
 # Prometheus metrics
 blocks_indexed = Counter(
@@ -143,6 +145,8 @@ class MonitoringServer:
     def __init__(self, indexer):
         self.indexer = indexer
         self.app = web.Application(middlewares=[observe_request_duration])
+        self._balance_lookups: dict[str, asyncio.Task] = {}
+        self.app.on_cleanup.append(self._cancel_balance_lookups)
         self._event_loop_lag_task = None
         self._setup_routes()
 
@@ -210,6 +214,7 @@ class MonitoringServer:
         self.app.router.add_get("/api/transfers", self.get_transfers)
         self.app.router.add_get("/api/validators", self.get_validators)
         self.app.router.add_get("/api/stats/network", self.get_network_stats)
+        self.app.router.add_get("/api/address/{address}", self.get_address_balance)
         self.app.router.add_get("/api/address/{address}/transfers", self.get_address_transfers)
 
     async def health_check(self, request):
@@ -793,6 +798,41 @@ class MonitoringServer:
             logger.error("Failed to get network stats", error=str(e))
             return web.json_response(INTERNAL_ERROR, status=500)
 
+    async def get_address_balance(self, request):
+        address = request.match_info["address"]
+        if not is_valid_vault_address(address):
+            return web.json_response({"error": "Invalid ASI vault address"}, status=400)
+        client = self._client()
+        if client is None:
+            return web.json_response({"error": "Balance unavailable"}, status=503)
+        lookup = self._balance_lookups.get(address)
+        if lookup is None:
+            if len(self._balance_lookups) >= MAX_BALANCE_LOOKUPS:
+                return web.json_response({"error": "Balance lookup busy"}, status=503,
+                                         headers={"Retry-After": "1"})
+            lookup = asyncio.create_task(self._load_balance(client, address))
+            self._balance_lookups[address] = lookup
+        status, payload = await asyncio.shield(lookup)
+        return web.json_response(payload, status=status)
+
+    async def _load_balance(self, client, address):
+        try:
+            snapshot = await client.get_address_balance(address)
+            if snapshot is None:
+                return 503, {"error": "Balance unavailable"}
+            return 200, snapshot
+        except Exception:
+            logger.exception("Unexpected error reading observer balance")
+            return 500, INTERNAL_ERROR
+        finally:
+            self._balance_lookups.pop(address, None)
+
+    async def _cancel_balance_lookups(self, app):
+        tasks = list(self._balance_lookups.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     async def get_address_transfers(self, request):
         """Get transfers for a specific address."""
         try:
@@ -856,5 +896,6 @@ class MonitoringServer:
             port=settings.monitoring_port,
             endpoints=["/health", "/readiness", "/metrics", "/status",
                        "/api/blocks", "/api/blocks/search", "/api/deployments", "/api/deployments/search",
-                       "/api/transfers", "/api/validators", "/api/stats/network", "/api/address/{address}/transfers"]
+                       "/api/transfers", "/api/validators", "/api/stats/network",
+                       "/api/address/{address}", "/api/address/{address}/transfers"]
         )

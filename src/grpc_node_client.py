@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import re
 import sys
 from pathlib import Path
 from concurrent.futures.process import BrokenProcessPool
@@ -24,6 +25,7 @@ from src.off_loop import WorkerPool
 from src.transfer_reports import trace_events
 
 logger = structlog.get_logger(__name__)
+BALANCE_TIMEOUT_SECONDS = 5
 
 trace_workers = WorkerPool(settings.trace_workers)
 
@@ -142,6 +144,8 @@ class GrpcNodeClient:
         self.grpc_port = grpc_port or settings.grpc_port or 40452
         self.http_port = http_port or settings.http_port or 40453
         self.timeout = settings.node_timeout
+        self._balance_warning_after: dict[int, float] = {}
+        self.verified_token_decimals: Optional[int] = None
 
         self.channel = grpc.aio.insecure_channel(
             f"{self.node_host}:{self.grpc_port}",
@@ -161,6 +165,7 @@ class GrpcNodeClient:
                 f"Node native token decimals ({actual}) do not match "
                 f"NATIVE_TOKEN_DECIMALS ({expected})"
             )
+        self.verified_token_decimals = actual
 
     async def close(self):
         await self.channel.close()
@@ -191,6 +196,48 @@ class GrpcNodeClient:
 
         except (grpc.RpcError, ValueError) as e:
             logger.error(f"Failed to get last finalized block: {e}")
+            return None
+
+    async def get_address_balance(self, address: str) -> Optional[Dict[str, Any]]:
+        """Read the balance and its finalized block from one observer snapshot."""
+        if self.verified_token_decimals is None:
+            return None
+        url = f"http://{self.node_host}:{self.http_port}/api/balance/{address}"
+        try:
+            timeout = aiohttp.ClientTimeout(total=self.timeout)
+            async with (
+                asyncio.timeout(BALANCE_TIMEOUT_SECONDS),
+                aiohttp.ClientSession(timeout=timeout) as session,
+            ):
+                async with session.get(url, allow_redirects=False) as response:
+                    if response.status != 200:
+                        now = asyncio.get_running_loop().time()
+                        if now >= self._balance_warning_after.get(response.status, now):
+                            logger.warning("Observer rejected balance lookup", status=response.status,
+                                           node_host=self.node_host, http_port=self.http_port)
+                            self._balance_warning_after[response.status] = now + 60
+                        return None
+                    data = await response.json()
+            if not isinstance(data, dict) or data.get("address") != address:
+                return None
+            balance = data.get("balance")
+            block_hash = data.get("blockHash")
+            height = data.get("blockNumber")
+            if not isinstance(balance, str) or len(balance) > 78:
+                return None
+            amount(balance)  # Validate the uint256 string without reformatting it.
+            if not isinstance(block_hash, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", block_hash):
+                return None
+            if type(height) is not int or not 0 <= height < 2**63:
+                return None
+            return {
+                "address": address,
+                "balance": balance,
+                "token_decimals": self.verified_token_decimals,
+                "block_hash": block_hash,
+                "block_number": height,
+            }
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
             return None
 
     async def get_bonds(self) -> Optional[Dict[str, Any]]:
