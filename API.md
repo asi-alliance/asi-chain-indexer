@@ -334,7 +334,9 @@ List ASI transfers with pagination and filtering.
 
 ### GET /api/address/{address}
 
-Look up a full ASI vault address. The indexer asks its configured observer for
+Look up a full ASI vault address. Configure `NODE_HOST` to point to a read-only
+observer. A validator can return HTTP 400 (`readonly_node_required`), which
+the indexer logs and exposes to the caller as HTTP 503. The indexer asks the observer for
 the spendable native balance at the observer's latest finalized block. Concurrent
 requests for the same address share an in-flight read. Each subsequent lookup
 reads the observer again. The address can have an empty indexed transfer history.
@@ -356,6 +358,7 @@ A confirmed empty vault or valid unused address returns `200` with `"balance": "
 An invalid address returns `400`. An unavailable or malformed observer snapshot,
 or pending token precision verification during startup, returns `503`.
 Each Indexer process runs up to four different address lookups concurrently.
+Each read has a five-second deadline and also respects a shorter `NODE_TIMEOUT`.
 When all slots are in use, a lookup for another address returns `503` with
 `Retry-After: 1`.
 

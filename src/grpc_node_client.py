@@ -25,6 +25,7 @@ from src.off_loop import WorkerPool
 from src.transfer_reports import trace_events
 
 logger = structlog.get_logger(__name__)
+BALANCE_TIMEOUT_SECONDS = 5
 
 trace_workers = WorkerPool(settings.trace_workers)
 
@@ -143,6 +144,7 @@ class GrpcNodeClient:
         self.grpc_port = grpc_port or settings.grpc_port or 40452
         self.http_port = http_port or settings.http_port or 40453
         self.timeout = settings.node_timeout
+        self._balance_warning_after: dict[int, float] = {}
         self.verified_token_decimals: Optional[int] = None
 
         self.channel = grpc.aio.insecure_channel(
@@ -203,9 +205,17 @@ class GrpcNodeClient:
         url = f"http://{self.node_host}:{self.http_port}/api/balance/{address}"
         try:
             timeout = aiohttp.ClientTimeout(total=self.timeout)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with (
+                asyncio.timeout(BALANCE_TIMEOUT_SECONDS),
+                aiohttp.ClientSession(timeout=timeout) as session,
+            ):
                 async with session.get(url, allow_redirects=False) as response:
                     if response.status != 200:
+                        now = asyncio.get_running_loop().time()
+                        if now >= self._balance_warning_after.get(response.status, now):
+                            logger.warning("Observer rejected balance lookup", status=response.status,
+                                           node_host=self.node_host, http_port=self.http_port)
+                            self._balance_warning_after[response.status] = now + 60
                         return None
                     data = await response.json()
             if not isinstance(data, dict) or data.get("address") != address:

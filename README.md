@@ -436,7 +436,7 @@ rollout. An empty list clears the pending view at startup.
 | `GET /api/blocks`, `/api/blocks/{block_number}`, `/api/blocks/search` | Block reads/search; a height is not a unique DAG identity |
 | `GET /api/deployments`, `/api/deployments/{deploy_id}`, `/api/deployments/search` | Deploy reads/search |
 | `GET /api/transfers`, `/api/address/{address}/transfers` | Successful ledger movements |
-| `GET /api/address/{address}` | [Exact spendable balance and finalized block](API.md#get-apiaddressaddress) from the observer |
+| `GET /api/address/{address}` | [Exact spendable balance and finalized block](API.md#get-apiaddressaddress). Requires a read-only observer at `NODE_HOST`. |
 | `GET /api/validators`, `/api/stats/network` | Stored validator/network data |
 
 Routes are defined in [src/monitoring.py](src/monitoring.py); there is no indexer

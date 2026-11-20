@@ -812,14 +812,18 @@ class MonitoringServer:
                                          headers={"Retry-After": "1"})
             lookup = asyncio.create_task(self._load_balance(client, address))
             self._balance_lookups[address] = lookup
-        snapshot = await asyncio.shield(lookup)
-        if snapshot is None:
-            return web.json_response({"error": "Balance unavailable"}, status=503)
-        return web.json_response(snapshot)
+        status, payload = await asyncio.shield(lookup)
+        return web.json_response(payload, status=status)
 
     async def _load_balance(self, client, address):
         try:
-            return await client.get_address_balance(address)
+            snapshot = await client.get_address_balance(address)
+            if snapshot is None:
+                return 503, {"error": "Balance unavailable"}
+            return 200, snapshot
+        except Exception:
+            logger.exception("Unexpected error reading observer balance")
+            return 500, INTERNAL_ERROR
         finally:
             self._balance_lookups.pop(address, None)
 

@@ -1,7 +1,7 @@
 import asyncio
 import hashlib
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, call
 
 import base58
 import pytest
@@ -70,13 +70,45 @@ async def test_invalid_address_skips_observer(lookup, address):
 
 
 @pytest.mark.asyncio
-async def test_observer_timeout_returns_unavailable(lookup):
+@pytest.mark.parametrize("short_deadline", ["balance", "node"])
+async def test_observer_timeout_returns_unavailable(lookup, monkeypatch, short_deadline):
     api, upstream, node = lookup
     upstream.delay = 0.2
-    node.timeout = 0.05
+    if short_deadline == "balance":
+        monkeypatch.setattr("src.grpc_node_client.BALANCE_TIMEOUT_SECONDS", 0.05)
+    else:
+        node.timeout = 0.05
     response = await api.get(PATH)
     assert response.status == 503
     assert await response.json() == {"error": "Balance unavailable"}
+    upstream.delay = 0
+    assert (await api.get(PATH)).status == 200
+
+
+@pytest.mark.asyncio
+async def test_observer_rejections_log_each_status_once_during_a_burst(lookup, monkeypatch):
+    api, upstream, node = lookup
+    logger = Mock()
+    monkeypatch.setattr("src.grpc_node_client.logger", logger)
+    for status in (400, 400, 504):
+        upstream.status = status
+        assert (await api.get(PATH)).status == 503
+    assert logger.warning.call_args_list == [
+        call("Observer rejected balance lookup", status=status,
+             node_host=node.node_host, http_port=node.http_port)
+        for status in (400, 504)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unexpected_balance_error_returns_json_and_releases_slot(lookup, monkeypatch):
+    api, _, node = lookup
+    read = AsyncMock(side_effect=[RuntimeError("internal failure"), {"balance": "0"}])
+    monkeypatch.setattr(node, "get_address_balance", read)
+    response = await api.get(PATH)
+    assert response.status == 500
+    assert await response.json() == {"error": "Internal server error"}
+    assert (await api.get(PATH)).status == 200
 
 
 @pytest.mark.asyncio
