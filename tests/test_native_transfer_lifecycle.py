@@ -12,6 +12,7 @@ import asyncpg
 import pytest
 import pytest_asyncio
 
+from src.alerts import AlertKind
 from src.amounts import MAX_AMOUNT
 from src.block_indexer import BlockIndexer
 from src.database import Database
@@ -782,6 +783,44 @@ async def test_recovery_resumes_long_chain_after_worker_restart(ledger, monkeypa
     assert await ledger.db.get_recovery_path() == []
     assert await ledger.conn.fetchval("SELECT count(*) FROM blocks") == depth + 2
     assert await ledger.conn.fetchval("SELECT count(*) FROM block_parents") == depth + 1
+    client.get_block_events.assert_not_awaited()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_recovery_without_transfer_extraction_tracks_deferred_cycles(ledger, monkeypatch):
+    monkeypatch.setattr("src.block_indexer.settings.enable_asi_transfer_extraction", False)
+    monkeypatch.setattr("src.block_indexer.settings.start_from_block", 1)
+    monkeypatch.setattr("src.block_indexer.settings.ancestor_recovery_steps", 1)
+    await ledger.add(1, "anchor", [], ["before-start"])
+    bodies = {}
+    for height, name, parent in [(2, "older", "anchor"), (3, "late", "older"), (4, "child", "late")]:
+        entries = [("payment", report(payment(23)))] if name == "older" else []
+        bodies[name], _ = await ledger.add(height, name, entries, [parent], process=False)
+    await ledger.db.set_last_indexed_block(3)
+    indexer = ledger.indexer
+    client = indexer.client
+    client.get_block_details = AsyncMock(side_effect=bodies.get)
+    client.get_last_finalized_block = AsyncMock(return_value={"blockNumber": 4})
+    client.get_blocks_by_height = AsyncMock(return_value=[bodies["child"]["blockInfo"]])
+    monkeypatch.setattr("src.block_indexer.settings.lag_alert_blocks", 0)
+    monkeypatch.setattr("src.block_indexer.settings.lag_alert_cycles", 3)
+    monkeypatch.setattr("src.block_indexer.settings.cursor_stuck_cycles", 3)
+    alerts = []
+    monkeypatch.setattr(indexer.alerts, "notify", alerts.append)
+    for cycle in range(1, 4):
+        indexer._node_unavailable_cycles = 1
+        await indexer._sync_blocks()
+        assert indexer._stuck_cycles == cycle
+        assert indexer._node_unavailable_cycles == 0
+        assert await ledger.db.get_last_indexed_block() == 3
+    assert {event.kind for event in alerts} == {AlertKind.BLOCKS_STUCK, AlertKind.SYNC_FALLING_BEHIND}
+    await indexer._sync_blocks()
+    assert indexer._stuck_cycles == 0
+    assert await ledger.db.get_last_indexed_block() == 4
+    assert await ledger.conn.fetchval("SELECT count(*) FROM blocks") == 4
+    assert await ledger.conn.fetchval("SELECT count(*) FROM deployments") == 1
+    assert await ledger.conn.fetchval("SELECT count(*) FROM transfers") == 0
     client.get_block_events.assert_not_awaited()
 
 

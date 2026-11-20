@@ -286,6 +286,12 @@ class BlockIndexer:
             .with_context("cycles", self._stuck_cycles)
         )
 
+    def _track_deferred_recovery(self, height, end, path):
+        self._track_cursor(height, end, 1, "Waiting for ancestor recovery")
+        logger.info("Continuing ancestor recovery next cycle", cursor=height,
+                    cycles_at_cursor=self._stuck_cycles, work_items_remaining=len(path),
+                    next_block=path[-1][0])
+
     def _track_lag(self, lag: int):
         """Alert when lag is deep and has stopped shrinking.
 
@@ -380,17 +386,18 @@ class BlockIndexer:
             self.chain_tip_observed_at = datetime.now(UTC)
             self.node_reachable = True
 
+            self._track_lag(max(0, latest_block_number - last_indexed))
             steps = iter(range(settings.ancestor_recovery_steps))
             path = await db.get_recovery_path()
             if path:
                 try:
                     if not await self._recover_path(path, steps):
+                        self._track_node_availability(True)
+                        self._track_deferred_recovery(last_indexed, latest_block_number, path)
                         return
                 except Exception as error:
                     self._track_cursor(last_indexed, latest_block_number, 1, str(error))
                     raise
-
-            self._track_lag(max(0, latest_block_number - last_indexed))
 
             if last_indexed >= latest_block_number:
                 logger.debug("Already up to date", last_indexed=last_indexed, latest=latest_block_number)
@@ -508,6 +515,7 @@ class BlockIndexer:
                 await db.set_last_indexed_block(completed_height)
 
             if recovery_deferred:
+                self._track_deferred_recovery(completed_height, end, path)
                 return
             self._track_cursor(completed_height, end, len(skipped), last_skip_error)
 
@@ -546,10 +554,13 @@ class BlockIndexer:
             priority=block_info.get("blockNumber") or 0,
         )
 
+    async def _read_details(self, block_hash: str):
+        with block_stage_duration.labels("details").time():
+            return await self.client.get_block_details(block_hash)
+
     async def _read_block(self, block_hash: str):
         """Read a block and its replay events; they do not depend on the database."""
-        with block_stage_duration.labels("details").time():
-            block_data = await self.client.get_block_details(block_hash)
+        block_data = await self._read_details(block_hash)
         if not block_data or not self._needs_traces(block_data):
             return block_data, None
         async with db.session() as session:
@@ -581,14 +592,16 @@ class BlockIndexer:
             for _ in steps:
                 await self._visit_recovery_block(path, supplied)
                 if not path:
-                    return True
-            logger.info("Continuing ancestor recovery next cycle",
-                        work_items_remaining=len(path), next_block=path[-1][0])
-            return False
-        finally:
-            # Only identifiers survive a yield. Each block write is already atomic,
-            # so re-reading an older checkpoint after a crash is safe.
-            await db.save_recovery_path(path)
+                    break
+        except (Exception, asyncio.CancelledError):
+            try:
+                await db.save_recovery_path(path)
+            except Exception:
+                logger.exception("Failed to checkpoint after ancestor recovery error")
+            raise
+
+        await db.save_recovery_path(path)
+        return not path
 
     async def _visit_recovery_block(self, path, supplied):
         block_hash, child_height, expanded = path[-1]
@@ -601,7 +614,8 @@ class BlockIndexer:
 
         block, events = supplied.get(block_hash, (None, None))
         if block is None:
-            block = await self.client.get_block_details(block_hash)
+            await asyncio.sleep(settings.delay_before_node)
+            block = await self._read_details(block_hash)
         info = (block or {}).get("blockInfo", {})
         if info.get("blockHash") != block_hash:
             raise ReportUnavailable(f"Node did not return the requested ancestor {block_hash}")

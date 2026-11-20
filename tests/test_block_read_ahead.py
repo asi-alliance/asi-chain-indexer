@@ -15,12 +15,12 @@ class UnindexedSession:
 
 
 class FakeDatabase:
-    async def get_recovery_path(self):
-        return []
-
     def __init__(self, last_indexed=9):
         self.last_indexed = last_indexed
         self.set_calls = []
+
+    async def get_recovery_path(self):
+        return []
 
     async def get_last_indexed_block(self):
         return self.last_indexed

@@ -63,34 +63,47 @@ class FakeSession:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("details", [
-    None,
-    {"blockInfo": {"blockHash": "different"}},
-    {"blockInfo": {"blockHash": "parent", "blockNumber": 0}},
-    {"blockInfo": {"blockHash": "parent", "blockNumber": 3, "parentsHashList": ["child"]}},
-    {"blockInfo": {"blockHash": "parent", "blockNumber": 1, "parentsHashList": ["root"],
-                   "deployCount": 1}, "deploys": []},
+@pytest.mark.parametrize("details,reason", [
+    (None, "Node did not return the requested ancestor"),
+    ({"blockInfo": {"blockHash": "different"}}, "Node did not return the requested ancestor"),
+    ({"blockInfo": {"blockHash": "parent", "blockNumber": 0}}, "Invalid ancestry"),
+    ({"blockInfo": {"blockHash": "parent", "blockNumber": 3, "parentsHashList": ["child"]}},
+     "Invalid ancestry"),
+    ({"blockInfo": {"blockHash": "parent", "blockNumber": 1, "parentsHashList": ["root"],
+                    "deployCount": 1}, "deploys": []}, "Incomplete deployment data"),
 ])
-async def test_recovery_rejects_unavailable_or_inconsistent_ancestor(details, monkeypatch):
+async def test_recovery_rejects_unavailable_or_inconsistent_ancestor(details, reason, monkeypatch):
     monkeypatch.setattr("src.block_indexer.db", FakeDatabase())
     monkeypatch.setattr(FakeSession, "scalar", AsyncMock(return_value=None))
     indexer = BlockIndexer()
     indexer.client = AsyncMock()
     indexer.client.get_block_details.return_value = details
     indexer._process_block = AsyncMock()
-    with pytest.raises(ReportUnavailable, match="parent"):
+    with pytest.raises(ReportUnavailable, match=f"^{reason}"):
         await indexer._visit_recovery_block([("child", 4, False), ("parent", 3, False)], {})
     indexer._process_block.assert_not_awaited()
     indexer.client.get_block_events.assert_not_awaited()
 
 
-class FakeDatabase:
-    async def get_recovery_path(self):
-        return []
+@pytest.mark.asyncio
+async def test_recovery_preserves_read_error_if_checkpoint_also_fails(monkeypatch):
+    indexer = BlockIndexer()
+    indexer._visit_recovery_block = AsyncMock(side_effect=ReportUnavailable("missing ancestor"))
+    save = AsyncMock(side_effect=ConnectionError("database unavailable"))
+    monkeypatch.setattr("src.block_indexer.db.save_recovery_path", save)
+    path = [("child", 4, False)]
+    with pytest.raises(ReportUnavailable, match="missing ancestor"):
+        await indexer._recover_path(path, iter(range(1)))
+    save.assert_awaited_once_with(path)
 
+
+class FakeDatabase:
     def __init__(self) -> None:
         self.last_indexed = 9
         self.set_calls: list[int] = []
+
+    async def get_recovery_path(self):
+        return []
 
     async def get_last_indexed_block(self) -> int:
         return self.last_indexed
