@@ -4,6 +4,10 @@ The supported runtime and CI baseline is CPython 3.15.2 on Linux.
 The indexer requires the native `_decimal` module for exact conversion of large
 signed integers. The official Python image includes it. For a local Python
 installation, verify it with `python -c 'import _decimal'`.
+CI asserts the native module in the unit-test container and in the built production
+image. The unit job also fails when `Dockerfile`, this file or `README.md` does not
+reference the interpreter version it runs on, so bump them together with the
+workflow container.
 Unit CI additionally runs the `uint256` profile in `python:3.14.10-slim-bookworm`
 as a separate transitional job while the 3.15.2 upgrade is validated.
 `requirements.txt` contains direct runtime pins; `requirements-dev.txt` adds the
