@@ -4,6 +4,8 @@ The supported runtime and CI baseline is CPython 3.15.2 on Linux.
 The indexer requires the native `_decimal` module for exact conversion of large
 signed integers. The official Python image includes it. For a local Python
 installation, verify it with `python -c 'import _decimal'`.
+Unit CI additionally runs the `uint256` profile in `python:3.14.10-slim-bookworm`
+as a separate transitional job while the 3.15.2 upgrade is validated.
 `requirements.txt` contains direct runtime pins; `requirements-dev.txt` adds the
 gRPC generator and test/development tools. The development resolution is constrained
 by the runtime lock so both environments use the same runtime versions.
