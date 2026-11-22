@@ -103,6 +103,14 @@ Detailed status information about the indexer.
     "latest_block": 240,
     "latest_block_observed_at": "2025-08-06T08:10:14.104311+00:00"
   },
+  "coverage": {
+    "pruned_heights": 2,
+    "pruned_hashes": 3,
+    "degraded_blocks": 1,
+    "prune_floor": 120,
+    "last_pruned_height": 119,
+    "updated_at": "2025-08-06T08:10:14.004311+00:00"
+  },
   "config": {
     "sync_interval": 5,
     "batch_size": 50,
@@ -115,6 +123,7 @@ Detailed status information about the indexer.
 `node` describes the last finalized block that the sync loop read; `/status` does not call the node.
 `connected` is `false` and `latest_block` is `null` before the first successful read and after a failed one.
 `latest_block_observed_at` is the time of the last successful read in UTC with an explicit offset (`+00:00`), so it shows how old the observation is.
+`coverage` summarizes the bounded ledger of block bodies the observer permanently pruned: how many heights and hashes are recorded, how many indexed blocks have ancestry across a pruned body, the highest reported `prune_floor`, and the newest recorded pruned height.
 
 ### GET /metrics
 Prometheus-compatible metrics endpoint. `indexer_sync_lag_blocks` uses the last finalized height that the sync loop read; a scrape does not call the node.
@@ -130,6 +139,7 @@ When the last sync-loop read failed or no read succeeded yet, `indexer_node_reac
 - `indexer_sync_duration_seconds`
 - `indexer_node_request_duration_seconds`
 - `indexer_node_reachable`, `indexer_chain_tip_height`, `indexer_chain_tip_observed_timestamp_seconds`
+- `indexer_pruned_block_hashes_total`, `indexer_pruned_degraded_blocks_total`, `indexer_prune_floor_height`
 - `indexer_read_cache_hits_total`, `indexer_read_cache_misses_total` (label `endpoint`: `status`, `transfers`, `address_transfers`)
 - `indexer_read_cache_evictions_total` (label `reason`: `block`, `reorg`, `capacity`)
 - `indexer_read_cache_errors_total`, `indexer_read_cache_entries`, `indexer_read_cache_enabled`

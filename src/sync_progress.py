@@ -12,6 +12,7 @@ class BlockBatchProgress:
     end_height: int
     seen_heights: Set[int] = field(default_factory=set)
     failed_heights: Set[int] = field(default_factory=set)
+    pruned_heights: Set[int] = field(default_factory=set)
     has_unmapped_failure: bool = False
 
     def mark_seen(self, block_height: Optional[int]) -> None:
@@ -28,6 +29,19 @@ class BlockBatchProgress:
             return
         self.seen_heights.add(block_height)
         self.failed_heights.add(block_height)
+
+    def mark_pruned(self, block_height: Optional[int]) -> None:
+        """Record a height whose every reported body the observer permanently pruned.
+
+        The height is complete for this observer: nothing at it can be indexed,
+        so the cursor may pass it. ``pruned_heights`` keeps the gap visible to
+        the caller, which records the hashes and logs the height.
+        """
+        if not self._contains(block_height):
+            self.has_unmapped_failure = True
+            return
+        self.seen_heights.add(block_height)
+        self.pruned_heights.add(block_height)
 
     @property
     def last_completed_height(self) -> int:

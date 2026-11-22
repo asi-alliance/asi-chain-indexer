@@ -3,6 +3,7 @@
 import hashlib
 import json
 
+import structlog
 from sqlalchemy import Text, any_, bindparam, func, select
 from sqlalchemy.dialects.postgresql import ARRAY, insert
 from sqlalchemy.orm import aliased
@@ -17,6 +18,8 @@ from src.models import (
     NativeTransferResultAlias,
 )
 from src.transfer_reports import ReportUnavailable, TransferTracker
+
+logger = structlog.get_logger(__name__)
 
 
 def observation_id(block_hash, deploy_id, index):
@@ -77,15 +80,27 @@ def _history_boundary():
     )
 
 
-async def unindexed_parent_hashes(session, parents):
+async def unindexed_parent_hashes(session, parents, pruned_hashes=None):
     known = select(Block.block_hash).where(Block.block_hash.in_(parents))
     if settings.start_from_block > 0:
         known = known.union(_history_boundary().where(BlockParent.parent_hash.in_(parents)))
     indexed = set(await session.scalars(known))
-    return [parent for parent in dict.fromkeys(parents) if parent not in indexed]
+    return [
+        parent
+        for parent in dict.fromkeys(parents)
+        if parent not in indexed and parent not in (pruned_hashes or ())
+    ]
 
 
-async def require_indexed_parents(session, block_info, client=None):
+async def require_indexed_parents(session, block_info, client=None, pruned_hashes=None):
+    """Fail the block unless every parent is indexed, a history boundary, or pruned.
+
+    A parent recorded as permanently pruned on this observer can never be read
+    again, so waiting for it would pin the cursor forever. ``pruned_hashes`` is
+    the shared ledger of such hashes: one that is not in it yet is classified
+    once through the observer's HTTP API, and only ``block_pruned`` is skipped.
+    A retry-eligible body still raises, so the batch is attempted again.
+    """
     if block_info["blockNumber"] <= settings.start_from_block:
         return
     missing = await session.scalars(
@@ -98,6 +113,8 @@ async def require_indexed_parents(session, block_info, client=None):
         )
     )
     for parent_hash in missing:
+        if parent_hash in (pruned_hashes or ()):
+            continue
         details = None
         if settings.start_from_block > 0 and client is not None:
             details = await client.get_block_details(parent_hash)
@@ -109,6 +126,19 @@ async def require_indexed_parents(session, block_info, client=None):
                 and 0 <= height < settings.start_from_block
             ):
                 continue
+        if pruned_hashes is not None:
+            classify = getattr(client, "get_block_availability", None)
+            if classify is not None:
+                availability = await classify(parent_hash)
+                if availability == "pruned":
+                    pruned_hashes.add(parent_hash)
+                    logger.warning(
+                        "Parent body permanently pruned on the observer; not retrying it",
+                        parent_hash=parent_hash,
+                        child_hash=block_info["blockHash"],
+                        child_height=block_info["blockNumber"],
+                    )
+                    continue
         raise MissingParent(parent_hash, details)
 
 
@@ -181,10 +211,12 @@ def stored_call(call):
     }
 
 
-async def reconcile_block(session, block_info, deployments, traces, client=None):
+async def reconcile_block(
+    session, block_info, deployments, traces, client=None, pruned_hashes=None
+):
     """Persist observations and return movements attributed to their completion."""
     block_hash = block_info["blockHash"]
-    await require_indexed_parents(session, block_info, client)
+    await require_indexed_parents(session, block_info, client, pruned_hashes)
     channels = {data["return_channel"] for _, events in traces for _, data in events}
     candidates = (
         list(

@@ -24,6 +24,8 @@ async def repair():
     indexer.client = client
     try:
         await client.require_native_precision(settings.native_token_decimals)
+        # A pruned parent is skipped, not retried, exactly as in the sync loop.
+        await indexer._load_coverage()
         async with db.session() as session:
             blocks = (
                 await session.scalars(
@@ -65,7 +67,9 @@ async def repair():
                     block.block_hash, [d["sig"] for d in deploys]
                 )
                 async with db.session() as session:
-                    movements = await reconcile_block(session, info, deploys, traces, client)
+                    movements = await reconcile_block(
+                        session, info, deploys, traces, client, indexer._pruned_hashes
+                    )
                     for deploy in deploys:
                         # deployments has one canonical occurrence per deploy.
                         owner = await session.scalar(
@@ -80,7 +84,9 @@ async def repair():
                     await reconcile_completed_duplicates(session, info)
             else:
                 async with db.session() as session:
-                    await require_indexed_parents(session, info, client)
+                    await require_indexed_parents(
+                        session, info, client, indexer._pruned_hashes
+                    )
                     await reconcile_completed_duplicates(session, info)
             print(f"Repaired block {block.block_number} {block.block_hash}", flush=True)
         async with db.session() as session:

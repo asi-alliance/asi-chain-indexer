@@ -6,13 +6,19 @@ Never mix messages from the two profiles in one descriptor pool/process.
 
 - `classic`: root definitions synchronized with node development schemas by
   indexer #23; exact-transfer fields from node #896 at
-  `92903a1d81c49fa0a035fb7ee729002e38428280`, as used by indexer #22.
+  `92903a1d81c49fa0a035fb7ee729002e38428280`, as used by indexer #22. The
+  block-API missing-body split (`include_missing`, `BlockPrunedInfo`,
+  `BlockUnavailableInfo`) comes from node #1097 merge
+  `01064378128be042b68cc33d9454770117bfbd6a`.
 - `uint256`: all six definitions under `uint256/` are byte-preserved copies from
   [node #881](https://github.com/F1R3FLY-io/f1r3node-rust/pull/881) final head
   [`6233501064492d0cac9c7ebc598daf70c501a215`](https://github.com/F1R3FLY-io/f1r3node-rust/tree/6233501064492d0cac9c7ebc598daf70c501a215/models/src).
   Five files come from `models/src/main/protobuf/`; `scalapb/scalapb.proto`
   comes from `models/src/scalapb/scalapb.proto`. They retain upstream notices
-  and options and are regenerated together with the locked generator.
+  and options and are regenerated together with the locked generator. The same
+  block-API missing-body split from node #1097 merge
+  `01064378128be042b68cc33d9454770117bfbd6a` is applied to both files, with the
+  field numbers and wire types copied unchanged.
 
 The uint256 profile includes #896/#947's reconciled contract: transfer amounts
 use signed canonical `amountRaw` text at field 6, old field 3 is reserved, and

@@ -254,7 +254,7 @@ Key fields:
 - `value` (TEXT): State value
 - `updated_at` (TIMESTAMP): Last update time
 
-Common keys: `last_indexed_block`, `indexer_version`, `schema_version`, `pending_deploys_total_available` (pre-cap pending deploy count), `pending_deploys_status` (JSON `nodes`, `reachable`, `count`, `total_available`, `interval_ms`; rewritten on change and at least every 10 s, absent when pending deploys are off)
+Common keys: `last_indexed_block`, `indexer_version`, `schema_version`, `pending_deploys_total_available` (pre-cap pending deploy count), `pending_deploys_status` (JSON `nodes`, `reachable`, `count`, `total_available`, `interval_ms`; rewritten on change and at least every 10 s, absent when pending deploys are off), `block_coverage` (JSON `prune_floor`, `heights` of permanently pruned hashes, `degraded_blocks`, `updated_at`; bounded and rewritten only when it changes)
 
 #### Normalization and Relationships
 
@@ -505,16 +505,17 @@ Health check includes:
 1. Get current state from database (last_indexed_block)
 2. Query node for latest finalized block
 3. Calculate batch range (start = last_indexed + 1, end = min(start + batch_size, latest))
-4. Fetch block summaries using `get_blocks_by_height()`
-5. For each block summary:
+4. Fetch blocks by height, opting into the observer's `pruned` / `unavailable` split for missing bodies
+5. For each served block summary:
    - Fetch full block details using `get_block_details()`
    - Process block in database transaction
    - Extract and store deployments
    - Extract and store transfers
    - Update validator information
-6. Update last_indexed_block in database
-7. Sleep for SYNC_INTERVAL seconds
-8. Repeat
+6. Cover each height whose reported hashes were indexed or permanently pruned; an `unavailable` body or a failed write keeps the height uncovered and retried
+7. Update last_indexed_block in database and persist the bounded `block_coverage` ledger
+8. Sleep for SYNC_INTERVAL seconds
+9. Repeat
 
 Pending deploys run as a separate task (`PendingDeploysPoller`), not as a step of this loop. Every `PENDING_DEPLOYS_INTERVAL` (default 1 s) it calls `getPendingDeploys` on each validator in `PENDING_DEPLOYS_NODES` concurrently, merges the buffers by signature (a failed read retains its last snapshot until its age reaches 30 seconds) and, only when the merged set changes, deletes rows that left the buffers and upserts new rows in one transaction. With an empty `PENDING_DEPLOYS_NODES` the task does not start and the indexer clears the pending rows and state.
 

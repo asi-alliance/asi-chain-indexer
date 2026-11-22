@@ -44,6 +44,12 @@ message BlocksQuery {
 message BlocksQueryByHeight{
   int64 startBlockNumber = 1;
   int64 endBlockNumber   = 2;
+  // Opt into the pruned / unavailable metadata of the observer's retention
+  // sweep. proto3 defaults to false, so an observer that does not set it
+  // answers with `blockInfo` items only, exactly as before. Clients that set
+  // it also receive `pruned` and `unavailable` items for hashes topo_sort
+  // named at a walked height whose bodies the observer no longer holds.
+  bool include_missing   = 3;
 }
 
 message DataAtNameQuery {

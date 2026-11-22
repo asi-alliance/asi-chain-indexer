@@ -5,6 +5,7 @@ import pytest
 
 from src.models import BalanceState, Block, Deployment, Transfer, ValidatorBond
 from src.block_indexer import BlockIndexer
+from src.block_coverage import BlocksByHeightPage
 from src.sync_progress import BlockBatchProgress
 from src.transfer_reports import ReportUnavailable
 from test_node_exact_api import BLOCK_HASH, node_api
@@ -101,6 +102,7 @@ class FakeDatabase:
     def __init__(self) -> None:
         self.last_indexed = 9
         self.set_calls: list[int] = []
+        self.coverage: dict = {}
 
     async def get_recovery_path(self):
         return []
@@ -111,6 +113,12 @@ class FakeDatabase:
     async def set_last_indexed_block(self, block_number: int) -> None:
         self.last_indexed = block_number
         self.set_calls.append(block_number)
+
+    async def get_block_coverage(self):
+        return self.coverage
+
+    async def save_block_coverage(self, state) -> None:
+        self.coverage = state
 
     @asynccontextmanager
     async def session(self):
@@ -132,9 +140,9 @@ class FakeClient:
 
     async def get_blocks_by_height(
         self, start: int, end: int
-    ) -> list[dict[str, object]]:
+    ) -> BlocksByHeightPage:
         assert (start, end) == (10, 12)
-        return self.blocks
+        return BlocksByHeightPage(blocks=self.blocks, pruned=[], unavailable=[])
 
     async def get_block_details(self, block_hash: str):
         if block_hash in self.failed_hashes:
@@ -192,7 +200,11 @@ async def test_ambiguous_summary_allows_sync_only_after_block_processing(
     monkeypatch.setattr("src.block_indexer.settings.delay_before_node", 0)
     async with node_api(-1, legacy=legacy, amount_raw="") as node:
         node.client.get_blocks_by_height = AsyncMock(
-            return_value=[{"blockNumber": 12, "blockHash": BLOCK_HASH}]
+            return_value=BlocksByHeightPage(
+                blocks=[{"blockNumber": 12, "blockHash": BLOCK_HASH}],
+                pruned=[],
+                unavailable=[],
+            )
         )
         indexer = BlockIndexer()
         indexer.client = node.client

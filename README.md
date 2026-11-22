@@ -336,11 +336,48 @@ a worker restart. Block bodies and replay reports stay out of the checkpoint.
 The height cursor advances only when the regular scan completes the height.
 
 A child previously seen in a height scan is recovered by hash even if a later
-range response omits it. A missing or invalid ancestor keeps the cursor pinned.
-Parent checks also apply with `ENABLE_ASI_TRANSFER_EXTRACTION=false`. This mode
-stores blocks, deploys and parent edges without fetching transfer replay reports.
-With partial history, the writer may look up a missing parent's height by hash
-during its transaction to determine whether it predates `START_FROM_BLOCK`.
+range response omits it. A missing or invalid ancestor keeps the cursor pinned,
+unless the observer reports that ancestor as permanently pruned. Parent checks
+also apply with `ENABLE_ASI_TRANSFER_EXTRACTION=false`. This mode stores blocks,
+deploys and parent edges without fetching transfer replay reports. With partial
+history, the writer may look up a missing parent's height by hash during its
+transaction to determine whether it predates `START_FROM_BLOCK`.
+
+### Retention-swept observers
+
+The observer can delete block bodies while the height map of the DAG still names
+them. `getBlocksByHeights` reports those hashes only when the query opts in with
+`include_missing`, as node PR
+[#1097](https://github.com/F1R3FLY-io/f1r3node-rust/pull/1097) defines:
+
+- `pruned`: the retention sweep has advanced past the height. The body is
+  permanently gone on that observer.
+- `unavailable`: the body is missing but the sweep has not reached the height.
+  A retry may succeed.
+
+The indexer requests the opt-in and applies one coverage rule per height:
+
+1. A height is covered when every hash the observer reported for it was either
+   indexed or permanently pruned there.
+2. Any `unavailable` hash, failed write or unclassified gap keeps the height
+   uncovered; the cursor stays below it and the batch is retried.
+3. An observer that ignores the opt-in (before #1097) answers with served
+   blocks only, and the cursor keeps the older behaviour: it never advances
+   past a height it cannot see.
+4. A fully pruned height may be passed. A height that mixes served and pruned
+   siblings is covered by the served blocks; the pruned hash is still recorded.
+5. A stored block whose ancestry crosses a pruned body is indexed normally but
+   recorded as degraded with the missing parent hashes. Transfer reconciliation
+   is not invented across the gap.
+
+The ledger of pruned hashes, the highest reported prune floor and the degraded
+blocks is bounded and stored in the `indexer_state` row `block_coverage`; it
+survives restarts and is summarized by `GET /status` under `coverage`. The
+parent of the lowest served block in a page lies outside the requested range, so
+an unindexed parent that is not in the ledger is classified once through
+`GET /api/block/{hash}`: only `410 block_pruned` is treated as permanent, and
+the hash is recorded with the block whose ancestry crosses it. A
+`503 block_unavailable` (or any other answer) stays retryable.
 
 Inspect an unfinished recovery in the indexer database with:
 
@@ -431,7 +468,7 @@ rollout. An empty list clears the pending view at startup.
 |---|---|
 | `GET /health` | Basic HTTP-process response; does not check dependencies or sync progress |
 | `GET /readiness` (alias `/ready`) | Checks a database query and a last-finalized-block read; returns 200 or 503 |
-| `GET /status` | Database/cursor statistics and the last node observation of the sync loop; inspect the response content |
+| `GET /status` | Database/cursor statistics, the last node observation of the sync loop, and the `coverage` summary of permanently pruned bodies; inspect the response content |
 | `GET /metrics` | Prometheus exposition; the sync lag uses the last finalized height that the sync loop observed |
 | `GET /api/blocks`, `/api/blocks/{block_number}`, `/api/blocks/search` | Block reads/search; a height is not a unique DAG identity |
 | `GET /api/deployments`, `/api/deployments/{deploy_id}`, `/api/deployments/search` | Deploy reads/search |
@@ -458,8 +495,17 @@ Exported metrics include `indexer_blocks_indexed_total`,
 `indexer_deployments_indexed_total`, `indexer_transfers_extracted_total`,
 `indexer_sync_lag_blocks`, `indexer_last_block_height`,
 `indexer_sync_duration_seconds`, `indexer_node_request_duration_seconds`,
-`indexer_block_stage_duration_seconds`, `indexer_event_loop_lag_seconds` and
-`indexer_http_request_duration_seconds`.
+`indexer_block_stage_duration_seconds`, `indexer_event_loop_lag_seconds`,
+`indexer_http_request_duration_seconds`, `indexer_pruned_block_hashes_total`,
+`indexer_pruned_degraded_blocks_total` and `indexer_prune_floor_height`.
+
+- `indexer_pruned_block_hashes_total` counts block bodies the observer reported
+  as permanently pruned at a height the cursor covered. Only first sightings are
+  counted; a rescan of the same height does not repeat them.
+- `indexer_pruned_degraded_blocks_total` counts indexed blocks whose stored
+  ancestry crosses a permanently pruned body.
+- `indexer_prune_floor_height` is the highest retention floor the observer
+  reported alongside a pruned body; it is NaN until the first such report.
 
 - `indexer_sync_duration_seconds` records the time to index one batch of blocks.
 - `indexer_node_request_duration_seconds{request}` records the node requests of

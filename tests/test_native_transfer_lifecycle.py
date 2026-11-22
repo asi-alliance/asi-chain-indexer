@@ -14,6 +14,7 @@ import pytest_asyncio
 
 from src.alerts import AlertKind
 from src.amounts import MAX_AMOUNT
+from src.block_coverage import BlocksByHeightPage, MissingBlock
 from src.block_indexer import BlockIndexer
 from src.database import Database
 from src.monitoring import MonitoringServer
@@ -21,6 +22,12 @@ from src.native_transfers import reconcile_block, reconcile_completed_duplicates
 from src.transfer_reports import ReportUnavailable, block_events
 from test_transfer_reports import expr, payment, report
 from test_node_exact_api import BLOCK_HASH, DEPLOY_ID, node_api
+
+
+def page(blocks):
+    """A by-heights response with served blocks and no missing bodies."""
+
+    return BlocksByHeightPage(blocks=list(blocks), pruned=[], unavailable=[])
 
 
 def replaying(source):
@@ -274,7 +281,7 @@ async def test_huge_rejected_attempt_preserves_replay_history_and_advances_curso
         return_value={"blockNumber": height}
     )
     ledger.indexer.client.get_blocks_by_height = AsyncMock(
-        return_value=[{"blockNumber": height, "blockHash": "completion"}]
+        return_value=page([{"blockNumber": height, "blockHash": "completion"}])
     )
     ledger.indexer.client.get_block_details = AsyncMock(return_value=details)
     await ledger.indexer._sync_blocks()
@@ -359,7 +366,7 @@ async def test_unknown_summary_requires_real_replay_before_persisting_or_advanci
         replay["blockInfo"]["blockHash"] = "different-block"
     async with node_api(raw, amount_raw=amount_raw) as node:
         node.client.get_blocks_by_height = AsyncMock(
-            return_value=[{"blockNumber": 12, "blockHash": BLOCK_HASH}]
+            return_value=page([{"blockNumber": 12, "blockHash": BLOCK_HASH}])
         )
         node.client.get_block_events = AsyncMock(
             side_effect=replaying(
@@ -466,10 +473,10 @@ async def test_rejected_empty_target_and_unanswered_call_do_not_pin_cursor(
         return_value={"blockNumber": 3}
     )
     ledger.indexer.client.get_blocks_by_height = AsyncMock(
-        return_value=[
+        return_value=page([
             {"blockNumber": n, "blockHash": h}
             for n, h in [(3, "later"), (1, "rejected"), (2, "pending")]
-        ]
+        ])
     )
     ledger.indexer.client.get_block_details = AsyncMock(
         side_effect=lambda h: {
@@ -551,7 +558,7 @@ async def test_successful_noop_without_user_segment_advances_cursor(
         return_value={"blockNumber": 1}
     )
     ledger.indexer.client.get_blocks_by_height = AsyncMock(
-        return_value=[{"blockHash": "noop-block", "blockNumber": 1}]
+        return_value=page([{"blockHash": "noop-block", "blockNumber": 1}])
     )
     ledger.indexer.client.get_block_details = AsyncMock(return_value=details)
     monkeypatch.setattr("src.block_indexer.settings.delay_before_node", 0)
@@ -722,7 +729,7 @@ async def test_sync_recovers_late_ancestors_and_retries_child(ledger):
     client = ledger.indexer.client
     bodies = {"child": child, "late3": late3, "late2": late2}
     client.get_block_details = AsyncMock(side_effect=bodies.get)
-    client.get_blocks_by_height = AsyncMock(return_value=[child["blockInfo"]])
+    client.get_blocks_by_height = AsyncMock(return_value=page([child["blockInfo"]]))
     client.get_last_finalized_block = AsyncMock(return_value={"blockNumber": 5})
 
     client.get_block_events.side_effect = ReportUnavailable("Replay unavailable")
@@ -761,7 +768,7 @@ async def test_recovery_resumes_long_chain_after_worker_restart(ledger, monkeypa
     await ledger.db.set_last_indexed_block(tip - 1)
     client = ledger.indexer.client
     client.get_block_details = AsyncMock(side_effect=bodies.get)
-    client.get_blocks_by_height = AsyncMock(return_value=[child])
+    client.get_blocks_by_height = AsyncMock(return_value=page([child]))
     client.get_last_finalized_block = AsyncMock(return_value={"blockNumber": tip})
 
     # Each internal ancestor needs a discovery visit and a write visit. The
@@ -802,7 +809,7 @@ async def test_recovery_without_transfer_extraction_tracks_deferred_cycles(ledge
     client = indexer.client
     client.get_block_details = AsyncMock(side_effect=bodies.get)
     client.get_last_finalized_block = AsyncMock(return_value={"blockNumber": 4})
-    client.get_blocks_by_height = AsyncMock(return_value=[bodies["child"]["blockInfo"]])
+    client.get_blocks_by_height = AsyncMock(return_value=page([bodies["child"]["blockInfo"]]))
     monkeypatch.setattr("src.block_indexer.settings.lag_alert_blocks", 0)
     monkeypatch.setattr("src.block_indexer.settings.lag_alert_cycles", 3)
     monkeypatch.setattr("src.block_indexer.settings.cursor_stuck_cycles", 3)
@@ -839,7 +846,7 @@ async def test_recovery_retries_unavailable_branch_and_keeps_shared_parent(ledge
     await ledger.db.set_last_indexed_block(3)
     client = ledger.indexer.client
     client.get_block_details = AsyncMock(side_effect=bodies.get)
-    client.get_blocks_by_height = AsyncMock(return_value=[child])
+    client.get_blocks_by_height = AsyncMock(return_value=page([child]))
     client.get_last_finalized_block = AsyncMock(return_value={"blockNumber": 4})
     for _ in range(3):
         await ledger.indexer._sync_blocks()
@@ -872,7 +879,9 @@ async def test_siblings_share_cycle_budget_and_saved_child_survives_range_change
     await ledger.db.set_last_indexed_block(2)
     client = ledger.indexer.client
     client.get_last_finalized_block = AsyncMock(return_value={"blockNumber": 3})
-    client.get_blocks_by_height = AsyncMock(return_value=[bodies[k]["blockInfo"] for k in ("a", "b")])
+    client.get_blocks_by_height = AsyncMock(
+        return_value=page([bodies[k]["blockInfo"] for k in ("a", "b")])
+    )
     client.get_block_details = AsyncMock(side_effect=bodies.get)
 
     await ledger.indexer._sync_blocks()
@@ -881,7 +890,7 @@ async def test_siblings_share_cycle_budget_and_saved_child_survives_range_change
         "anchor", "a-parent", "a"
     }
     assert (await ledger.db.get_recovery_path())[0][0] == "b"
-    client.get_blocks_by_height.return_value = [bodies["a"]["blockInfo"]]
+    client.get_blocks_by_height.return_value = page([bodies["a"]["blockInfo"]])
     await ledger.indexer._sync_blocks()
     assert await ledger.db.get_last_indexed_block() == 3
     assert await ledger.db.get_recovery_path() == []
@@ -1263,3 +1272,30 @@ async def test_repair_preserves_live_owner_of_immediate_sibling_transfers(
         await ledger.conn.fetchval("SELECT count(*) FROM native_transfer_lifecycle")
         == 2
     )
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_sync_covers_a_pruned_height_and_records_degraded_ancestry(ledger, monkeypatch):
+    monkeypatch.setattr("src.block_indexer.settings.start_from_block", 1)
+    monkeypatch.setattr("src.native_transfers.settings.start_from_block", 1)
+    child, _ = await ledger.add(2, "child", [], ["pruned-parent"], process=False)
+    await ledger.db.set_last_indexed_block(0)
+    client = ledger.indexer.client
+    client.get_block_details = AsyncMock(return_value=child)
+    client.get_blocks_by_height = AsyncMock(
+        return_value=BlocksByHeightPage(
+            blocks=[child["blockInfo"]],
+            pruned=[MissingBlock("pruned-parent", 1, 1)],
+            unavailable=[],
+        )
+    )
+    client.get_last_finalized_block = AsyncMock(return_value={"blockNumber": 2})
+
+    await ledger.indexer._sync_blocks()
+
+    assert await ledger.db.get_last_indexed_block() == 2
+    assert await ledger.conn.fetchval("SELECT count(*) FROM blocks") == 1
+    coverage = await ledger.db.get_block_coverage()
+    assert coverage["heights"] == {"1": ["pruned-parent"]}
+    assert coverage["prune_floor"] == 1
+    assert coverage["degraded_blocks"]["child"]["missing_parents"] == ["pruned-parent"]
