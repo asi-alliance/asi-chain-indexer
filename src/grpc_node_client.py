@@ -74,9 +74,12 @@ def _unwrap(response, field_name: str):
 
 
 def _missing_block(info) -> MissingBlock:
-    """Convert a BlockPrunedInfo / BlockUnavailableInfo into the coverage entry."""
+    """Convert a BlockPrunedInfo / BlockUnavailableInfo into the coverage entry.
 
-    _require_monetary_profile(info)
+    These messages carry no monetary field, so no profile check applies: the
+    only data used here is a raw hash bytes field and two int64 heights.
+    """
+
     block_height = info.block_height
     prune_floor = info.prune_floor
     if type(block_height) is not int or block_height < 0:

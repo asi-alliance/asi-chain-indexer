@@ -1273,6 +1273,7 @@ async def test_repair_preserves_live_owner_of_immediate_sibling_transfers(
         == 2
     )
 
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_sync_covers_a_pruned_height_and_records_degraded_ancestry(ledger, monkeypatch):
