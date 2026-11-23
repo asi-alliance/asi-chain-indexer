@@ -20,12 +20,27 @@ from google.protobuf.unknown_fields import UnknownFieldSet
 
 from src.config import settings
 from src.amounts import amount, canonical_signed_decimal
+from src.block_coverage import BlocksByHeightPage, MissingBlock
 from src.monitoring import block_stage_duration, node_request_duration
 from src.off_loop import WorkerPool
 from src.transfer_reports import trace_events
 
 logger = structlog.get_logger(__name__)
 BALANCE_TIMEOUT_SECONDS = 5
+
+# Documented HTTP status/error-code pairs for a single block body. Any other
+# answer (observer_busy, a proxy error, a malformed body) stays unclassified so
+# the caller retries instead of treating it as permanent.
+BLOCK_AVAILABLE = "available"
+BLOCK_PRUNED = "pruned"
+BLOCK_UNAVAILABLE = "unavailable"
+BLOCK_MISSING = "missing"
+_BLOCK_HTTP_CLASSES = {
+    (200, None): BLOCK_AVAILABLE,
+    (410, "block_pruned"): BLOCK_PRUNED,
+    (503, "block_unavailable"): BLOCK_UNAVAILABLE,
+    (404, "block_not_found"): BLOCK_MISSING,
+}
 
 trace_workers = WorkerPool(settings.trace_workers)
 
@@ -51,7 +66,34 @@ def _unwrap(response, field_name: str):
         raise grpc.RpcError("Node returned no response payload")
     if which == "error":
         raise grpc.RpcError(str(response.error))
+    if which != field_name:
+        # A variant this call does not model must fail the read, never decode
+        # as an empty message of the expected field.
+        raise grpc.RpcError(f"Node returned {which} where {field_name} was expected")
     return getattr(response, field_name)
+
+
+def _missing_block(info) -> MissingBlock:
+    """Convert a BlockPrunedInfo / BlockUnavailableInfo into the coverage entry.
+
+    These messages carry no monetary field, so no profile check applies: the
+    only data used here is a raw hash bytes field and two int64 heights.
+    """
+
+    block_height = info.block_height
+    prune_floor = info.prune_floor
+    if type(block_height) is not int or block_height < 0:
+        raise ValueError(f"Node returned an invalid missing-body height {block_height!r}")
+    if type(prune_floor) is not int:
+        raise ValueError(f"Node returned an invalid prune floor {prune_floor!r}")
+    block_hash = bytes(info.hash).hex()
+    if not block_hash:
+        raise ValueError("Node returned a missing-body entry without a hash")
+    return MissingBlock(
+        block_hash=block_hash,
+        block_height=block_height,
+        prune_floor=prune_floor,
+    )
 
 
 def _transfer_to_dict(message) -> Dict[str, Any]:
@@ -170,20 +212,81 @@ class GrpcNodeClient:
     async def close(self):
         await self.channel.close()
 
-    async def get_blocks_by_height(self, start: int, end: int) -> List[Dict[str, Any]]:
-        try:
-            query = common.BlocksQueryByHeight(startBlockNumber=start, endBlockNumber=end)
+    async def get_blocks_by_height(
+        self, start: int, end: int
+    ) -> Optional[BlocksByHeightPage]:
+        """Read a height range, opting into the observer's pruned/unavailable split.
 
-            blocks = []
+        ``include_missing`` is ignored by observers without
+        F1R3FLY-io/f1r3node-rust#1097, so those answer with served blocks only
+        and the page reports no permanent gaps. Returns None when the request
+        fails, so an RPC outage is not mistaken for a range with no blocks.
+        """
+        try:
+            query = common.BlocksQueryByHeight(
+                startBlockNumber=start,
+                endBlockNumber=end,
+                include_missing=True,
+            )
+
+            blocks: List[Dict[str, Any]] = []
+            pruned: List[MissingBlock] = []
+            unavailable: List[MissingBlock] = []
             with node_request_duration.labels("blocks_by_height").time():
                 async for response in self.stub.getBlocksByHeights(query, timeout=self.timeout):
-                    blocks.append(_to_dict(_unwrap(response, "blockInfo")))
+                    which = response.WhichOneof("message")
+                    if which == "blockInfo":
+                        blocks.append(_to_dict(response.blockInfo))
+                    elif which == "pruned":
+                        pruned.append(_missing_block(response.pruned))
+                    elif which == "unavailable":
+                        unavailable.append(_missing_block(response.unavailable))
+                    elif which == "error":
+                        raise grpc.RpcError(str(response.error))
+                    else:
+                        raise ValueError("Node returned an empty by-heights payload")
 
-            return blocks
+            return BlocksByHeightPage(
+                blocks=blocks, pruned=pruned, unavailable=unavailable
+            )
 
         except (grpc.RpcError, ValueError) as e:
             logger.error(f"Failed to get blocks by height {start}-{end}: {e}")
-            return []
+            return None
+
+    async def get_block_availability(self, block_hash: str) -> Optional[str]:
+        """Classify one block body through the observer's HTTP API.
+
+        Used for hashes outside the requested height range, typically the
+        parent of the lowest served block, where the range response cannot
+        describe them. Returns one of ``available``, ``pruned``,
+        ``unavailable``, ``missing``, or None when the answer is not a
+        documented classification and the caller must retry.
+        """
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", block_hash):
+            # A saved recovery path could carry a damaged hash; keep the cycle
+            # alive and let the caller retry rather than failing the batch.
+            logger.warning("Not classifying an invalid block hash", value=str(block_hash)[:80])
+            return None
+        url = f"http://{self.node_host}:{self.http_port}/api/block/{block_hash.lower()}"
+        try:
+            timeout = aiohttp.ClientTimeout(total=BALANCE_TIMEOUT_SECONDS)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as response:
+                    code = None
+                    if response.status != 200:
+                        try:
+                            body = await response.json(content_type=None)
+                        except (aiohttp.ContentTypeError, ValueError):
+                            body = None
+                        if isinstance(body, dict) and isinstance(body.get("error"), str):
+                            code = body["error"]
+                    return _BLOCK_HTTP_CLASSES.get((response.status, code))
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.warning(
+                "Failed to classify block availability", block_hash=block_hash, error=str(e)
+            )
+            return None
 
     async def get_last_finalized_block(self) -> Optional[Dict[str, Any]]:
         try:

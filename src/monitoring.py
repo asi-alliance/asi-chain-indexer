@@ -12,6 +12,7 @@ from prometheus_client import Counter, Gauge, Histogram, generate_latest, REGIST
 import structlog
 
 from src.addr import is_valid_vault_address
+from src.block_coverage import empty_state, summarize
 from src.config import settings
 from src.database import db
 from src.read_cache import read_cache
@@ -87,6 +88,21 @@ async def sample_event_loop_lag(interval: float = EVENT_LOOP_LAG_INTERVAL):
 node_reachable = Gauge(
     "indexer_node_reachable",
     "1 when the last sync-loop read of the last finalized block succeeded, 0 otherwise"
+)
+
+pruned_block_hashes = Counter(
+    "indexer_pruned_block_hashes_total",
+    "Block bodies the observer reported as permanently pruned, counted on first sighting"
+)
+
+pruned_degraded_blocks = Counter(
+    "indexer_pruned_degraded_blocks_total",
+    "Indexed blocks whose stored ancestry crosses a permanently pruned body"
+)
+
+prune_floor_height = Gauge(
+    "indexer_prune_floor_height",
+    "Highest retention floor the observer reported with a pruned body; NaN before the first"
 )
 
 chain_tip_height = Gauge(
@@ -342,6 +358,11 @@ class MonitoringServer:
 
             # Calculate sync status
             last_indexed = int(stats.get("last_indexed_block") or -1)
+            coverage = (
+                self.indexer.coverage_summary()
+                if self.indexer is not None and hasattr(self.indexer, "coverage_summary")
+                else summarize(empty_state())
+            )
 
             return {
                 "indexer": {
@@ -354,6 +375,7 @@ class MonitoringServer:
                     "sync_percentage": (last_indexed / latest_block * 100) if latest_block else 0,
                     "syncing_from_genesis": True
                 },
+                "coverage": coverage,
                 "database": {
                     "total_blocks": stats.get("total_blocks", 0),
                     "total_deployments": stats.get("total_deployments", 0),

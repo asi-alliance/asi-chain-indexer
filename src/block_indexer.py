@@ -19,10 +19,27 @@ from sqlalchemy.exc import InterfaceError, OperationalError
 
 from src.addr import convert_to_asi_address, public_key_to_asi_address
 from src.alerts import AlertedError, AlertEvent, AlertKind, AlertService, describe_error
+from src.block_coverage import (
+    BlocksByHeightPage,
+    empty_state,
+    normalize_state,
+    pruned_hashes,
+    record_classified,
+    record_degraded,
+    record_pruned,
+    summarize,
+)
 from src.config import settings
 from src.amounts import amount, token_decimal, integer_json
 from src.database import db
-from src.monitoring import block_stage_duration, sync_duration
+from src.monitoring import (
+    UNKNOWN,
+    block_stage_duration,
+    prune_floor_height,
+    pruned_block_hashes,
+    pruned_degraded_blocks,
+    sync_duration,
+)
 from src.read_cache import read_cache
 from src.models import (
     Block, BlockParent, Deployment, Transfer, Validator, ValidatorBond,
@@ -117,6 +134,14 @@ class BlockIndexer:
         self.node_reachable = False
         self.pending_deploys: Optional[PendingDeploysPoller] = None
         self._pending_task: Optional[asyncio.Task] = None
+        # Bounded ledger of bodies this observer permanently pruned, plus the
+        # in-memory hash set the parent checks consult. Loaded on the first
+        # sync cycle so a restart resumes with the same knowledge.
+        self._coverage: dict = empty_state()
+        self._coverage_loaded = False
+        self._coverage_dirty = False
+        self._pruned_hashes: set = set()
+        self._degraded_blocks: list = []
 
     async def start(self):
         """Start the enhanced indexer."""
@@ -128,6 +153,7 @@ class BlockIndexer:
         logger.info("📊 Connecting to database...")
         await db.connect()
         await db.create_tables()
+        await self._load_coverage()
         if settings.enable_asi_transfer_extraction:
             async with db.session() as session:
                 needs_repair = await session.scalar(text(
@@ -322,6 +348,63 @@ class BlockIndexer:
             .with_context("cycles", settings.lag_alert_cycles)
         )
 
+    async def _load_coverage(self):
+        """Read the pruned-body ledger once, before the first range request."""
+        if self._coverage_loaded:
+            return
+        self._coverage = normalize_state(await db.get_block_coverage())
+        self._pruned_hashes = pruned_hashes(self._coverage)
+        self._coverage_loaded = True
+        self._set_prune_floor_gauge()
+
+    def _set_prune_floor_gauge(self) -> None:
+        floor = self._coverage.get("prune_floor")
+        prune_floor_height.set(UNKNOWN if floor is None else floor)
+
+    def coverage_summary(self) -> dict:
+        """The pruned-body ledger summary served by ``/status``."""
+        return summarize(self._coverage)
+
+    def _record_page(self, page: BlocksByHeightPage) -> None:
+        """Keep the permanent gaps one page reported and count first sightings."""
+        if not page.pruned:
+            return
+        previous = self._coverage
+        self._coverage, added = record_pruned(previous, page.pruned)
+        self._pruned_hashes.update(entry.block_hash for entry in page.pruned)
+        # A rescan of a known hash still raises the recorded prune floor, so the
+        # state is compared instead of relying on first sightings alone.
+        if added or self._coverage != previous:
+            self._coverage_dirty = True
+        if added:
+            pruned_block_hashes.inc(added)
+        self._set_prune_floor_gauge()
+
+    async def _commit_coverage(self) -> None:
+        """Persist coverage changes, including blocks indexed since the last save."""
+        # A hash this process classified through the single-block route has no
+        # height yet: adopt it into the ledger's classified bucket so the gap
+        # stays visible in /status and survives a restart.
+        classified = sorted(self._pruned_hashes - pruned_hashes(self._coverage))
+        if classified:
+            self._coverage, added = record_classified(self._coverage, classified)
+            if added:
+                pruned_block_hashes.inc(added)
+            self._coverage_dirty = True
+        if self._degraded_blocks:
+            self._coverage, added = record_degraded(self._coverage, self._degraded_blocks)
+            self._degraded_blocks = []
+            if added:
+                pruned_degraded_blocks.inc(added)
+                self._coverage_dirty = True
+        # The live set mirrors the bounded ledger, so a long backfill cannot
+        # grow it past the row it is derived from.
+        self._pruned_hashes.intersection_update(pruned_hashes(self._coverage))
+        if not self._coverage_dirty:
+            return
+        await db.save_block_coverage(self._coverage)
+        self._coverage_dirty = False
+
     async def _start_pending_deploys(self):
         """Start the pending-deploy poller, or clear the pending view when it is off.
 
@@ -366,6 +449,7 @@ class BlockIndexer:
         try:
             # Get last indexed block
             last_indexed = await db.get_last_indexed_block()
+            await self._load_coverage()
 
             # Get latest finalized block
             last_finalized_data = await self.client.get_last_finalized_block()
@@ -429,7 +513,12 @@ class BlockIndexer:
 
             block_summaries = await self.client.get_blocks_by_height(start, end)
 
-            if not block_summaries:
+            if block_summaries is None:
+                logger.warning("No by-heights page returned for range", start=start, end=end)
+                self._track_node_availability(False, f"no by-heights page for {start}-{end}")
+                return
+
+            if block_summaries.is_empty:
                 logger.warning("No blocks returned for range", start=start, end=end)
                 # an empty range (start_from_block above the finalized tip) is not an outage
                 self._track_node_availability(
@@ -437,18 +526,49 @@ class BlockIndexer:
                 )
                 return
 
+            self._record_page(block_summaries)
             self._track_node_availability(True)
 
-            logger.info(f"Retrieved {len(block_summaries)} blocks, fetching details...")
+            # A height the observer permanently pruned is covered by nothing at
+            # all: it may be passed, and its hashes are already in the ledger.
+            # A height with a retry-eligible body must not be passed.
+            fully_pruned = block_summaries.fully_pruned_heights()
+            retryable_heights = {entry.block_height for entry in block_summaries.unavailable}
+            if fully_pruned:
+                logger.warning(
+                    "Observer permanently pruned block bodies at covered heights",
+                    heights=sorted(fully_pruned)[:5],
+                    pruned_height_count=len(fully_pruned),
+                    pruned_hash_count=sum(len(hashes) for hashes in fully_pruned.values()),
+                    prune_floor=block_summaries.prune_floor,
+                )
+            if retryable_heights:
+                logger.info(
+                    "Observer reported retry-eligible bodies; keeping the cursor below them",
+                    heights=sorted(retryable_heights)[:5],
+                    height_count=len(retryable_heights),
+                    prune_floor=block_summaries.prune_floor,
+                )
 
-            # Only advance through heights for which every returned sibling
-            # succeeded. A failed sibling is retried on the next sync cycle.
+            logger.info(
+                f"Retrieved {len(block_summaries.blocks)} blocks",
+                pruned_hashes=len(block_summaries.pruned),
+                unavailable_hashes=len(block_summaries.unavailable),
+            )
+
+            # Only advance through heights for which every reported hash was
+            # indexed or permanently pruned by the observer. A failed sibling
+            # and a retry-eligible body are retried on the next sync cycle.
             progress = BlockBatchProgress(start, end)
+            for height in fully_pruned:
+                progress.mark_pruned(height)
+            for height in retryable_heights:
+                progress.mark_failed(height)
             processed_count = 0
             skipped = []
             last_skip_error = None
             recovery_deferred = False
-            ordered = sorted(block_summaries, key=lambda block: (
+            ordered = sorted(block_summaries.blocks, key=lambda block: (
                 block.get("blockNumber") if block.get("blockNumber") is not None else -1,
                 block.get("blockHash") or ""
             ))
@@ -511,6 +631,15 @@ class BlockIndexer:
                 sync_duration.observe(time.perf_counter() - started)
 
             completed_height = progress.last_completed_height
+            if progress.pruned_heights:
+                logger.warning(
+                    "Cursor covers heights whose bodies this observer pruned",
+                    passed_heights=sorted(progress.pruned_heights),
+                    prune_floor=block_summaries.prune_floor,
+                )
+            # Persist coverage before the cursor: a crash between the two then
+            # re-reads the same page, and merging the same gaps is idempotent.
+            await self._commit_coverage()
             if completed_height >= start:
                 await db.set_last_indexed_block(completed_height)
 
@@ -536,6 +665,15 @@ class BlockIndexer:
         except Exception as e:
             logger.error(f"Sync blocks error: {e}", exc_info=True)
             self._record_cycle_failure(e)
+        finally:
+            # Coverage learned by a partial batch (or a recovery walk) must not
+            # be lost when the cycle returns early or raises. The cursor write
+            # above already required a successful save, so a second failure here
+            # is only logged and retried next cycle.
+            try:
+                await self._commit_coverage()
+            except Exception:
+                logger.exception("Failed to persist block coverage")
 
     def _needs_traces(self, block_data: Dict) -> bool:
         return bool(
@@ -614,10 +752,31 @@ class BlockIndexer:
 
         block, events = supplied.get(block_hash, (None, None))
         if block is None:
+            if block_hash in self._pruned_hashes:
+                logger.warning(
+                    "Skipping an ancestor this observer permanently pruned",
+                    block_hash=block_hash,
+                    child_height=child_height,
+                )
+                path.pop()
+                return
             await asyncio.sleep(settings.delay_before_node)
             block = await self._read_details(block_hash)
         info = (block or {}).get("blockInfo", {})
         if info.get("blockHash") != block_hash:
+            availability = None
+            classify = getattr(self.client, "get_block_availability", None)
+            if classify is not None:
+                availability = await classify(block_hash)
+            if availability == "pruned":
+                self._pruned_hashes.add(block_hash)
+                logger.warning(
+                    "Ancestor body permanently pruned on the observer; not retrying it",
+                    block_hash=block_hash,
+                    child_height=child_height,
+                )
+                path.pop()
+                return
             raise ReportUnavailable(f"Node did not return the requested ancestor {block_hash}")
         height = info.get("blockNumber")
         if type(height) is not int or not 0 <= height < child_height:
@@ -636,7 +795,7 @@ class BlockIndexer:
 
         if not expanded and height > settings.start_from_block:
             async with db.session() as session:
-                missing = await unindexed_parent_hashes(session, parents)
+                missing = await unindexed_parent_hashes(session, parents, self._pruned_hashes)
             if missing:
                 # Revisit this block only after its parents are committed.
                 path[-1] = (block_hash, child_height, True)
@@ -731,12 +890,16 @@ class BlockIndexer:
                 )
 
             if traces is not None:
-                movements = await reconcile_block(session, block_info, deployments, traces, self.client)
+                movements = await reconcile_block(
+                    session, block_info, deployments, traces, self.client, self._pruned_hashes
+                )
                 for deploy_data in deployments:
                     deploy_data["executedTransfers"] = movements[deploy_data["sig"]]
                     await self._store_transfers(session, block_info, deploy_data)
             elif block_number != 0:
-                await require_indexed_parents(session, block_info, self.client)
+                await require_indexed_parents(
+                    session, block_info, self.client, self._pruned_hashes
+                )
 
             if settings.enable_asi_transfer_extraction and block_number != 0:
                 await reconcile_completed_duplicates(session, block_info)
@@ -751,6 +914,21 @@ class BlockIndexer:
                 await self._process_genesis_balance_states(session, genesis_block_info)
 
             await session.commit()
+            # Ancestry that crosses a permanently pruned body cannot be
+            # reconciled across the gap. The block is real and stays indexed,
+            # but the gap is recorded rather than presented as complete.
+            pruned_parents = sorted(
+                parent for parent in parent_hashes if parent in self._pruned_hashes
+            )
+            if pruned_parents:
+                self._degraded_blocks.append((block_hash, block_number, pruned_parents))
+                logger.warning(
+                    "Indexed block whose ancestry crosses pruned bodies",
+                    block_hash=block_hash,
+                    block_number=block_number,
+                    missing_parent_count=len(pruned_parents),
+                    missing_parents=pruned_parents[:3],
+                )
             block_stage_duration.labels("write").observe(time.perf_counter() - write_started)
             # Blocks, deployments and transfers changed: drop cached reads now,
             # not after the block_validators write below, which can wait on locks

@@ -6,6 +6,7 @@ from prometheus_client import REGISTRY
 import pytest
 
 from src.block_indexer import BlockIndexer
+from src.block_coverage import BlocksByHeightPage
 from src.monitoring import sample_event_loop_lag
 
 
@@ -18,6 +19,7 @@ class FakeDatabase:
     def __init__(self, last_indexed=9):
         self.last_indexed = last_indexed
         self.set_calls = []
+        self.coverage = {}
 
     async def get_recovery_path(self):
         return []
@@ -28,6 +30,12 @@ class FakeDatabase:
     async def set_last_indexed_block(self, block_number):
         self.last_indexed = block_number
         self.set_calls.append(block_number)
+
+    async def get_block_coverage(self):
+        return self.coverage
+
+    async def save_block_coverage(self, state):
+        self.coverage = state
 
     @asynccontextmanager
     async def session(self):
@@ -49,7 +57,11 @@ class TimelineClient:
         return {"blockNumber": self.blocks[-1]["blockNumber"]}
 
     async def get_blocks_by_height(self, start, end):
-        return [b for b in self.blocks if start <= b["blockNumber"] <= end]
+        return BlocksByHeightPage(
+            blocks=[b for b in self.blocks if start <= b["blockNumber"] <= end],
+            pruned=[],
+            unavailable=[],
+        )
 
     async def get_block_details(self, block_hash):
         if block_hash in self.missing:

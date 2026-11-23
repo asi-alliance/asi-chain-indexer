@@ -38,6 +38,8 @@ def stored(monkeypatch):
     for module in ("src.monitoring.db", "src.block_indexer.db"):
         monkeypatch.setattr(f"{module}.get_recovery_path", AsyncMock(return_value=[]))
         monkeypatch.setattr(f"{module}.get_last_indexed_block", last_indexed)
+        monkeypatch.setattr(f"{module}.get_block_coverage", AsyncMock(return_value={}))
+        monkeypatch.setattr(f"{module}.save_block_coverage", AsyncMock())
         monkeypatch.setattr(f"{module}.execute_raw", execute_raw)
 
 
@@ -77,6 +79,8 @@ async def test_metrics_and_status_use_the_tip_from_the_sync_loop(stored):
         indexer.chain_tip_observed_at.isoformat()
     )
     assert status["indexer"]["sync_lag"] == 20
+    assert status["coverage"]["pruned_heights"] == 0
+    assert status["coverage"]["prune_floor"] is None
 
 
 @pytest.mark.asyncio

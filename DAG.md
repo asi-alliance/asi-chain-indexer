@@ -92,9 +92,9 @@ There is no fixed “wait N descendant blocks” rule established by this refere
 1. Reads the LFB height and requests `getBlocksByHeights` from the persisted cursor through that height.
 2. Fetches each returned block by hash. The node range RPC traverses height sets, rather than filtering only finalized blocks, so the range can include unfinalized blocks below or at the LFB height.
 3. Stores the node's `isFinalized` value as `finalized` or `unfinalized`.
-4. Uses `BlockBatchProgress` to advance only through consecutive heights whose returned blocks were processed successfully. A failed returned sibling prevents advancing past that height and is retried.
+4. Uses `BlockBatchProgress` to advance only through consecutive heights whose returned hashes were processed successfully. A failed returned sibling prevents advancing past that height and is retried. The range request opts into `include_missing` (node PR [#1097][node-pruned]): a hash the observer reports as permanently `pruned` is recorded in the bounded `block_coverage` ledger and does not pin the cursor when every hash at its height is pruned, while an `unavailable` body stays retry eligible and pins it.
 
-The cursor is `indexer_state.last_indexed_block`, **not** `MAX(block_number)`. This fixes the transcript's older description of advancing past a failed sibling. However, successful processing of all returned blocks does not prove the node returned every block that will ever be known at that height. The normal loop does not revisit completed heights to discover late siblings.
+The cursor is `indexer_state.last_indexed_block`, **not** `MAX(block_number)`. This fixes the transcript's older description of advancing past a failed sibling. It names the last height that was covered: every hash the observer reported there was indexed or permanently pruned on that observer. However, successful processing of all returned blocks does not prove the node returned every block that will ever be known at that height. The normal loop does not revisit completed heights to discover late siblings.
 
 The loop also does not continuously ingest the tip above the LFB, and `_process_block` skips an already stored hash. Thus stored finality flags are snapshots, with no general refresh pass when finality changes. Supporting a live unfinalized DAG requires tip ingestion, overlap/rescanning, and finality updates together.
 
@@ -230,6 +230,7 @@ The remaining product choices are which views include unfinalized blocks, how wi
 [node-dag]: https://github.com/F1R3FLY-io/f1r3node-rust/blob/9a86280a63f51e1d3af71f3ee917bd7cf6253084/block-storage/src/rust/dag/block_dag_key_value_storage.rs
 [node-deploy-status]: https://github.com/F1R3FLY-io/f1r3node-rust/blob/9a86280a63f51e1d3af71f3ee917bd7cf6253084/casper/src/rust/api/deploy_finalization_status.rs
 [node-api]: https://github.com/F1R3FLY-io/f1r3node-rust/blob/9a86280a63f51e1d3af71f3ee917bd7cf6253084/casper/src/rust/api/block_api.rs
+[node-pruned]: https://github.com/F1R3FLY-io/f1r3node-rust/pull/1097
 [node-proto]: https://github.com/F1R3FLY-io/f1r3node-rust/blob/9a86280a63f51e1d3af71f3ee917bd7cf6253084/models/src/main/protobuf/CasperMessage.proto
 [node-metadata]: https://github.com/F1R3FLY-io/f1r3node-rust/blob/9a86280a63f51e1d3af71f3ee917bd7cf6253084/models/src/rust/block_metadata.rs
 [node-gc]: https://github.com/F1R3FLY-io/f1r3node-rust/blob/9a86280a63f51e1d3af71f3ee917bd7cf6253084/casper/src/rust/util/mergeable_channels_gc.rs

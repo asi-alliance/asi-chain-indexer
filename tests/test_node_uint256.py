@@ -261,9 +261,8 @@ async def test_all_consumed_rpc_paths_decode_wide_money():
             "stake"
         ] == MAX_AMOUNT
         assert (await client.get_bonds())["bonds"][0]["stake"] == MAX_AMOUNT
-        assert (await client.get_blocks_by_height(12, 12))[0]["bonds"][0][
-            "stake"
-        ] == MAX_AMOUNT
+        by_height = await client.get_blocks_by_height(12, 12)
+        assert by_height.blocks[0]["bonds"][0]["stake"] == MAX_AMOUNT
         assert (await client.show_main_chain())[0]["bonds"][0]["stake"] == MAX_AMOUNT
         assert (await client.get_block_details(BLOCK_HASH))["deploys"][0][
             "phloPrice"

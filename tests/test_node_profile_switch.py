@@ -163,7 +163,7 @@ async def test_every_read_rejects_incompatible_money_after_successful_startup(da
         if damage == "bond":
             assert await client.get_last_finalized_block() is None
             assert await client.get_bonds() is None
-            assert await client.get_blocks_by_height(1, 1) == []
+            assert await client.get_blocks_by_height(1, 1) is None
             assert await client.show_main_chain() is None
 
 

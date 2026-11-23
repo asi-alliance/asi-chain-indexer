@@ -130,7 +130,42 @@ message BlockInfoResponse {
   oneof message {
     servicemodelapi.ServiceError error        = 1;
     LightBlockInfo blockInfo  = 2;
+    // One hash per interleaved missing sibling of getBlocksByHeights, sent
+    // only when the query sets include_missing. Unused by showMainChain and
+    // getBlocks; wire-additive for existing clients.
+    //
+    // `pruned`: block_height <= prune_floor. The retention sweep has
+    // advanced past this height, so the body is permanently gone on that
+    // observer.
+    //
+    // `unavailable`: block_height > prune_floor. The DAG names the hash but
+    // the body is not in the store and the sweep has not reached this
+    // height, so a retry may succeed.
+    BlockPrunedInfo pruned          = 3;
+    BlockUnavailableInfo unavailable = 4;
   }
+}
+
+message BlockPrunedInfo {
+  // Raw block hash whose body was missing when the response was walked.
+  bytes hash         = 1;
+  // Height recorded in the DAG metadata index, which the retention pass
+  // does not sweep.
+  int64 block_height = 2;
+  // Responder's effective-anchor floor when this response was assembled.
+  // For BlockPrunedInfo, block_height <= prune_floor.
+  int64 prune_floor  = 3;
+}
+
+message BlockUnavailableInfo {
+  // Raw block hash whose body was missing when the response was walked.
+  bytes hash         = 1;
+  // Height recorded in the DAG metadata index.
+  int64 block_height = 2;
+  // Responder's effective-anchor floor. For BlockUnavailableInfo,
+  // block_height > prune_floor, so the sweep has not reached this height
+  // and a retry may succeed.
+  int64 prune_floor  = 3;
 }
 
 // listenForDataAtPar
