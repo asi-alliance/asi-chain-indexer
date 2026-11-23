@@ -37,6 +37,8 @@ jobs:
         run: |
           docker compose run --rm --no-deps indexer python -m pip check
           docker compose run --rm --no-deps indexer python -c 'import importlib.util; import src.main; assert all(importlib.util.find_spec(p) is None for p in ("pytest", "black", "flake8", "mypy", "grpc_tools"))'
+      - name: Verify native decimal in the production image
+        run: docker compose run --rm --no-deps indexer python -c 'import _decimal, decimal; assert decimal.Decimal is _decimal.Decimal'
       - name: Start isolated database stack
         run: docker compose up -d --wait --wait-timeout 180 postgres hasura metrics-cron
       - name: Initialize fresh Hasura metadata and verify permissions
