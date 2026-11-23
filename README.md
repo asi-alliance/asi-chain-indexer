@@ -376,8 +376,10 @@ survives restarts and is summarized by `GET /status` under `coverage`. The
 parent of the lowest served block in a page lies outside the requested range, so
 an unindexed parent that is not in the ledger is classified once through
 `GET /api/block/{hash}`: only `410 block_pruned` is treated as permanent, and
-the hash is recorded with the block whose ancestry crosses it. A
-`503 block_unavailable` (or any other answer) stays retryable.
+the hash joins the ledger's `classified_hashes` list (that answer names no
+height) as well as the block whose ancestry crosses it. A
+`503 block_unavailable` (or any other answer) stays retryable. The live set of
+pruned hashes mirrors the ledger, so trimming the row also bounds it.
 
 Inspect an unfinished recovery in the indexer database with:
 
@@ -500,8 +502,9 @@ Exported metrics include `indexer_blocks_indexed_total`,
 `indexer_pruned_degraded_blocks_total` and `indexer_prune_floor_height`.
 
 - `indexer_pruned_block_hashes_total` counts block bodies the observer reported
-  as permanently pruned at a height the cursor covered. Only first sightings are
-  counted; a rescan of the same height does not repeat them.
+  as permanently pruned, whether the range walk named them at a height or the
+  single-block route confirmed them. Only first sightings are counted; a rescan
+  of the same height does not repeat them.
 - `indexer_pruned_degraded_blocks_total` counts indexed blocks whose stored
   ancestry crosses a permanently pruned body.
 - `indexer_prune_floor_height` is the highest retention floor the observer

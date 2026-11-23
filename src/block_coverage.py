@@ -12,6 +12,11 @@ The record lives in the existing ``indexer_state`` row named
 ``block_coverage``. It is bounded and best-effort: it is evidence of what the
 observer reported, not a per-block provenance store, and it never substitutes
 for the blocks and deploy reports themselves.
+
+Most pruned hashes arrive inside a height range and keep their height. A hash
+classified through the single-block route (``410 block_pruned``) names no
+height, so it is kept in a separate, equally bounded list and every reader of
+this module sees both through :func:`pruned_hashes`.
 """
 
 import copy
@@ -25,6 +30,7 @@ STATE_KEY = "block_coverage"
 # Bound the row so a long-lived pruned observer cannot grow it without limit.
 MAX_TRACKED_HEIGHTS = 1000
 MAX_TRACKED_DEGRADED_BLOCKS = 1000
+MAX_TRACKED_CLASSIFIED_HASHES = 1000
 
 
 @dataclass(frozen=True)
@@ -79,6 +85,7 @@ def empty_state() -> Dict[str, Any]:
     return {
         "prune_floor": None,
         "heights": {},
+        "classified_hashes": [],
         "degraded_blocks": {},
         "updated_at": None,
     }
@@ -107,6 +114,15 @@ def normalize_state(raw: Any) -> Dict[str, Any]:
             cleaned = [h for h in hashes if isinstance(h, str) and h]
             if cleaned:
                 state["heights"][str(height)] = cleaned
+
+    classified = raw.get("classified_hashes")
+    if isinstance(classified, list):
+        cleaned = [
+            block_hash
+            for block_hash in classified
+            if isinstance(block_hash, str) and block_hash
+        ]
+        state["classified_hashes"] = list(dict.fromkeys(cleaned))
 
     degraded = raw.get("degraded_blocks")
     if isinstance(degraded, dict):
@@ -149,7 +165,38 @@ def record_pruned(
             added += 1
         if merged["prune_floor"] is None or entry.prune_floor > merged["prune_floor"]:
             merged["prune_floor"] = entry.prune_floor
+    # A hash whose height this page names is no longer classified-only.
+    located = {
+        block_hash for hashes in merged["heights"].values() for block_hash in hashes
+    }
+    merged["classified_hashes"] = [
+        block_hash
+        for block_hash in merged["classified_hashes"]
+        if block_hash not in located
+    ]
     if not added and merged == state:
+        return merged, 0
+    return _stamp(_bounded(merged)), added
+
+
+def record_classified(
+    state: Dict[str, Any], hashes: Iterable[str]
+) -> Tuple[Dict[str, Any], int]:
+    """Merge hashes classified as permanently pruned without a known height.
+
+    ``GET /api/block/{hash}`` answers ``410 block_pruned`` with the hash only,
+    so these cannot join the height map. Returns the new state and the number
+    of hashes that were not recorded before.
+    """
+
+    merged = copy.deepcopy(state)
+    recorded = merged["classified_hashes"]
+    added = 0
+    for block_hash in hashes:
+        if block_hash and block_hash not in recorded:
+            recorded.append(block_hash)
+            added += 1
+    if not added:
         return merged, 0
     return _stamp(_bounded(merged)), added
 
@@ -178,9 +225,12 @@ def record_degraded(
 
 
 def pruned_hashes(state: Dict[str, Any]) -> Set[str]:
-    """Every hash recorded as permanently pruned."""
+    """Every hash recorded as permanently pruned, with or without a height."""
 
-    return {block_hash for hashes in state["heights"].values() for block_hash in hashes}
+    recorded: Set[str] = set(state["classified_hashes"])
+    for hashes in state["heights"].values():
+        recorded.update(hashes)
+    return recorded
 
 
 def summarize(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -190,7 +240,8 @@ def summarize(state: Dict[str, Any]) -> Dict[str, Any]:
     pruned_heights = sorted(int(height) for height in heights)
     return {
         "pruned_heights": len(heights),
-        "pruned_hashes": sum(len(hashes) for hashes in heights.values()),
+        "pruned_hashes": len(pruned_hashes(state)),
+        "classified_hashes": len(state["classified_hashes"]),
         "degraded_blocks": len(state["degraded_blocks"]),
         "prune_floor": state["prune_floor"],
         "last_pruned_height": pruned_heights[-1] if pruned_heights else None,
@@ -200,6 +251,9 @@ def summarize(state: Dict[str, Any]) -> Dict[str, Any]:
 
 def _bounded(state: Dict[str, Any]) -> Dict[str, Any]:
     _trim(state["heights"], MAX_TRACKED_HEIGHTS, lambda item: int(item[0]))
+    state["classified_hashes"] = state["classified_hashes"][
+        -MAX_TRACKED_CLASSIFIED_HASHES:
+    ]
     _trim(
         state["degraded_blocks"],
         MAX_TRACKED_DEGRADED_BLOCKS,

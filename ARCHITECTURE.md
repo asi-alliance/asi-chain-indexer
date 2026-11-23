@@ -254,7 +254,7 @@ Key fields:
 - `value` (TEXT): State value
 - `updated_at` (TIMESTAMP): Last update time
 
-Common keys: `last_indexed_block`, `indexer_version`, `schema_version`, `pending_deploys_total_available` (pre-cap pending deploy count), `pending_deploys_status` (JSON `nodes`, `reachable`, `count`, `total_available`, `interval_ms`; rewritten on change and at least every 10 s, absent when pending deploys are off), `block_coverage` (JSON `prune_floor`, `heights` of permanently pruned hashes, `degraded_blocks`, `updated_at`; bounded and rewritten only when it changes)
+Common keys: `last_indexed_block`, `indexer_version`, `schema_version`, `pending_deploys_total_available` (pre-cap pending deploy count), `pending_deploys_status` (JSON `nodes`, `reachable`, `count`, `total_available`, `interval_ms`; rewritten on change and at least every 10 s, absent when pending deploys are off), `block_coverage` (JSON `prune_floor`, `heights` of permanently pruned hashes, `classified_hashes` confirmed through the single-block route without a height, `degraded_blocks`, `updated_at`; bounded and rewritten only when it changes)
 
 #### Normalization and Relationships
 

@@ -24,6 +24,7 @@ from src.block_coverage import (
     empty_state,
     normalize_state,
     pruned_hashes,
+    record_classified,
     record_degraded,
     record_pruned,
     summarize,
@@ -368,21 +369,37 @@ class BlockIndexer:
         """Keep the permanent gaps one page reported and count first sightings."""
         if not page.pruned:
             return
-        self._coverage, added = record_pruned(self._coverage, page.pruned)
+        previous = self._coverage
+        self._coverage, added = record_pruned(previous, page.pruned)
         self._pruned_hashes.update(entry.block_hash for entry in page.pruned)
+        # A rescan of a known hash still raises the recorded prune floor, so the
+        # state is compared instead of relying on first sightings alone.
+        if added or self._coverage != previous:
+            self._coverage_dirty = True
         if added:
             pruned_block_hashes.inc(added)
-            self._coverage_dirty = True
         self._set_prune_floor_gauge()
 
     async def _commit_coverage(self) -> None:
         """Persist coverage changes, including blocks indexed since the last save."""
+        # A hash this process classified through the single-block route has no
+        # height yet: adopt it into the ledger's classified bucket so the gap
+        # stays visible in /status and survives a restart.
+        classified = sorted(self._pruned_hashes - pruned_hashes(self._coverage))
+        if classified:
+            self._coverage, added = record_classified(self._coverage, classified)
+            if added:
+                pruned_block_hashes.inc(added)
+            self._coverage_dirty = True
         if self._degraded_blocks:
             self._coverage, added = record_degraded(self._coverage, self._degraded_blocks)
             self._degraded_blocks = []
             if added:
                 pruned_degraded_blocks.inc(added)
                 self._coverage_dirty = True
+        # The live set mirrors the bounded ledger, so a long backfill cannot
+        # grow it past the row it is derived from.
+        self._pruned_hashes.intersection_update(pruned_hashes(self._coverage))
         if not self._coverage_dirty:
             return
         await db.save_block_coverage(self._coverage)

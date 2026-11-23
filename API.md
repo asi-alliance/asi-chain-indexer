@@ -105,7 +105,8 @@ Detailed status information about the indexer.
   },
   "coverage": {
     "pruned_heights": 2,
-    "pruned_hashes": 3,
+    "pruned_hashes": 4,
+    "classified_hashes": 1,
     "degraded_blocks": 1,
     "prune_floor": 120,
     "last_pruned_height": 119,
@@ -123,7 +124,7 @@ Detailed status information about the indexer.
 `node` describes the last finalized block that the sync loop read; `/status` does not call the node.
 `connected` is `false` and `latest_block` is `null` before the first successful read and after a failed one.
 `latest_block_observed_at` is the time of the last successful read in UTC with an explicit offset (`+00:00`), so it shows how old the observation is.
-`coverage` summarizes the bounded ledger of block bodies the observer permanently pruned: how many heights and hashes are recorded, how many indexed blocks have ancestry across a pruned body, the highest reported `prune_floor`, and the newest recorded pruned height.
+`coverage` summarizes the bounded ledger of block bodies the observer permanently pruned: how many heights are recorded, how many distinct hashes are recorded (`pruned_hashes`, of which `classified_hashes` were confirmed through the single-block route and carry no height), how many indexed blocks have ancestry across a pruned body, the highest reported `prune_floor`, and the newest recorded pruned height.
 
 ### GET /metrics
 Prometheus-compatible metrics endpoint. `indexer_sync_lag_blocks` uses the last finalized height that the sync loop read; a scrape does not call the node.

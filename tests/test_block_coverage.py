@@ -1,10 +1,12 @@
 from src.block_coverage import (
+    MAX_TRACKED_CLASSIFIED_HASHES,
     MAX_TRACKED_HEIGHTS,
     BlocksByHeightPage,
     MissingBlock,
     empty_state,
     normalize_state,
     pruned_hashes,
+    record_classified,
     record_degraded,
     record_pruned,
     summarize,
@@ -54,6 +56,7 @@ def test_normalize_state_ignores_a_damaged_row():
         {
             "prune_floor": "high",
             "heights": {"10": [HASH_A, "", 3], "not-a-height": [HASH_B], "11": "nope"},
+            "classified_hashes": [HASH_C, {"hash": HASH_A}, ""],
             "degraded_blocks": {"child": {"block_height": 12}, "broken": "x"},
             "updated_at": 7,
         }
@@ -62,6 +65,7 @@ def test_normalize_state_ignores_a_damaged_row():
     assert state == {
         "prune_floor": None,
         "heights": {"10": [HASH_A]},
+        "classified_hashes": [HASH_C],
         "degraded_blocks": {},
         "updated_at": None,
     }
@@ -71,11 +75,18 @@ def test_normalize_state_keeps_a_well_formed_row():
     raw = {
         "prune_floor": 9,
         "heights": {"10": [HASH_A]},
+        "classified_hashes": [HASH_B, HASH_B, ""],
         "degraded_blocks": {"child": {"block_height": 11, "missing_parents": [HASH_A]}},
         "updated_at": "2026-01-01T00:00:00+00:00",
     }
 
-    assert normalize_state(raw) == raw
+    state = normalize_state(raw)
+
+    assert state["classified_hashes"] == [HASH_B]
+    assert state["heights"] == raw["heights"]
+    assert state["degraded_blocks"] == raw["degraded_blocks"]
+    assert state["prune_floor"] == 9
+    assert state["updated_at"] == raw["updated_at"]
 
 
 def test_record_pruned_counts_only_first_sightings_and_keeps_the_highest_floor():
@@ -95,6 +106,46 @@ def test_record_pruned_counts_only_first_sightings_and_keeps_the_highest_floor()
     state, added = record_pruned(state, [entry(height=8, floor=8)])
     assert added == 0
     assert pruned_hashes(state) == {HASH_A, HASH_B}
+
+
+def test_record_classified_counts_only_first_sightings_and_stays_bounded():
+    state = empty_state()
+    state, added = record_classified(state, [HASH_A, HASH_B, HASH_A])
+    assert added == 2
+    assert state["classified_hashes"] == [HASH_A, HASH_B]
+    assert pruned_hashes(state) == {HASH_A, HASH_B}
+    assert summarize(state)["classified_hashes"] == 2
+    assert summarize(state)["pruned_hashes"] == 2
+
+    state, added = record_classified(state, [HASH_A])
+    assert added == 0
+
+    state, _ = record_classified(
+        state,
+        [f"{height:064x}" for height in range(MAX_TRACKED_CLASSIFIED_HASHES + 5)],
+    )
+    assert len(state["classified_hashes"]) == MAX_TRACKED_CLASSIFIED_HASHES
+
+
+def test_classified_hashes_appear_alongside_height_entries():
+    state, _ = record_pruned(empty_state(), [entry(height=8)])
+    state, _ = record_classified(state, [HASH_C])
+
+    assert pruned_hashes(state) == {HASH_A, HASH_C}
+    assert summarize(state)["pruned_heights"] == 1
+    assert summarize(state)["pruned_hashes"] == 2
+    assert summarize(state)["classified_hashes"] == 1
+
+
+def test_a_height_entry_supersedes_a_classified_hash():
+    state, _ = record_classified(empty_state(), [HASH_A])
+    state, added = record_pruned(state, [entry(height=8)])
+
+    assert added == 1
+    assert state["classified_hashes"] == []
+    assert state["heights"] == {"8": [HASH_A]}
+    assert summarize(state)["classified_hashes"] == 0
+    assert summarize(state)["pruned_hashes"] == 1
 
 
 def test_record_degraded_counts_only_new_blocks():

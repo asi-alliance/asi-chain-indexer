@@ -89,6 +89,9 @@ async def repair():
                     )
                     await reconcile_completed_duplicates(session, info)
             print(f"Repaired block {block.block_number} {block.block_hash}", flush=True)
+        # Hashes classified through the single-block route during the repair
+        # join the same ledger the sync loop reads on its next start.
+        await indexer._commit_coverage()
         async with db.session() as session:
             await session.execute(text("""
                 UPDATE indexer_state SET value = '0', updated_at = NOW()

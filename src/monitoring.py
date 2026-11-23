@@ -92,7 +92,7 @@ node_reachable = Gauge(
 
 pruned_block_hashes = Counter(
     "indexer_pruned_block_hashes_total",
-    "Block bodies the observer reported permanently pruned at a height the sync loop covered"
+    "Block bodies the observer reported as permanently pruned, counted on first sighting"
 )
 
 pruned_degraded_blocks = Counter(

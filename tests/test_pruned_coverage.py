@@ -1,3 +1,4 @@
+import copy
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -47,8 +48,8 @@ class FakeDatabase:
         return self.coverage
 
     async def save_block_coverage(self, state):
-        self.coverage = state
-        self.saved.append(state)
+        self.coverage = copy.deepcopy(state)
+        self.saved.append(self.coverage)
 
     @asynccontextmanager
     async def session(self):
@@ -171,6 +172,48 @@ async def test_a_failed_range_read_does_not_move_the_cursor(monkeypatch):
     assert database.last_indexed == 9
     assert database.set_calls == []
     assert database.saved == []
+
+
+@pytest.mark.asyncio
+async def test_a_raised_prune_floor_is_persisted_without_a_new_hash(monkeypatch):
+    page = BlocksByHeightPage(
+        blocks=[served(11)], pruned=[MissingBlock(HASH_X, 10, 10)], unavailable=[]
+    )
+    indexer, database = setup(monkeypatch, page)
+
+    await indexer._sync_blocks()
+    assert database.coverage["prune_floor"] == 10
+    assert database.coverage["heights"] == {"10": [HASH_X]}
+
+    # The sweep advanced: the same hash is reported again with a higher floor
+    # and no new hash. The raised floor must still reach the row.
+    database.last_indexed = 9
+    indexer.client.page = BlocksByHeightPage(
+        blocks=[served(11)], pruned=[MissingBlock(HASH_X, 10, 25)], unavailable=[]
+    )
+    await indexer._sync_blocks()
+
+    assert database.coverage["prune_floor"] == 25
+    assert database.coverage["heights"] == {"10": [HASH_X]}
+
+
+@pytest.mark.asyncio
+async def test_a_classified_hash_joins_the_ledger(monkeypatch):
+    indexer, database = setup(monkeypatch, None)
+    indexer.client = parent_client("pruned")
+
+    await indexer._visit_recovery_block([(HASH_PARENT, 3, False)], {})
+    assert HASH_PARENT in indexer._pruned_hashes
+    assert database.saved == []
+
+    await indexer._commit_coverage()
+
+    # The 410 answer names no height, so the hash lands in its own bucket and
+    # still shows up in the operator summary.
+    assert database.coverage["classified_hashes"] == [HASH_PARENT]
+    assert database.coverage["heights"] == {}
+    assert indexer.coverage_summary()["pruned_hashes"] == 1
+    assert indexer.coverage_summary()["classified_hashes"] == 1
 
 
 def parent_client(availability, details=None):
