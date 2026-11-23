@@ -1,13 +1,9 @@
 # ==============================
 # Stage 1: Build Python dependencies
 # ==============================
-FROM python:3.14.10-slim-bookworm AS python-builder
+FROM python:3.15.2-slim-bookworm AS python-builder
 
-RUN apt-get update && apt-get install -y \
-    gcc \
-    python3-dev \
-    libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
+# No compiler or database headers: every locked distribution installs from a wheel.
 
 WORKDIR /app
 COPY requirements.lock requirements-dev.lock ./
@@ -24,7 +20,7 @@ RUN python scripts/generate-protos.py --profile "$NODE_PROTOCOL_PROFILE" --outpu
 # ==============================
 # Stage 2: Runtime image
 # ==============================
-FROM python:3.14.10-slim-bookworm AS runtime
+FROM python:3.15.2-slim-bookworm AS runtime
 
 RUN apt-get update && apt-get install -y \
     libpq5 \
