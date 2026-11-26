@@ -85,7 +85,7 @@ async def test_empty_upgrade_and_repeat_do_not_replay_sql(isolated):
     for _ in range(2):
         code, _, error = await cli(url, "upgrade")
         assert code == 0, error
-        assert await conn.fetchval("SELECT version_num FROM alembic_version") == "007"
+        assert await conn.fetchval("SELECT version_num FROM alembic_version") == "008"
     assert (
         await conn.fetchval(
             "SELECT data_type FROM information_schema.columns "
@@ -100,10 +100,10 @@ async def test_empty_upgrade_and_repeat_do_not_replay_sql(isolated):
         )
         == "0"
     )
-    assert await cli(url, "status") == (0, "007\n", "")
+    assert await cli(url, "status") == (0, "008\n", "")
 
 
-@pytest.mark.parametrize("revision", range(8))
+@pytest.mark.parametrize("revision", range(9))
 @pytest.mark.asyncio
 async def test_adoption_and_upgrade_preserve_history_and_repair_flag(
     isolated, revision
@@ -124,7 +124,7 @@ async def test_adoption_and_upgrade_preserve_history_and_repair_flag(
     assert await conn.fetchrow("SELECT amount_dust,amount_asi FROM transfers") == before
     code, _, error = await cli(url, "upgrade")
     assert code == 0, error
-    assert await conn.fetchval("SELECT version_num FROM alembic_version") == "007"
+    assert await conn.fetchval("SELECT version_num FROM alembic_version") == "008"
     assert await conn.fetchrow("SELECT amount_dust,amount_asi FROM transfers") == before
     assert await conn.fetchval("SELECT token_decimals FROM transfers") == 8
     assert await conn.fetchval("SELECT count(*) FROM blocks") == 1
@@ -394,7 +394,7 @@ async def test_005_upgrade_replaces_failing_network_metrics_on_tracked_004(isola
     assert (await cli(url, "adopt", "--revision", "004"))[0] == 0
     code, _, error = await cli(url, "upgrade")
     assert code == 0, error
-    assert await cli(url, "status") == (0, "007\n", "")
+    assert await cli(url, "status") == (0, "008\n", "")
     assert len(await network_metrics(conn)) == 6
 
 
@@ -442,7 +442,7 @@ async def test_006_upgrade_keeps_lifecycle_rows_and_drops_self_aliases(isolated)
     assert (await cli(url, "adopt", "--revision", "005"))[0] == 0
     code, _, error = await cli(url, "upgrade")
     assert code == 0, error
-    assert await cli(url, "status") == (0, "007\n", "")
+    assert await cli(url, "status") == (0, "008\n", "")
     assert await lifecycle(conn) == before
     assert await conn.fetch(
         "SELECT result_id, call_id FROM native_transfer_result_aliases"
@@ -509,6 +509,48 @@ async def address_indexes(conn):
 
 
 @pytest.mark.asyncio
+async def test_block_heights_trigger_tracks_siblings_and_deletes(isolated):
+    conn, url = isolated
+    await apply_through(conn, 8)
+    height = 9_007_199_254_740_993
+    await conn.execute(
+        """
+        INSERT INTO blocks(block_hash, block_number, timestamp, proposer,
+                           finalization_status, token_decimals)
+        VALUES ('height_a', $1, 100, 'validator', 'finalized', 18),
+               ('height_b', $1, 101, 'validator', 'unfinalized', 18)
+        """,
+        height,
+    )
+    row = await conn.fetchrow(
+        "SELECT * FROM block_heights WHERE height=$1", height
+    )
+    assert row["block_count"] == 2
+    assert row["latest_block_hash"] == "height_b"
+    assert row["latest_timestamp"] == 101
+    assert row["finalized_count"] == 1
+
+    await conn.execute("DELETE FROM blocks WHERE block_hash='height_b'")
+    row = await conn.fetchrow(
+        "SELECT * FROM block_heights WHERE height=$1", height
+    )
+    assert row["block_count"] == 1
+    assert row["latest_block_hash"] == "height_a"
+
+    await conn.execute(
+        "UPDATE blocks SET timestamp=102 WHERE block_hash='height_a'"
+    )
+    assert await conn.fetchval(
+        "SELECT latest_timestamp FROM block_heights WHERE height=$1", height
+    ) == 102
+
+    await conn.execute("DELETE FROM blocks WHERE block_hash='height_a'")
+    assert await conn.fetchval(
+        "SELECT count(*) FROM block_heights WHERE height=$1", height
+    ) == 0
+
+
+@pytest.mark.asyncio
 async def test_007_upgrade_drops_duplicate_transfer_address_indexes(isolated):
     conn, url = isolated
     await apply_through(conn, 6)
@@ -520,7 +562,7 @@ async def test_007_upgrade_drops_duplicate_transfer_address_indexes(isolated):
     assert (await cli(url, "adopt", "--revision", "006"))[0] == 0
     code, _, error = await cli(url, "upgrade")
     assert code == 0, error
-    assert await cli(url, "status") == (0, "007\n", "")
+    assert await cli(url, "status") == (0, "008\n", "")
     assert await address_indexes(conn) == {
         "from_address": ["idx_transfers_from"],
         "to_address": ["idx_transfers_to"],

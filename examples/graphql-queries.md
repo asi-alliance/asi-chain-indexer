@@ -242,6 +242,34 @@ query ValidatorPerformance($validatorKey: String!) {
 
 ## Deployment Queries
 
+### Recent Heights
+
+```graphql
+query RecentHeights($before: bigint, $limit: Int!) {
+    block_heights_view(
+        where: {height: {_lt: $before}}
+        order_by: {height: desc}
+        limit: $limit
+    ) {
+        height
+        block_count
+        latest_block_hash
+        latest_timestamp
+        finalized_count
+    }
+}
+```
+
+### Exact Height Count
+
+```graphql
+query HeightCount($height: bigint!) {
+    blocks_aggregate(where: {block_number: {_eq: $height}}) {
+        aggregate { count }
+    }
+}
+```
+
 ### Deployments by Type
 
 ```graphql
@@ -277,13 +305,19 @@ query DeploymentsByType {
         }
     }
 
-    other: deployments_aggregate(
-        where: {deployment_type: {_eq: "other"}}
+    delegates: deployments_aggregate(
+        where: {deployment_action: {_eq: "pos_delegate"}}
     ) {
         aggregate {
             count
-            avg { phlo_cost }
-            sum { phlo_cost }
+        }
+    }
+
+    vault_transfers: deployments_aggregate(
+        where: {deployment_action: {_eq: "vault_transfer"}}
+    ) {
+        aggregate {
+            count
         }
     }
 }

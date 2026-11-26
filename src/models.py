@@ -4,7 +4,7 @@ from src.time_utils import utc_now
 
 from sqlalchemy import (
     BigInteger, Boolean, Column, DateTime, ForeignKey, Index, Integer,
-    CheckConstraint, Numeric, String, Text, UniqueConstraint
+    CheckConstraint, Numeric, String, Text, UniqueConstraint, text
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base, relationship
@@ -113,7 +113,8 @@ class Deployment(Base):
     valid_after_block_number = Column(BigInteger)
     errored = Column(Boolean, default=False, index=True)
     error_message = Column(Text)
-    deployment_type = Column(String(50), index=True)  # New field
+    deployment_type = Column(String(50), index=True)  # Coarse family
+    deployment_action = Column(String(50))  # Exact system-contract action
     # Deprecated: block-level metadata. Kept nullable for historical rows and API
     # compatibility; use Block.seq_num / Block.shard_id through the block relationship.
     seq_num = Column(Integer)
@@ -129,6 +130,8 @@ class Deployment(Base):
         Index("idx_deployments_deployer", "deployer"),
         Index("idx_deployments_timestamp", "timestamp"),
         Index("idx_deployments_errored", "errored"),
+        Index("idx_deployments_action", "deployment_action",
+              postgresql_where=text("deployment_action IS NOT NULL")),
     )
 
 
@@ -163,7 +166,7 @@ class Transfer(Base):
     # Relationships
     deployment = relationship("Deployment", back_populates="transfers")
 
-    # The same names and definitions as migrations 000-007
+    # The same names and definitions as migrations 000-008
     __table_args__ = (
         UniqueConstraint("deploy_id", "event_index", name="uq_transfer_event"),
         Index("idx_transfers_deploy_id", "deploy_id"),

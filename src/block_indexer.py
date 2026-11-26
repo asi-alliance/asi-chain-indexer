@@ -88,6 +88,27 @@ def _raised_in_database_driver(error: BaseException) -> bool:
     return False
 
 
+# Exact system-contract call markers. Broad words such as "bond" or "registry"
+# also occur in comments and unrelated contracts, so they are not used.
+_POS_ACTION_RE = re.compile(
+    r'@PoS!\s*\(\s*"(bond|withdraw|delegate|undelegate|completeUndelegate|claimDelegatorRewards)"'
+)
+_VAULT_TRANSFER_RE = re.compile(r'@(?:ASIVault|SystemVault)!\s*\(\s*"findOrCreate"')
+_TRANSFER_CALL_RE = re.compile(r'!\s*\(\s*"transfer"')
+_REGISTRY_ACTION_RE = re.compile(
+    r'rho:registry:(lookup|insertSigned|insertArbitrary|insert)'
+)
+
+_POS_ACTIONS = {
+    "bond": ("validator_operation", "pos_bond"),
+    "withdraw": ("validator_operation", "pos_withdraw"),
+    "delegate": ("validator_operation", "pos_delegate"),
+    "undelegate": ("validator_operation", "pos_undelegate"),
+    "completeUndelegate": ("validator_operation", "pos_complete_undelegate"),
+    "claimDelegatorRewards": ("validator_operation", "pos_claim_rewards"),
+}
+
+
 class BlockIndexer:
     """Enhanced indexer using the node gRPC/HTTP API for full blockchain data extraction."""
 
@@ -96,19 +117,35 @@ class BlockIndexer:
 
     @staticmethod
     def classify_deployment(term: str) -> str:
-        """Classify deployment type based on Rholang term content."""
-        if 'ASIVault' in term and 'transfer' in term:
-            return 'asi_transfer'
-        elif 'validator' in term or 'bond' in term:
-            return 'validator_operation'
-        elif 'finalizer' in term:
-            return 'finalizer_contract'
-        elif 'registry' in term and 'lookup' in term:
-            return 'registry_lookup'
-        elif 'auction' in term:
-            return 'auction_contract'
-        else:
-            return 'smart_contract'
+        """Return the coarse deployment family for a Rholang term.
+
+        Kept as a string-returning wrapper for compatibility with callers that
+        only need the family. New code should use classify_deployment_action().
+        """
+        return BlockIndexer.classify_deployment_action(term)[0]
+
+    @staticmethod
+    def classify_deployment_action(term: str) -> tuple[str, Optional[str]]:
+        """Return (family, action) using exact system-contract call markers.
+
+        The action is None for an unrecognised contract call. This runs once per
+        deployment during ingest; it never parses Rholang or calls the node.
+        """
+        if not term:
+            return "smart_contract", None
+
+        pos_action = _POS_ACTION_RE.search(term)
+        if pos_action:
+            return _POS_ACTIONS[pos_action.group(1)]
+        if _VAULT_TRANSFER_RE.search(term) and _TRANSFER_CALL_RE.search(term):
+            return "asi_transfer", "vault_transfer"
+        registry_action = _REGISTRY_ACTION_RE.search(term)
+        if registry_action:
+            action = "registry_lookup" if registry_action.group(1) == "lookup" else "registry_insert"
+            return "registry_lookup", action
+        if "@PoS!" in term:
+            return "validator_operation", "pos_other"
+        return "smart_contract", None
 
     def __init__(self, alerts: Optional[AlertService] = None):
         self.client = None
@@ -978,7 +1015,7 @@ class BlockIndexer:
 
         # Classify deployment and normalize error flags
         term = deploy_data.get("term", "")
-        deployment_type = self.classify_deployment(term)
+        deployment_type, deployment_action = self.classify_deployment_action(term)
 
         error_message = deploy_data.get("systemDeployError")
         # Only set error_message if it's not an empty string
@@ -1008,6 +1045,7 @@ class BlockIndexer:
             errored=errored,
             error_message=error_message,
             deployment_type=deployment_type,
+            deployment_action=deployment_action,
             status=deploy_data.get("status", "included"),
         )
         dep_upsert = dep_insert.on_conflict_do_update(
@@ -1020,6 +1058,7 @@ class BlockIndexer:
                 "errored": dep_insert.excluded.errored,
                 "error_message": dep_insert.excluded.error_message,
                 "deployment_type": dep_insert.excluded.deployment_type,
+                "deployment_action": dep_insert.excluded.deployment_action,
                 "timestamp": dep_insert.excluded.timestamp,
                 "sig_algorithm": dep_insert.excluded.sig_algorithm,
                 "deployer": dep_insert.excluded.deployer,
@@ -1432,6 +1471,7 @@ class BlockIndexer:
                 timestamp=block_info.get("timestamp"),
                 sig=deploy_id,
                 deployment_type="genesis_mint",
+                deployment_action="genesis_mint",
                 errored=False,
                 status="included"
             )
@@ -1472,6 +1512,7 @@ class BlockIndexer:
                 timestamp=block_info.get("timestamp"),
                 sig=deploy_id,
                 deployment_type="genesis_bond",
+                deployment_action="genesis_bond",
                 errored=False,
                 status="included"
             )

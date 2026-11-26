@@ -53,8 +53,8 @@ row-level permissions, Hasura metadata or whether history repair was performed.
 The profiles were generated and tested on PostgreSQL 18.6; verify other server
 versions in a disposable rehearsal before adopting them.
 
-Fresh Compose databases still initialize through the eight SQL mounts. After that
-initialization, adopt revision 007 once to begin version tracking. Existing Compose
+Fresh Compose databases still initialize through the nine SQL mounts. After that
+initialization, adopt revision 008 once to begin version tracking. Existing Compose
 volumes need adoption of their actual level and an explicit upgrade command, for
 example docker compose run --rm --no-deps indexer python -m src.migrate status
 (with PostgreSQL already running). Do not run native alembic stamp as a shortcut:
@@ -93,6 +93,7 @@ Apply these migrations in order to a new database:
 6. `005_network_metrics_empty_range.sql`: return empty network metric buckets for a database without data.
 7. `006_native_transfer_lifecycle_plans.sql`: index lifecycle lookups by initiating and completing deploy.
 8. `007_transfer_index_names.sql`: drop the duplicate transfer address indexes.
+9. `008_public_aggregates_search_and_actions.sql`: deployment actions, grouped height view and trigram search indexes.
 
 ```bash
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/000_comprehensive_initial_schema.sql
@@ -103,6 +104,7 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/004_uint256_phlo_prices.sq
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/005_network_metrics_empty_range.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/006_native_transfer_lifecycle_plans.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/007_transfer_index_names.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/008_public_aggregates_search_and_actions.sql
 ```
 
 For an existing version 000 database, back up the database, stop indexer writes,
@@ -189,7 +191,7 @@ writes to `native_transfer_results`. Stop the indexer during the upgrade.
 
 ### Transfer index names migration 007
 
-The Alembic head is 007, matching the SQL initialized by current Compose.
+The Alembic head is 008, matching the SQL initialized by current Compose.
 Migration 000 creates two identical btree indexes on each transfer address
 column: `idx_transfers_from` and `idx_transfers_from_address` on `from_address`,
 and `idx_transfers_to` and `idx_transfers_to_address` on `to_address`. Each
@@ -205,9 +207,30 @@ created different names and further indexes on `from_public_key`, `status` and
 
 A tracked 006 database obtains the change through `upgrade`. For an untracked
 SQL installation at version 006, apply only 007. An unversioned database already
-initialized through SQL 007 uses `adopt --revision 007`. A database at 006 cannot
+initialized through SQL 008 uses `adopt --revision 008`. A database at 006 cannot
 adopt 007, because it still has the two dropped indexes. `DROP INDEX` briefly
 locks `transfers`. Stop the indexer during the upgrade.
+
+### Public aggregates, grouped heights and deployment actions migration 008
+
+Migration 008 adds `deployments.deployment_action`, the private
+`block_heights` aggregate table and its public `block_heights_view`, prefix and
+`pg_trgm` GIN indexes for the public search fields, and stable
+`(timestamp, id)` indexes for the explorer's three typed search streams. It also
+drops the redundant non-unique `idx_blocks_hash` copy of the blocks primary-key
+index. The new indexes support `blocks_aggregate`, height sibling counts and
+leading-wildcard `_ilike` searches; they do not change existing rows or amounts.
+
+A tracked 007 database obtains the change through `upgrade`. An unversioned
+database already initialized through SQL 008 uses `adopt --revision 008`.
+Existing deployment rows keep `deployment_action = NULL` until the operator runs
+`scripts/backfill_deployment_actions.py`. The view and indexes are built in the
+migration; plan the operation while indexer writes are stopped.
+
+`pg_trgm` must be available to the indexer database role. It is a trusted
+extension on supported PostgreSQL versions; a managed database may require the
+extension allowlist to be updated first. After the migration, reload Hasura
+metadata so `block_heights_view` and `deployment_action` are exposed.
 
 The separate [adoption review findings](https://github.com/asi-alliance/asi-chain-indexer/pull/37#issuecomment-6736839084)
 on internal FK-trigger enforcement and owned-sequence structure remain open.

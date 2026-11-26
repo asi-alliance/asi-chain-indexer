@@ -245,6 +245,68 @@ async def public_graphql(client, base, query, variables=None):
 
 
 @pytest.mark.asyncio
+async def test_public_height_aggregate_and_grouped_view():
+    database_url = os.environ.get("TEST_DATABASE_URL")
+    base = os.environ.get("TEST_HASURA_URL", "").rstrip("/")
+    if not all((database_url, base)):
+        pytest.skip("Set TEST_DATABASE_URL and TEST_HASURA_URL for stack checks")
+
+    connection = await asyncpg.connect(database_url)
+    key = "height_aggregate_" + uuid4().hex
+    hashes = [key + "_a", key + "_b"]
+    height = 9_007_199_254_740_993
+    try:
+        async with connection.transaction():
+            for block_hash, status, timestamp in (
+                (hashes[0], "finalized", 100),
+                (hashes[1], "unfinalized", 101),
+            ):
+                await connection.execute(
+                    """
+                    INSERT INTO blocks(block_hash, block_number, timestamp, proposer,
+                                       finalization_status, token_decimals)
+                    VALUES ($1, $2, $3, 'validator', $4, 18)
+                    """,
+                    block_hash,
+                    height,
+                    timestamp,
+                    status,
+                )
+
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as client:
+            result = await public_graphql(
+                client,
+                base,
+                """
+                query($height: bigint!) {
+                  blocks_aggregate(where: {block_number: {_eq: $height}}) {
+                    aggregate { count }
+                  }
+                  block_heights_view(where: {height: {_eq: $height}}) {
+                    height block_count latest_block_hash latest_timestamp finalized_count
+                  }
+                }
+                """,
+                {"height": str(height)},
+            )
+            assert "errors" not in result, result
+            assert result["data"]["blocks_aggregate"]["aggregate"]["count"] == 2
+            row = result["data"]["block_heights_view"][0]
+            assert row["height"] == str(height)
+            assert row["block_count"] == 2
+            assert row["latest_block_hash"] == hashes[1]
+            assert row["latest_timestamp"] == "101"
+            assert row["finalized_count"] == 1
+    finally:
+        await connection.execute(
+            "DELETE FROM blocks WHERE block_hash = ANY($1::text[])", hashes
+        )
+        await connection.close()
+
+
+@pytest.mark.asyncio
 async def test_public_native_transfer_lifecycle_hides_raw_observations():
     database_url = os.environ.get("TEST_DATABASE_URL")
     base = os.environ.get("TEST_HASURA_URL", "").rstrip("/")

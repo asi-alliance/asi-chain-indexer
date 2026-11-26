@@ -7,7 +7,7 @@ set -euo pipefail
 #  - Track all tables/views/functions
 #  - Create relationships
 #  - Grant PUBLIC role read access (no auth) with limit=5000
-#  - Disable aggregations for public
+#  - Enable aggregates only for the reviewed public tables/views
 #  - Verify everything was actually applied
 #
 # IMPORTANT for "no password public API":
@@ -44,6 +44,7 @@ ok()  { echo "✅ $*"; }
 # ---------- HTTP wrappers ----------
 hasura_metadata() {
   local payload="$1"
+  local allow_existing="${2:-}"
   local resp
   resp=$(curl -sS -X POST "$HASURA_ENDPOINT" \
     -H "Content-Type: application/json" \
@@ -51,6 +52,10 @@ hasura_metadata() {
     -d "$payload")
 
   if echo "$resp" | grep -qE '"error"|"errors"'; then
+    if [ -n "$allow_existing" ] && echo "$resp" | grep -qiE "$allow_existing"; then
+      echo "$resp"
+      return 0
+    fi
     echo "----- METADATA CALL FAILED -----" >&2
     echo "Payload:" >&2
     echo "$payload" >&2
@@ -129,6 +134,7 @@ VIEWS=(
   "network_stats_view"
   "block_ancestors_view"
   "block_descendants_view"
+  "block_heights_view"
   "transaction_history_view"
   "native_transfer_lifecycle"
 )
@@ -170,7 +176,7 @@ for table in "${TABLES[@]}"; do
   hasura_metadata "{
     \"type\": \"pg_track_table\",
     \"args\": {\"source\": \"default\", \"table\": {\"schema\": \"public\", \"name\": \"$table\"}}
-  }" >/dev/null
+  }" "already tracked" >/dev/null
 done
 ok "Tables tracked (or already tracked)."
 
@@ -179,7 +185,7 @@ for view in "${VIEWS[@]}"; do
   hasura_metadata "{
     \"type\": \"pg_track_table\",
     \"args\": {\"source\": \"default\", \"table\": {\"schema\": \"public\", \"name\": \"$view\"}}
-  }" >/dev/null
+  }" "already tracked" >/dev/null
 done
 ok "Views tracked (or already tracked)."
 
@@ -188,15 +194,15 @@ for fn in "${FUNCTIONS[@]}"; do
   hasura_metadata "{
     \"type\": \"pg_track_function\",
     \"args\": {\"source\": \"default\", \"function\": {\"schema\": \"public\", \"name\": \"$fn\"}}
-  }" >/dev/null
+  }" "already tracked|already exists" >/dev/null
 done
 ok "Functions tracked (or already tracked)."
 
 # ============================================================
 # RELATIONSHIPS
 # Notes:
-#  - If relationship already exists, Hasura returns an error.
-#  - Since you want "full init" and likely run once, we keep fail-fast.
+#  - Re-running this script tolerates already tracked tables,
+#    functions and relationships; it replaces permissions.
 # ============================================================
 declare -A OBJECT_RELATIONS=(
   ["deployments.block"]="blocks:block_hash:block_hash"
@@ -244,7 +250,7 @@ for key in "${!OBJECT_RELATIONS[@]}"; do
         \"column_mapping\": {\"$local_col\": \"$remote_col\"}
       }}
     }
-  }" >/dev/null
+  }" "already exists" >/dev/null
 done
 ok "Object relationships created."
 
@@ -286,7 +292,7 @@ for key in "${!ARRAY_RELATIONS[@]}"; do
         \"column_mapping\": {\"$local_col\": \"$remote_col\"}
       }}
     }
-  }" >/dev/null
+  }" "already exists" >/dev/null
 done
 ok "Array relationships created."
 
@@ -299,6 +305,8 @@ ALL_TABLES_AND_VIEWS=( "${TABLES[@]}" "${VIEWS[@]}" )
 # to the public role. Required by the explorer frontend (TransactionTrackerImproved)
 # for the /transactions page counters. Other tables keep allow_aggregations=false.
 AGGREGATE_ENABLED_TABLES=(
+  "blocks"
+  "block_heights_view"
   "deployments"
   "transfers"
   "transaction_history_view"
@@ -379,7 +387,7 @@ for fn in "${FUNCTIONS[@]}"; do
       \"function\": {\"schema\": \"public\", \"name\": \"$fn\"},
       \"role\": \"public\"
     }
-  }" >/dev/null
+  }" "already exists" >/dev/null
 done
 ok "Public function permissions granted."
 
@@ -438,15 +446,23 @@ if echo "$public_select" | grep -q '"errors"'; then
 fi
 ok "PUBLIC select OK."
 
-log "PUBLIC aggregate test on blocks (should FAIL: allow_aggregations=false)..."
-public_agg="$(graphql_public '{"query":"{ blocks_aggregate { aggregate { count } } }"}')"
-if echo "$public_agg" | grep -q '"errors"'; then
-  ok "PUBLIC aggregate on blocks correctly rejected."
-else
+log "PUBLIC aggregate test on blocks (should SUCCEED: allow_aggregations=true)..."
+public_block_agg="$(graphql_public '{"query":"{ blocks_aggregate(where:{block_number:{_eq:0}}) { aggregate { count } } }"}')"
+if echo "$public_block_agg" | grep -q '"errors"'; then
   echo "Response:"
-  echo "$public_agg"
-  die "PUBLIC aggregate on blocks unexpectedly succeeded (allow_aggregations=false expected)."
+  echo "$public_block_agg"
+  die "PUBLIC aggregate on blocks failed (allow_aggregations=true expected). Check AGGREGATE_ENABLED_TABLES in this script."
 fi
+ok "PUBLIC aggregate on blocks OK."
+
+log "PUBLIC grouped height view test (should SUCCEED)..."
+public_heights="$(graphql_public '{"query":"{ block_heights_view(limit:1, order_by:{height:desc}) { height block_count latest_block_hash latest_timestamp finalized_count } }"}')"
+if echo "$public_heights" | grep -q '"errors"'; then
+  echo "Response:"
+  echo "$public_heights"
+  die "PUBLIC block_heights_view failed. Check that VIEWS contains block_heights_view."
+fi
+ok "PUBLIC grouped height view OK."
 
 log "PUBLIC aggregate test on deployments + transfers (should SUCCEED: allow_aggregations=true)..."
 public_tx_agg="$(graphql_public '{"query":"{ deployments_aggregate { aggregate { count } } transfers_aggregate { aggregate { count } } }"}')"
