@@ -321,6 +321,10 @@ Read [POSTGRES_UPGRADE.md](POSTGRES_UPGRADE.md) and the
   the repair flag. Repair preserves blocks, the sync cursor and recorded precision.
 - Review/reload Hasura metadata, then validate actual consumer queries,
   subscriptions, exact balances, cursor progress and metrics before resuming access.
+  After migration 008, apply the reviewed public metadata with
+  `scripts/full-init-hasura.sh` (or the equivalent Metadata API calls in
+  [migrations/README.md](migrations/README.md)); `reload_metadata` alone does not
+  track `block_heights_view` or grant `blocks_aggregate`.
 - After migration 008, run `python scripts/backfill_deployment_actions.py --dsn
   "$DATABASE_URL"` once with writes stopped to classify historical deployments.
   New rows are classified during ingest.
