@@ -94,10 +94,11 @@ Smart contract deployments and transactions.
 | errored | Boolean | Whether deployment failed at execution |
 | error_message | String | Rholang error text (NULL when no error) |
 | deployment_type | String | Classification (smart_contract, validator_operation, asi_transfer, ...) |
-| seq_num | Int | Sequence number |
-| shard_id | String | Shard ID |
 | status | String | Deploy lifecycle status — currently always `"included"` (no status field in node's block-stream) |
 | created_at | Timestamp | When indexed |
+
+`deployments.seq_num` and `deployments.shard_id` are deprecated and always `null`.
+Read `seq_num` and `shard_id` from the related `block`.
 
 ### 3. **pending_deploys**
 Ephemeral snapshot of the deploy buffers of the validators in `PENDING_DEPLOYS_NODES` — deploys signed and accepted but **not yet included in any block**. Rows change only when the merged buffers change; no `block_hash`/FK by design. The table is empty, and `indexer_state` has no `pending_deploys_status` row, when the feature is off. `sig` equals `deployments.deploy_id` once the deploy is included.

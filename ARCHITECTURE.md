@@ -146,8 +146,10 @@ Key fields:
 - `errored` (BOOLEAN): Deployment error status
 - `error_message` (TEXT): Error description if errored
 - `status` (VARCHAR(20)): Deployment status (pending/included/error)
-- `seq_num` (INTEGER): Sequence number
-- `shard_id` (VARCHAR(20)): Shard identifier
+
+`seq_num` and `shard_id` remain nullable for historical rows and API
+compatibility but are deprecated and not populated. They are block metadata;
+use the related block's values.
 
 **pending_deploys**
 

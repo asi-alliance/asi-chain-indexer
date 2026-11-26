@@ -54,10 +54,11 @@ Stores smart contract deployments.
 - `errored` (boolean, default false): Whether deployment failed at execution
 - `error_message` (text): Rholang error text (NULL when no error; sourced from node's `systemDeployError`)
 - `deployment_type` (varchar(50)): Classification (`asi_transfer` / `validator_operation` / `smart_contract` / ...)
-- `seq_num` (integer): Sequence number
-- `shard_id` (varchar(20)): Shard ID
 - `status` (varchar(20), default `'included'`): Deploy lifecycle status — **currently always `"included"`** in production (no `status` field in node's block-stream `DeployInfo`; the gRPC client hardcodes `"included"`)
 - `created_at` (timestamp, NOT NULL, default NOW()): When indexed
+
+`deployments.seq_num` and `deployments.shard_id` are deprecated and always `null`.
+They are block metadata; read them from the related `block`.
 
 ### pending_deploys
 Ephemeral snapshot of the node's deploy buffers — deploys signed and accepted by the node but **not yet included in any block**. Fully refreshed (DELETE + INSERT) by the indexer every sync cycle (`SYNC_INTERVAL`, default 5s); rows appear/disappear as the node's buffer changes. No `block_hash`/FK by design.

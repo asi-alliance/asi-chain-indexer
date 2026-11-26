@@ -77,7 +77,9 @@ type deployments {
   errored: Boolean
   error_message: String
   deployment_type: String
+  # Deprecated: block metadata; use block.seq_num.
   seq_num: Int
+  # Deprecated: block metadata; use block.shard_id.
   shard_id: String
   status: String
   created_at: timestamp!
