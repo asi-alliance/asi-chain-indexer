@@ -56,6 +56,7 @@ class Block(Base):
     extra_bytes = Column(Text)
     version = Column(Integer)
     deployment_count = Column(Integer, default=0)
+    block_size = Column(BigInteger)
     created_at = Column(DateTime, default=utc_now, nullable=False)
 
     # Relationships

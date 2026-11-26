@@ -91,6 +91,7 @@ async def seed(args) -> tuple[str, int, int, int, int]:
                         "finalized" if (height_offset + sibling) % 5 else "unfinalized",
                         0,
                         18,
+                        1000 + (height_offset % 5000),
                     )
                 )
             for variant in range(args.deployments_per_block):
@@ -161,6 +162,7 @@ async def seed(args) -> tuple[str, int, int, int, int]:
                     "finalization_status",
                     "deployment_count",
                     "token_decimals",
+                    "block_size",
                 ),
             )
             await conn.copy_records_to_table(
@@ -204,6 +206,16 @@ async def seed(args) -> tuple[str, int, int, int, int]:
                 )
             if triggers_disabled:
                 await conn.execute("SET session_replication_role = origin")
+            await conn.execute("""
+                UPDATE blocks AS b
+                SET deployment_count = d.c
+                FROM (
+                    SELECT block_hash, count(*)::integer AS c
+                    FROM deployments
+                    GROUP BY block_hash
+                ) AS d
+                WHERE b.block_hash = d.block_hash
+                """)
             await conn.execute("""
                 INSERT INTO block_heights(height, block_count, latest_block_hash,
                                           latest_timestamp, finalized_count)

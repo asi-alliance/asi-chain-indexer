@@ -44,6 +44,7 @@ type blocks {
   extra_bytes: String
   version: Int
   deployment_count: Int
+  block_size: bigint
   finalization_status: String
   bonds_map: jsonb
   justifications: jsonb

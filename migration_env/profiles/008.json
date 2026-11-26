@@ -35,6 +35,7 @@
   "column:block_validators:validator_public_key": "[\"character varying(200)\", true, \"\", null]",
   "column:blocks:block_hash": "[\"character varying(64)\", true, \"\", null]",
   "column:blocks:block_number": "[\"bigint\", true, \"\", null]",
+  "column:blocks:block_size": "[\"bigint\", false, \"\", null]",
   "column:blocks:bonds_map": "[\"jsonb\", false, \"\", null]",
   "column:blocks:created_at": "[\"timestamp without time zone\", true, \"\", \"now()\"]",
   "column:blocks:deployment_count": "[\"integer\", false, \"\", \"0\"]",

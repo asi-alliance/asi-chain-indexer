@@ -9,6 +9,11 @@ BEGIN;
 ALTER TABLE public.deployments
     ADD COLUMN IF NOT EXISTS deployment_action VARCHAR(50);
 
+-- The node's LightBlockInfo reports the serialized protobuf block size in
+-- bytes. It is read from the existing block response; no extra RPC.
+ALTER TABLE public.blocks
+    ADD COLUMN IF NOT EXISTS block_size BIGINT;
+
 -- 000 created this non-unique copy of the primary-key index; the PK already
 -- serves every block_hash lookup and unique constraint.
 DROP INDEX IF EXISTS public.idx_blocks_hash;

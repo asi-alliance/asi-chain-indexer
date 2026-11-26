@@ -885,6 +885,15 @@ class BlockIndexer:
             state_root_hash = block_info.get("postStateHash", "")
             bonds_map = block_info.get("bonds", [])
             justifications = block_info.get("justifications", [])
+            raw_block_size = block_info.get("blockSize")
+            try:
+                block_size = (
+                    int(raw_block_size)
+                    if raw_block_size not in (None, "")
+                    else None
+                )
+            except (TypeError, ValueError):
+                block_size = None
 
             block_insert = insert(Block).values(
                 block_number=block_number,
@@ -902,6 +911,7 @@ class BlockIndexer:
                 extra_bytes=block_info.get("extraBytes"),
                 version=block_info.get("version"),
                 fault_tolerance=block_info.get("faultTolerance", 0.0),
+                block_size=block_size,
                 pre_state_hash=block_info.get("preStateHash"),
                 justifications=justifications
             ).on_conflict_do_nothing(index_elements=["block_hash"])
