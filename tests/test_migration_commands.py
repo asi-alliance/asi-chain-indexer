@@ -224,8 +224,16 @@ async def test_adoption_rejects_changed_fk_enforcement(isolated, revision, table
         "CREATE SEQUENCE unexpected_seq OWNED BY transfers.id",
     ],
     ids=[
-        "type", "increment", "minimum", "maximum", "start", "cache", "cycle",
-        "unowned", "wrong-column", "extra-owned",
+        "type",
+        "increment",
+        "minimum",
+        "maximum",
+        "start",
+        "cache",
+        "cycle",
+        "unowned",
+        "wrong-column",
+        "extra-owned",
     ],
 )
 @pytest.mark.asyncio
@@ -503,7 +511,9 @@ TRANSFER_INDEXES = """
 async def address_indexes(conn):
     rows = await conn.fetch(TRANSFER_INDEXES)
     return {
-        column: sorted(name for name, definition in rows if definition.endswith(f"({column})"))
+        column: sorted(
+            name for name, definition in rows if definition.endswith(f"({column})")
+        )
         for column in ("from_address", "to_address")
     }
 
@@ -522,32 +532,103 @@ async def test_block_heights_trigger_tracks_siblings_and_deletes(isolated):
         """,
         height,
     )
-    row = await conn.fetchrow(
-        "SELECT * FROM block_heights WHERE height=$1", height
-    )
+    row = await conn.fetchrow("SELECT * FROM block_heights WHERE height=$1", height)
     assert row["block_count"] == 2
     assert row["latest_block_hash"] == "height_b"
     assert row["latest_timestamp"] == 101
     assert row["finalized_count"] == 1
 
     await conn.execute("DELETE FROM blocks WHERE block_hash='height_b'")
-    row = await conn.fetchrow(
-        "SELECT * FROM block_heights WHERE height=$1", height
-    )
+    row = await conn.fetchrow("SELECT * FROM block_heights WHERE height=$1", height)
     assert row["block_count"] == 1
     assert row["latest_block_hash"] == "height_a"
 
-    await conn.execute(
-        "UPDATE blocks SET timestamp=102 WHERE block_hash='height_a'"
+    await conn.execute("UPDATE blocks SET timestamp=102 WHERE block_hash='height_a'")
+    assert (
+        await conn.fetchval(
+            "SELECT latest_timestamp FROM block_heights WHERE height=$1", height
+        )
+        == 102
     )
-    assert await conn.fetchval(
-        "SELECT latest_timestamp FROM block_heights WHERE height=$1", height
-    ) == 102
 
     await conn.execute("DELETE FROM blocks WHERE block_hash='height_a'")
-    assert await conn.fetchval(
-        "SELECT count(*) FROM block_heights WHERE height=$1", height
-    ) == 0
+    assert (
+        await conn.fetchval(
+            "SELECT count(*) FROM block_heights WHERE height=$1", height
+        )
+        == 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_indexer_refreshes_a_sibling_finality_and_height_view(
+    isolated, monkeypatch
+):
+    from src import block_indexer as block_indexer_module
+    from src.database import Database
+
+    conn, url = isolated
+    await apply_through(conn, 8)
+
+    test_db = Database(url)
+    await test_db.connect()
+    monkeypatch.setattr(block_indexer_module, "db", test_db)
+    try:
+        indexer = block_indexer_module.BlockIndexer()
+        block_info = {
+            "blockHash": "finality-block",
+            "blockNumber": 42,
+            "timestamp": 1000,
+            "sender": "validator",
+            "isFinalized": False,
+            "blockSize": "1234",
+            "postStateHash": "state",
+            "bonds": [],
+            "justifications": [],
+            "parentsHashList": [],
+            "sig": "sig",
+            "sigAlgorithm": "secp256k1",
+            "shardId": "root",
+            "version": 1,
+            "faultTolerance": 0.33,
+        }
+        block_data = {"blockInfo": block_info, "deploys": []}
+        await indexer._index_block(block_data, traces=[])
+        assert (
+            await conn.fetchval(
+                "SELECT finalization_status FROM blocks WHERE block_hash='finality-block'"
+            )
+            == "unfinalized"
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT finalized_count FROM block_heights WHERE height=42"
+            )
+            == 0
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT block_size FROM blocks WHERE block_hash='finality-block'"
+            )
+            == 1234
+        )
+
+        block_info["isFinalized"] = True
+        await indexer._index_block(block_data, traces=[])
+        assert (
+            await conn.fetchval(
+                "SELECT finalization_status FROM blocks WHERE block_hash='finality-block'"
+            )
+            == "finalized"
+        )
+        assert (
+            await conn.fetchval(
+                "SELECT finalized_count FROM block_heights WHERE height=42"
+            )
+            == 1
+        )
+    finally:
+        await test_db.disconnect()
 
 
 @pytest.mark.asyncio
@@ -616,7 +697,9 @@ async def test_orm_declares_the_transfer_indexes_of_the_migrations(isolated):
     from src.models import Base
 
     conn, url = isolated
-    engine = create_async_engine(url.replace("postgresql://", "postgresql+asyncpg://", 1))
+    engine = create_async_engine(
+        url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    )
     try:
         async with engine.begin() as orm:
             await orm.run_sync(Base.metadata.create_all)

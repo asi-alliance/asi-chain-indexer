@@ -198,6 +198,10 @@ for fn in "${FUNCTIONS[@]}"; do
 done
 ok "Functions tracked (or already tracked)."
 
+# New columns on already-tracked tables appear only after an explicit reload.
+hasura_metadata '{"type":"reload_metadata","args":{}}' >/dev/null
+ok "Metadata reloaded."
+
 # ============================================================
 # RELATIONSHIPS
 # Notes:

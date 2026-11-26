@@ -21,6 +21,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from src.block_indexer import BlockIndexer  # noqa: E402
 from src.time_utils import utc_now  # noqa: E402
 
+GENESIS_TYPES = {"genesis_mint", "genesis_bond"}
+
+
+def classify_backfill(deployment_type: str, term: str) -> tuple[str, str | None]:
+    """Preserve synthetic genesis records; classify every other row from its term."""
+    if deployment_type in GENESIS_TYPES:
+        return deployment_type, deployment_type
+    return BlockIndexer.classify_deployment_action(term)
+
 
 async def backfill(conn, batch_size: int, dry_run: bool) -> tuple[int, int]:
     updated = 0
@@ -29,7 +38,7 @@ async def backfill(conn, batch_size: int, dry_run: bool) -> tuple[int, int]:
     while True:
         rows = await conn.fetch(
             """
-            SELECT deploy_id, term
+            SELECT deploy_id, deployment_type, term
             FROM deployments
             WHERE deployment_action IS NULL AND deploy_id > $2
             ORDER BY deploy_id
@@ -44,8 +53,8 @@ async def backfill(conn, batch_size: int, dry_run: bool) -> tuple[int, int]:
         cursor = rows[-1]["deploy_id"]
         changes = []
         for row in rows:
-            deployment_type, action = BlockIndexer.classify_deployment_action(
-                row["term"] or ""
+            deployment_type, action = classify_backfill(
+                row["deployment_type"], row["term"] or ""
             )
             changes.append((deployment_type, action, row["deploy_id"]))
         if changes and not dry_run:

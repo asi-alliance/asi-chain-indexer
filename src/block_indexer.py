@@ -109,6 +109,67 @@ _POS_ACTIONS = {
 }
 
 
+def _lexical_spans(term: str):
+    """Return (start, end, kind) spans for comments and string literals."""
+    spans = []
+    index = 0
+    while index < len(term):
+        if term.startswith("//", index):
+            end = term.find("\n", index)
+            end = len(term) if end < 0 else end
+            spans.append((index, end, "comment"))
+            index = end
+        elif term.startswith("/*", index):
+            start = index
+            depth = 1
+            index += 2
+            while index < len(term) and depth:
+                if term.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif term.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    index += 1
+            spans.append((start, index, "comment"))
+        elif term[index] in ('"', "`"):
+            quote = term[index]
+            start = index
+            index += 1
+            while index < len(term):
+                if term[index] == "\\":
+                    index += 2
+                elif term[index] == quote:
+                    index += 1
+                    break
+                else:
+                    index += 1
+            spans.append((start, index, "string" if quote == '"' else "backtick"))
+        else:
+            index += 1
+    return spans
+
+
+def _index_in_span(index: int, spans, kinds) -> bool:
+    return any(kind in kinds and start <= index < end for start, end, kind in spans)
+
+
+def _is_code_index(index: int, spans) -> bool:
+    return not _index_in_span(index, spans, ("comment", "string", "backtick"))
+
+
+def _has_backtick_literal(term: str, value: str, spans) -> bool:
+    return any(
+        kind == "backtick" and value in term[start + 1:end - 1]
+        for start, end, kind in spans
+    )
+
+
+def _is_backtick_index(index: int, spans) -> bool:
+    return _index_in_span(index, spans, ("backtick",))
+
+
 class BlockIndexer:
     """Enhanced indexer using the node gRPC/HTTP API for full blockchain data extraction."""
 
@@ -134,16 +195,44 @@ class BlockIndexer:
         if not term:
             return "smart_contract", None
 
+        spans = _lexical_spans(term)
         pos_action = _POS_ACTION_RE.search(term)
-        if pos_action:
+        if (
+            pos_action
+            and _is_code_index(pos_action.start(), spans)
+            and _has_backtick_literal(term, "rho:system:pos", spans)
+        ):
             return _POS_ACTIONS[pos_action.group(1)]
-        if _VAULT_TRANSFER_RE.search(term) and _TRANSFER_CALL_RE.search(term):
+
+        vault_action = _VAULT_TRANSFER_RE.search(term)
+        transfer_action = _TRANSFER_CALL_RE.search(term)
+        if (
+            vault_action
+            and transfer_action
+            and _is_code_index(vault_action.start(), spans)
+            and _is_code_index(transfer_action.start(), spans)
+            and (
+                "ASIVault" in vault_action.group(0)
+                or _has_backtick_literal(term, "rho:vault:system", spans)
+            )
+        ):
             return "asi_transfer", "vault_transfer"
+
         registry_action = _REGISTRY_ACTION_RE.search(term)
-        if registry_action:
-            action = "registry_lookup" if registry_action.group(1) == "lookup" else "registry_insert"
+        if registry_action and _is_backtick_index(registry_action.start(), spans):
+            action = (
+                "registry_lookup"
+                if registry_action.group(1) == "lookup"
+                else "registry_insert"
+            )
             return "registry_lookup", action
-        if "@PoS!" in term:
+
+        pos_marker = term.find("@PoS!")
+        if (
+            pos_marker >= 0
+            and _is_code_index(pos_marker, spans)
+            and _has_backtick_literal(term, "rho:system:pos", spans)
+        ):
             return "validator_operation", "pos_other"
         return "smart_contract", None
 
@@ -865,13 +954,44 @@ class BlockIndexer:
         if not block_hash or block_number is None:
             raise ValueError("Block missing required blockHash or blockNumber")
 
-        # Check if already processed
+        raw_block_size = block_info.get("blockSize")
+        try:
+            block_size = (
+                int(raw_block_size) if raw_block_size not in (None, "") else None
+            )
+        except (TypeError, ValueError):
+            block_size = None
+
+        # Check if already processed. A known hash can still gain finality or a
+        # previously missing block size from the observer, so refresh those
+        # fields instead of returning before the height trigger sees them.
         async with db.session() as session:
             exists = await session.scalar(
                 select(Block).where(Block.block_hash == block_hash).limit(1)
             )
             if exists:
-                logger.debug("Block already indexed", block_number=block_number)
+                updates = {}
+                if "isFinalized" in block_info:
+                    desired_finalization = (
+                        "finalized" if block_info.get("isFinalized") else "unfinalized"
+                    )
+                    if exists.finalization_status != desired_finalization:
+                        updates["finalization_status"] = desired_finalization
+                if exists.block_size is None and block_size is not None:
+                    updates["block_size"] = block_size
+                if updates:
+                    await session.execute(
+                        update(Block)
+                        .where(Block.block_hash == block_hash)
+                        .values(**updates)
+                    )
+                    logger.info(
+                        "Block metadata refreshed",
+                        block_number=block_number,
+                        updates=sorted(updates),
+                    )
+                else:
+                    logger.debug("Block already indexed", block_number=block_number)
                 return
 
         if traces is None:
@@ -885,15 +1005,6 @@ class BlockIndexer:
             state_root_hash = block_info.get("postStateHash", "")
             bonds_map = block_info.get("bonds", [])
             justifications = block_info.get("justifications", [])
-            raw_block_size = block_info.get("blockSize")
-            try:
-                block_size = (
-                    int(raw_block_size)
-                    if raw_block_size not in (None, "")
-                    else None
-                )
-            except (TypeError, ValueError):
-                block_size = None
 
             block_insert = insert(Block).values(
                 block_number=block_number,

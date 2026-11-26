@@ -229,8 +229,43 @@ migration; plan the operation while indexer writes are stopped.
 
 `pg_trgm` must be available to the indexer database role. It is a trusted
 extension on supported PostgreSQL versions; a managed database may require the
-extension allowlist to be updated first. After the migration, reload Hasura
-metadata so `block_heights_view` and `deployment_action` are exposed.
+extension allowlist to be updated first.
+
+#### Applying the public metadata
+
+A Hasura `reload_metadata` alone does not track `block_heights_view` and does not
+grant `blocks_aggregate`; an existing installation keeps its previous tracking
+and permissions. After applying migration 008, with writers stopped:
+
+1. Review site-specific Hasura metadata and back it up.
+2. Run the idempotent public-metadata setup with the deployment's endpoint and
+   secret:
+
+   ```bash
+   HASURA_BASE=https://hasura.example.test \
+   HASURA_ADMIN_SECRET=... \
+   bash scripts/full-init-hasura.sh
+   ```
+
+   The script tracks `block_heights_view`, reloads metadata so new columns are
+   visible, recreates the managed public select permissions from its reviewed
+   aggregate allowlist, and leaves unrelated permissions/custom metadata alone.
+   If a site maintains permissions outside this script, apply the equivalent
+   Hasura Metadata API calls instead: `pg_track_table` for
+   `block_heights_view`, then public select permissions with
+   `allow_aggregations: true` for `blocks`, `block_heights_view`, `deployments`,
+   `transfers`, `pending_deploys` and `transaction_history_view`. See the
+   [Hasura Metadata API](https://hasura.io/docs/2.0/api-reference/metadata-api/index/).
+3. Verify both queries without an admin secret:
+
+   ```graphql
+   { blocks_aggregate(where: {block_number: {_eq: 0}}) { aggregate { count } } }
+   { block_heights_view(limit: 1) { height block_count finalized_count } }
+   ```
+
+   The raw native-transfer lifecycle tables and
+   `native_transfer_lifecycle_aggregate` must remain unavailable to the public
+   role.
 
 The separate [adoption review findings](https://github.com/asi-alliance/asi-chain-indexer/pull/37#issuecomment-6736839084)
 on internal FK-trigger enforcement and owned-sequence structure remain open.
