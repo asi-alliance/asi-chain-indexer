@@ -114,8 +114,10 @@ class Deployment(Base):
     errored = Column(Boolean, default=False, index=True)
     error_message = Column(Text)
     deployment_type = Column(String(50), index=True)  # New field
-    seq_num = Column(Integer)  # New field
-    shard_id = Column(String(20))  # New field
+    # Deprecated: block-level metadata. Kept nullable for historical rows and API
+    # compatibility; use Block.seq_num / Block.shard_id through the block relationship.
+    seq_num = Column(Integer)
+    shard_id = Column(String(20))
     status = Column(String(20), default="included", index=True)  # New field
     created_at = Column(DateTime, default=utc_now, nullable=False)
 

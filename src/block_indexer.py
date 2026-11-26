@@ -1008,8 +1008,6 @@ class BlockIndexer:
             errored=errored,
             error_message=error_message,
             deployment_type=deployment_type,
-            seq_num=deploy_data.get("seqNum"),
-            shard_id=deploy_data.get("shardId"),
             status=deploy_data.get("status", "included"),
         )
         dep_upsert = dep_insert.on_conflict_do_update(
@@ -1024,8 +1022,6 @@ class BlockIndexer:
                 "deployment_type": dep_insert.excluded.deployment_type,
                 "timestamp": dep_insert.excluded.timestamp,
                 "sig_algorithm": dep_insert.excluded.sig_algorithm,
-                "seq_num": dep_insert.excluded.seq_num,
-                "shard_id": dep_insert.excluded.shard_id,
                 "deployer": dep_insert.excluded.deployer,
                 "deployer_address": dep_insert.excluded.deployer_address,
                 "term": dep_insert.excluded.term,

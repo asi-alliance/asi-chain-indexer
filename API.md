@@ -540,9 +540,11 @@ Deployments can have the following statuses:
 
 ### Deployment Enhancements
 - `deployment_type`: Auto-classified deployment category
-- `seq_num`: Sequence number within block
-- `shard_id`: Shard identifier for deployment
 - `status`: Deployment lifecycle status
+
+`deployments.seq_num` and `deployments.shard_id` are deprecated and are not
+populated. They are block metadata; read them from `deployments.block.seq_num`
+and `deployments.block.shard_id`.
 
 ### New Data Types
 - **Epoch Transitions**: Track validator set changes between epochs
