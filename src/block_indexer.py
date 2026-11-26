@@ -196,30 +196,49 @@ class BlockIndexer:
             return "smart_contract", None
 
         spans = _lexical_spans(term)
-        pos_action = _POS_ACTION_RE.search(term)
-        if (
-            pos_action
-            and _is_code_index(pos_action.start(), spans)
-            and _has_backtick_literal(term, "rho:system:pos", spans)
-        ):
+        pos_action = next(
+            (
+                match
+                for match in _POS_ACTION_RE.finditer(term)
+                if _is_code_index(match.start(), spans)
+            ),
+            None,
+        )
+        if pos_action and _has_backtick_literal(term, "rho:system:pos", spans):
             return _POS_ACTIONS[pos_action.group(1)]
 
-        vault_action = _VAULT_TRANSFER_RE.search(term)
-        transfer_action = _TRANSFER_CALL_RE.search(term)
-        if (
-            vault_action
-            and transfer_action
-            and _is_code_index(vault_action.start(), spans)
-            and _is_code_index(transfer_action.start(), spans)
-            and (
-                "ASIVault" in vault_action.group(0)
-                or _has_backtick_literal(term, "rho:vault:system", spans)
-            )
-        ):
+        vault_action = next(
+            (
+                match
+                for match in _VAULT_TRANSFER_RE.finditer(term)
+                if _is_code_index(match.start(), spans)
+                and (
+                    "ASIVault" in match.group(0)
+                    or _has_backtick_literal(term, "rho:vault:system", spans)
+                )
+            ),
+            None,
+        )
+        transfer_action = next(
+            (
+                match
+                for match in _TRANSFER_CALL_RE.finditer(term)
+                if _is_code_index(match.start(), spans)
+            ),
+            None,
+        )
+        if vault_action and transfer_action:
             return "asi_transfer", "vault_transfer"
 
-        registry_action = _REGISTRY_ACTION_RE.search(term)
-        if registry_action and _is_backtick_index(registry_action.start(), spans):
+        registry_action = next(
+            (
+                match
+                for match in _REGISTRY_ACTION_RE.finditer(term)
+                if _is_backtick_index(match.start(), spans)
+            ),
+            None,
+        )
+        if registry_action:
             action = (
                 "registry_lookup"
                 if registry_action.group(1) == "lookup"
@@ -227,10 +246,17 @@ class BlockIndexer:
             )
             return "registry_lookup", action
 
-        pos_marker = term.find("@PoS!")
+        pos_marker = next(
+            (
+                index
+                for index in range(len(term))
+                if term.startswith("@PoS!", index)
+                and _is_code_index(index, spans)
+            ),
+            None,
+        )
         if (
-            pos_marker >= 0
-            and _is_code_index(pos_marker, spans)
+            pos_marker is not None
             and _has_backtick_literal(term, "rho:system:pos", spans)
         ):
             return "validator_operation", "pos_other"

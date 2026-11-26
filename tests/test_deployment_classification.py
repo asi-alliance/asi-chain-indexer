@@ -59,6 +59,14 @@ def test_comments_and_plain_strings_do_not_supply_call_markers():
     assert classify(term) == ("smart_contract", None)
 
 
+def test_a_comment_marker_before_a_real_pos_call_is_ignored():
+    term = (
+        '// @PoS!("withdraw", *deployerId) `rho:system:pos`\n'
+        'new rl(`rho:system:pos`), ch in { @PoS!("delegate", *deployerId) }'
+    )
+    assert classify(term) == ("validator_operation", "pos_delegate")
+
+
 def test_a_locally_bound_pos_channel_is_not_a_validator_operation():
     term = 'new PoS in { @PoS!("delegate", *deployerId, *retCh) }'
     assert classify(term) == ("smart_contract", None)
