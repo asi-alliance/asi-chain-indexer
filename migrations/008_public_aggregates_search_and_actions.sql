@@ -74,10 +74,10 @@ CREATE OR REPLACE FUNCTION public.refresh_block_height(p_height BIGINT)
 AS
 $$
 BEGIN
-    -- Serialize aggregate updates for one height. Blocks at one height can be
-    -- written by different transactions; without the lock the delete/insert
-    -- pair could lose a sibling or conflict after both transactions commit.
-    PERFORM pg_advisory_xact_lock(p_height);
+    -- Serialize aggregate updates. A single lock key is used instead of one
+    -- lock per height: a bulk insert can cover tens of thousands of heights in
+    -- one transaction, and per-height advisory locks exhaust max_locks_per_transaction.
+    PERFORM pg_advisory_xact_lock(982451653);
     DELETE FROM public.block_heights WHERE height = p_height;
     INSERT INTO public.block_heights(height, block_count, latest_block_hash,
                                      latest_timestamp, finalized_count)
