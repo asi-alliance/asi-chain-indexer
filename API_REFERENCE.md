@@ -44,6 +44,7 @@ type blocks {
   extra_bytes: String
   version: Int
   deployment_count: Int
+  block_size: bigint
   finalization_status: String
   bonds_map: jsonb
   justifications: jsonb
@@ -77,7 +78,10 @@ type deployments {
   errored: Boolean
   error_message: String
   deployment_type: String
+  deployment_action: String
+  # Deprecated: block metadata; use block.seq_num.
   seq_num: Int
+  # Deprecated: block metadata; use block.shard_id.
   shard_id: String
   status: String
   created_at: timestamp!
@@ -106,6 +110,21 @@ type transfers {
   
   # Relationships
   deployment: deployments!
+}
+```
+
+#### BlockHeight
+
+One row per DAG height. Public reads use `block_heights_view`; the backing
+`block_heights` table is private.
+
+```graphql
+type block_heights_view {
+  height: bigint!
+  block_count: Int!
+  latest_block_hash: String!
+  latest_timestamp: bigint!
+  finalized_count: Int!
 }
 ```
 
@@ -383,23 +402,33 @@ query GetNetworkStats {
 ### Get Deployments by Type
 
 ```graphql
-query GetDeploymentsByType {
-  deployments_aggregate(group_by: deployment_type) {
-    aggregate {
-      count
-      avg {
-        phlo_cost
-      }
-      sum {
-        phlo_cost
-      }
-    }
-    nodes {
-      deployment_type
-    }
+query GetDeploymentCounts {
+  delegates: deployments_aggregate(
+    where: { deployment_action: { _eq: "pos_delegate" } }
+  ) {
+    aggregate { count }
+  }
+  transfers: deployments_aggregate(
+    where: { deployment_action: { _eq: "vault_transfer" } }
+  ) {
+    aggregate { count }
+  }
+  contract_calls: deployments_aggregate(
+    where: { deployment_action: { _is_null: true } }
+  ) {
+    aggregate { count }
   }
 }
 ```
+
+`deployment_type` is the coarse family (`asi_transfer`, `validator_operation`,
+`registry_lookup`, `smart_contract`, `genesis_mint`, `genesis_bond`).
+`deployment_action` is the exact known action: `pos_bond`, `pos_withdraw`,
+`pos_delegate`, `pos_undelegate`, `pos_complete_undelegate`,
+`pos_claim_rewards`, `vault_transfer`, `registry_lookup`, `registry_insert` or
+`pos_other`. It is `NULL` for an unrecognised contract call, including rows
+indexed before migration 008 until the operator runs
+`scripts/backfill_deployment_actions.py`.
 
 ### Get Latest Deployments
 
@@ -414,6 +443,7 @@ query GetLatestDeployments($limit: Int = 5) {
     term
     timestamp
     deployment_type
+    deployment_action
     phlo_cost
     errored
     status
@@ -485,6 +515,92 @@ query GetAggregatedStats {
   }
 }
 ```
+
+### Exact Height Counts and Grouped Heights
+
+`blocks_aggregate` and `block_heights_view` are readable by the public role:
+
+```graphql
+query HeightOverview($height: bigint!) {
+  blocks_aggregate(where: { block_number: { _eq: $height } }) {
+    aggregate { count }
+  }
+  block_heights_view(where: { height: { _eq: $height } }) {
+    height
+    block_count
+    latest_block_hash
+    latest_timestamp
+    finalized_count
+  }
+}
+```
+
+Use the view for Recent Blocks keyset pagination:
+
+```graphql
+query RecentHeights($before: bigint, $limit: Int!) {
+  block_heights_view(
+    where: { height: { _lt: $before } }
+    order_by: { height: desc }
+    limit: $limit
+  ) {
+    height block_count latest_block_hash latest_timestamp finalized_count
+  }
+}
+```
+
+`block_heights` is a private table maintained by the `blocks` trigger. The
+public `block_heights_view` exposes one row per height. A page of 20 heights
+uses the primary-key index backwards; it does not group the whole `blocks`
+table.
+
+### Search Query Shapes
+
+The public role can search the indexed text fields with `_eq`, `_like` or
+`_ilike`. Use the narrowest shape that fits the input:
+
+- **Exact identifier or address:** `_eq` on `block_hash`, `deploy_id`,
+  `deployer`, `deployer_address`, `from_address` or `to_address`.
+- **Prefix:** `_like 'value%'` (or `_ilike` for case-insensitive ASCII) uses the
+  `varchar_pattern_ops` indexes.
+- **Substring:** `_ilike '%value%'` uses the `pg_trgm` GIN indexes. Keep the
+  term at least three characters; very short or very common fragments can be
+  slower than an exact/prefix lookup.
+
+Example deployment search with a stable `(timestamp, deploy_id)` cursor:
+
+```graphql
+query SearchDeployments($pattern: String!, $beforeTs: bigint, $beforeId: String!) {
+  deployments(
+    where: {
+      _and: [
+        { _or: [
+          { deploy_id: { _ilike: $pattern } }
+          { deployer: { _ilike: $pattern } }
+          { deployer_address: { _ilike: $pattern } }
+        ] }
+        { _or: [
+          { timestamp: { _lt: $beforeTs } }
+          { _and: [{ timestamp: { _eq: $beforeTs } }, { deploy_id: { _gt: $beforeId } }] }
+        ] }
+      ]
+    }
+    order_by: [{ timestamp: desc }, { deploy_id: asc }]
+    limit: 21
+  ) {
+    deploy_id block_number timestamp deployer deployment_type deployment_action
+  }
+}
+```
+
+The equivalent transfer stream uses `(timestamp, id)` and searches `deploy_id`,
+`from_address` and `to_address`. The block stream uses `(timestamp, block_hash)`
+and searches `block_hash` and `proposer`. Per-type counts use the corresponding
+`*_aggregate` field with the same filters.
+
+`deployments`, `transfers`, `blocks`, `block_heights_view` and
+`transaction_history_view` have public aggregate permission. The raw lifecycle
+tables and `native_transfer_lifecycle_aggregate` remain hidden.
 
 ## Real-time Queries (Polling)
 

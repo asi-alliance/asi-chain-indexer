@@ -26,7 +26,7 @@ The ASI-Chain indexer provides a powerful GraphQL API powered by Hasura, offerin
 - **Enhanced Transfer Detection**: Supports both variable-based and match-based Rholang patterns
 - **Data Quality**: Proper NULL handling for deployment error messages
 - **Validator Bond Detection**: Bonds read directly from the node's gRPC API
-- **Pending Deploys**: Live snapshot of the node's deploy buffers (deploys not yet in a block), refreshed every sync cycle
+- **Pending Deploys**: Live snapshot of the configured validators' deploy buffers (deploys not yet in a block), read every second when `PENDING_DEPLOYS_NODES` is set
 
 ## Access Details
 
@@ -94,13 +94,14 @@ Smart contract deployments and transactions.
 | errored | Boolean | Whether deployment failed at execution |
 | error_message | String | Rholang error text (NULL when no error) |
 | deployment_type | String | Classification (smart_contract, validator_operation, asi_transfer, ...) |
-| seq_num | Int | Sequence number |
-| shard_id | String | Shard ID |
 | status | String | Deploy lifecycle status — currently always `"included"` (no status field in node's block-stream) |
 | created_at | Timestamp | When indexed |
 
+`deployments.seq_num` and `deployments.shard_id` are deprecated and always `null`.
+Read `seq_num` and `shard_id` from the related `block`.
+
 ### 3. **pending_deploys**
-Ephemeral snapshot of the node's deploy buffers — deploys signed and accepted but **not yet included in any block**. Fully refreshed (DELETE + INSERT) every sync cycle; no `block_hash`/FK by design. `sig` equals `deployments.deploy_id` once the deploy is included.
+Ephemeral snapshot of the deploy buffers of the validators in `PENDING_DEPLOYS_NODES` — deploys signed and accepted but **not yet included in any block**. Rows change only when the merged buffers change; no `block_hash`/FK by design. The table is empty, and `indexer_state` has no `pending_deploys_status` row, when the feature is off. `sig` equals `deployments.deploy_id` once the deploy is included.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -117,11 +118,15 @@ Ephemeral snapshot of the node's deploy buffers — deploys signed and accepted 
 | language | String | Source language (`rholang` / `metta`) |
 | expiration_timestamp | BigInt | Expiry (NULL = no expiration) |
 | is_rejected | Boolean | `false` = fresh in deploy_storage; `true` = recovering after a merge conflict (rejected-recovery buffer) |
-| fetched_at | Timestamp | When this snapshot row was written |
+| fetched_at | Timestamp | When the indexer first saw the deploy |
 
 Hasura permissions: public SELECT, `limit: 5000`, `allow_aggregations: true`.
 
-> The node caps the response at 1000 entries — the pre-cap total is in `indexer_state` key `pending_deploys_total_available`. Compare with `pending_deploys_aggregate { aggregate { count } }` to detect truncation.
+> Each node caps its response at 1000 entries — the pre-cap total is in `indexer_state` key `pending_deploys_total_available`. Compare with `pending_deploys_aggregate { aggregate { count } }` to detect truncation.
+>
+> `indexer_state` key `pending_deploys_status` holds JSON `{"nodes", "reachable", "count", "total_available", "interval_ms"}`. Successful refreshes update `updated_at` on change or before the next scheduled read would miss the 10 s heartbeat. The enabled poll interval is limited to 10 s. Check both the heartbeat and `reachable`: a recent heartbeat with `reachable < nodes` means the queue is partial and may include cached observations younger than 30 s at refresh time, and `reachable == 0` means no validator confirmed the queue. A missing row means the feature is off.
+>
+> Clients that show the view live should use a subscription rather than fast polling: Hasura runs one query per refetch interval for all subscribers of the same query, while every polling client sends its own requests. A subscription can select only one root field.
 
 ### 4. **transfers**
 ASI token transfers extracted from deployments.
@@ -363,6 +368,27 @@ query GetPendingDeploys {
   }
   indexer_state(where: {key: {_eq: "pending_deploys_total_available"}}) {
     value
+  }
+}
+```
+
+#### Watch Pending Deploys (WebSocket)
+```graphql
+subscription WatchPendingDeploys {
+  pending_deploys(order_by: [{timestamp: desc}, {sig: asc}], limit: 50) {
+    sig
+    deployer_address
+    timestamp
+    is_rejected
+    fetched_at
+  }
+}
+
+subscription WatchPendingDeploysStatus {
+  indexer_state(where: {key: {_in: ["pending_deploys_status", "pending_deploys_total_available"]}}) {
+    key
+    value
+    updated_at
   }
 }
 ```

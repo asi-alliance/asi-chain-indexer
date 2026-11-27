@@ -1,5 +1,9 @@
 # ASI Chain Explorer - Architecture Documentation
 
+See [DAG blocks, deploys, and transfers](DAG.md) for source-checked DAG semantics,
+synchronization limits and explorer guidance. Check its revision/status table:
+the exact-amount/native-transfer sections describe unmerged PRs #20/#22.
+
 ## System Architecture
 
 ### High-Level Design
@@ -23,7 +27,7 @@ The indexer service is the core backend component responsible for blockchain dat
    - Handles block synchronization, deployment processing, and validator tracking
    - Implements continuous sync loop with configurable interval
    - Processes blocks in batches for optimal performance
-   - Methods: `start()`, `stop()`, `_sync_blocks()`, `_sync_pending_deploys()`, `_process_block()`, `_process_deployment_enhanced()`, `_extract_transfers()`, `_process_validators()`, `_update_validator_states()`, `_check_epoch_transitions()`, `_update_network_stats()`, `_verify_main_chain()`
+   - Methods: `start()`, `stop()`, `_sync_blocks()`, `_process_block()`, `_process_deployment_enhanced()`, `_extract_transfers()`, `_process_validators()`, `_update_validator_states()`, `_check_epoch_transitions()`, `_update_network_stats()`, `_verify_main_chain()`
 
 2. **GrpcNodeClient** (`grpc_node_client.py`)
    - Client for the node's `DeployServiceV1` gRPC API, plus its HTTP endpoint for active validators
@@ -142,12 +146,14 @@ Key fields:
 - `errored` (BOOLEAN): Deployment error status
 - `error_message` (TEXT): Error description if errored
 - `status` (VARCHAR(20)): Deployment status (pending/included/error)
-- `seq_num` (INTEGER): Sequence number
-- `shard_id` (VARCHAR(20)): Shard identifier
+
+`seq_num` and `shard_id` remain nullable for historical rows and API
+compatibility but are deprecated and not populated. They are block metadata;
+use the related block's values.
 
 **pending_deploys**
 
-Ephemeral snapshot of the node's deploy buffers — deploys not yet included in any block. Fully refreshed (DELETE + INSERT) every sync cycle; intentionally no `block_hash`/FK (see Key Design Decisions).
+Ephemeral snapshot of the deploy buffers of the validators in `PENDING_DEPLOYS_NODES` — deploys not yet included in any block. Written by the pending-deploy task (`src/pending_deploys.py`) only when the merged set changes; intentionally no `block_hash`/FK (see Key Design Decisions).
 
 Key fields:
 - `sig` (VARCHAR(160), PK): Hex deploy signature — matches `deployments.deploy_id` once the deploy is included in a block
@@ -162,7 +168,7 @@ Key fields:
 - `language` (VARCHAR(20)): Source language (`rholang` / `metta`)
 - `expiration_timestamp` (BIGINT, NULL = no expiration)
 - `is_rejected` (BOOLEAN): `false` = fresh in deploy_storage; `true` = recovering in rejected-recovery buffer after a merge conflict
-- `fetched_at` (TIMESTAMP): When this snapshot row was written
+- `fetched_at` (TIMESTAMP): When the indexer first saw the deploy in a validator buffer
 
 **transfers**
 
@@ -250,7 +256,7 @@ Key fields:
 - `value` (TEXT): State value
 - `updated_at` (TIMESTAMP): Last update time
 
-Common keys: `last_indexed_block`, `indexer_version`, `schema_version`, `pending_deploys_total_available` (pre-cap pending deploy count, upserted every sync cycle)
+Common keys: `last_indexed_block`, `indexer_version`, `schema_version`, `pending_deploys_total_available` (pre-cap pending deploy count), `pending_deploys_status` (JSON `nodes`, `reachable`, `count`, `total_available`, `interval_ms`; rewritten on change and at least every 10 s, absent when pending deploys are off), `block_coverage` (JSON `prune_floor`, `heights` of permanently pruned hashes, `classified_hashes` confirmed through the single-block route without a height, `degraded_blocks`, `updated_at`; bounded and rewritten only when it changes)
 
 #### Normalization and Relationships
 
@@ -482,7 +488,7 @@ Health check includes:
 
 #### Indexer Error Recovery
 
-1. **Retry Logic**: tenacity library used for retry with exponential backoff
+1. **Retry Logic**: `src/resilience.py` implements retries with exponential backoff, jitter and circuit breaking
 2. **Transaction Rollback**: Failed block processing rolled back atomically
 3. **State Persistence**: Last indexed block persisted in indexer_state table for recovery
 4. **Health Monitoring**: Prometheus alerts on sustained errors
@@ -501,17 +507,19 @@ Health check includes:
 1. Get current state from database (last_indexed_block)
 2. Query node for latest finalized block
 3. Calculate batch range (start = last_indexed + 1, end = min(start + batch_size, latest))
-4. Fetch block summaries using `get_blocks_by_height()`
-5. For each block summary:
+4. Fetch blocks by height, opting into the observer's `pruned` / `unavailable` split for missing bodies
+5. For each served block summary:
    - Fetch full block details using `get_block_details()`
    - Process block in database transaction
    - Extract and store deployments
    - Extract and store transfers
    - Update validator information
-6. Update last_indexed_block in database
-7. Refresh the `pending_deploys` snapshot: call `getPendingDeploys`, then DELETE + INSERT the table contents in one transaction and upsert `pending_deploys_total_available` into `indexer_state` (node failure keeps the last snapshot)
+6. Cover each height whose reported hashes were indexed or permanently pruned; an `unavailable` body or a failed write keeps the height uncovered and retried
+7. Update last_indexed_block in database and persist the bounded `block_coverage` ledger
 8. Sleep for SYNC_INTERVAL seconds
 9. Repeat
+
+Pending deploys run as a separate task (`PendingDeploysPoller`), not as a step of this loop. Every `PENDING_DEPLOYS_INTERVAL` (default 1 s) it calls `getPendingDeploys` on each validator in `PENDING_DEPLOYS_NODES` concurrently, merges the buffers by signature (a failed read retains its last snapshot until its age reaches 30 seconds) and, only when the merged set changes, deletes rows that left the buffers and upserts new rows in one transaction. With an empty `PENDING_DEPLOYS_NODES` the task does not start and the indexer clears the pending rows and state.
 
 #### Additional Background Tasks
 

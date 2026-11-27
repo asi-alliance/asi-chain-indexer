@@ -1,15 +1,50 @@
 """Configuration management for the indexer."""
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
 
+PENDING_STATUS_HEARTBEAT_SECONDS = 10.0
+Node = tuple[str, int]
+
+
+def parse_nodes(value: str) -> list[Node]:
+    """Parse a comma-separated list of host:port gRPC addresses.
+
+    IPv6 hosts use brackets ([::1]:40402). Duplicates are dropped, order kept.
+    Raises ValueError for an entry without a host or with an invalid port.
+    """
+    nodes: list[Node] = []
+    for raw in value.split(","):
+        entry = raw.strip()
+        if not entry:
+            continue
+        if "://" in entry or any(c.isspace() for c in entry):
+            raise ValueError(f"PENDING_DEPLOYS_NODES entry {entry!r} must be host:port")
+        if entry.startswith("["):
+            host, sep, port = entry[1:].partition("]:")
+        else:
+            host, sep, port = entry.rpartition(":")
+            if ":" in host:
+                raise ValueError(f"PENDING_DEPLOYS_NODES entry {entry!r}: put an IPv6 host in brackets")
+        if not sep or not host or not port.isdigit() or not 1 <= int(port) <= 65535:
+            raise ValueError(f"PENDING_DEPLOYS_NODES entry {entry!r} must be host:port with a port 1-65535")
+        node = (host, int(port))
+        if node not in nodes:
+            nodes.append(node)
+    return nodes
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
+
+    native_token_decimals: int = Field(default=18, ge=0, le=77)
+
+    node_protocol_profile: Literal["classic", "uint256"] = "uint256"
 
     # Node Configuration
     node_timeout: int = Field(
@@ -25,6 +60,13 @@ class Settings(BaseSettings):
     grpc_port: int = Field(
         default=40452,
         description="GRPC port for status queries"
+    )
+
+    grpc_max_receive_message_bytes: int = Field(
+        default=64 * 1024 * 1024,
+        ge=1,
+        le=2**31 - 1,
+        description="Maximum size of a gRPC response message in bytes"
     )
 
     node_host: str = Field(
@@ -69,6 +111,21 @@ class Settings(BaseSettings):
     start_from_block: int = Field(
         default=0,
         description="Block number to start syncing from"
+    )
+    ancestor_recovery_steps: int = Field(
+        default=64, ge=1, description="Maximum ancestor recovery work items per sync cycle"
+    )
+    block_prefetch: int = Field(
+        default=2,
+        ge=0,
+        le=16,
+        description="Blocks whose details and replay traces are read ahead of the block being written"
+    )
+    trace_workers: int = Field(
+        default=2,
+        ge=1,
+        le=16,
+        description="Worker processes that parse replay traces"
     )
 
     # Monitoring
@@ -178,9 +235,25 @@ class Settings(BaseSettings):
         default=True,
         description="Enable ASI transfer extraction from deployments"
     )
-    enable_pending_deploys_sync: bool = Field(
-        default=True,
-        description="Enable pending deploys polling from the node's getPendingDeploys RPC"
+    # Pending deploys. A deploy stays only in the buffer of the validator that
+    # received it (no gossip; an observer rejects deploys), so the pending view
+    # reads every listed validator. An empty list turns the feature off.
+    pending_deploys_nodes: str = Field(
+        default="",
+        description="Comma-separated host:port gRPC addresses of the validators that accept deploys; "
+                    "empty disables pending deploys"
+    )
+    pending_deploys_interval: float = Field(
+        default=1.0,
+        ge=0.2,
+        le=60,
+        description="Seconds between pending-deploy reads of the listed validators"
+    )
+    pending_deploys_timeout: float = Field(
+        default=0.5,
+        gt=0,
+        le=30,
+        description="gRPC timeout in seconds for one validator's pending-deploy read"
     )
     enable_metrics: bool = Field(
         default=True,
@@ -189,6 +262,17 @@ class Settings(BaseSettings):
     enable_health_check: bool = Field(
         default=True,
         description="Enable health check endpoint"
+    )
+
+    # Read cache for /status counts and transfer lists; dropped on every committed block
+    read_cache_enabled: bool = Field(
+        default=True,
+        description="Serve repeated /status counts and transfer list reads from process memory"
+    )
+    read_cache_max_entries: int = Field(
+        default=256,
+        ge=1,
+        description="Maximum cached read results; the least recently used entry is dropped first"
     )
 
     # Hasura Configuration (optional, not used by indexer but may be in env)
@@ -206,6 +290,27 @@ class Settings(BaseSettings):
             raise ValueError("DATABASE_URL is not a valid database URL") from None
         return value
 
+    @field_validator("pending_deploys_nodes")
+    @classmethod
+    def _check_pending_deploys_nodes(cls, value: str) -> str:
+        parse_nodes(value)
+        return value
+
+    @model_validator(mode="after")
+    def _check_pending_deadline(self) -> "Settings":
+        if not self.pending_deploy_nodes:
+            return self
+        if self.pending_deploys_interval > PENDING_STATUS_HEARTBEAT_SECONDS:
+            raise ValueError("PENDING_DEPLOYS_INTERVAL must not exceed the 10 s status heartbeat")
+        if self.pending_deploys_timeout > self.pending_deploys_interval:
+            raise ValueError("PENDING_DEPLOYS_TIMEOUT must not exceed PENDING_DEPLOYS_INTERVAL")
+        return self
+
+    @property
+    def pending_deploy_nodes(self) -> list[tuple[str, int]]:
+        """Parsed PENDING_DEPLOYS_NODES; empty when pending deploys are off."""
+        return parse_nodes(self.pending_deploys_nodes)
+
     @model_validator(mode="after")
     def _require_webhook_when_alerting(self) -> "Settings":
         webhook = self.mattermost_webhook_url
@@ -213,11 +318,12 @@ class Settings(BaseSettings):
             raise ValueError("ALERTS_ENABLED is true but MATTERMOST_WEBHOOK_URL is empty")
         return self
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
-        extra = "allow"  # allow extra fields in .env
-        hide_input_in_errors = True
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=False,
+        extra="allow",  # allow extra fields in .env
+        hide_input_in_errors=True,
+    )
 
 
 # Global settings instance

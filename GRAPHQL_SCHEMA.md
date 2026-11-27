@@ -4,7 +4,7 @@
 
 ## Overview
 
-The ASI-Chain indexer provides a GraphQL API through Hasura with automatic relationship configuration, exposing comprehensive blockchain data for querying. This document describes the current schema with 13 tables, 5 views, and 6 SQL functions, available queries, and relationships.
+The ASI-Chain indexer provides a GraphQL API through Hasura with automatic relationship configuration, exposing comprehensive blockchain data for querying. This document describes the current tables, views and SQL functions, available queries and relationships.
 
 ## Available Tables
 
@@ -26,6 +26,7 @@ Stores blockchain block data. **Primary key: `block_hash`** (DAG-aware — `bloc
 - `extra_bytes` (text): Extra block data
 - `version` (integer): Block version
 - `deployment_count` (integer, default 0): Number of deployments in block
+- `block_size` (bigint, nullable): Serialized block size in bytes as reported by the node's `LightBlockInfo.blockSize`; read from the existing block response. `NULL` for rows indexed before migration 008 that have not been re-indexed
 - `finalization_status` (varchar(20), NOT NULL): `'finalized'` or `'unfinalized'` (real status from node, no default)
 - `bonds_map` (jsonb): Validator bonds at this block
 - `justifications` (jsonb): Block justifications
@@ -53,11 +54,13 @@ Stores smart contract deployments.
 - `valid_after_block_number` (bigint): Valid after block
 - `errored` (boolean, default false): Whether deployment failed at execution
 - `error_message` (text): Rholang error text (NULL when no error; sourced from node's `systemDeployError`)
-- `deployment_type` (varchar(50)): Classification (`asi_transfer` / `validator_operation` / `smart_contract` / ...)
-- `seq_num` (integer): Sequence number
-- `shard_id` (varchar(20)): Shard ID
+- `deployment_type` (varchar(50)): Coarse family (`asi_transfer` / `validator_operation` / `registry_lookup` / `smart_contract` / `genesis_*`)
+- `deployment_action` (varchar(50), nullable): Exact known action (`pos_bond`, `pos_withdraw`, `pos_delegate`, `pos_undelegate`, `pos_complete_undelegate`, `pos_claim_rewards`, `vault_transfer`, `registry_lookup`, `registry_insert`, `pos_other`); NULL for an unrecognised contract call and for rows indexed before migration 008 until backfilled
 - `status` (varchar(20), default `'included'`): Deploy lifecycle status — **currently always `"included"`** in production (no `status` field in node's block-stream `DeployInfo`; the gRPC client hardcodes `"included"`)
 - `created_at` (timestamp, NOT NULL, default NOW()): When indexed
+
+`deployments.seq_num` and `deployments.shard_id` are deprecated and always `null`.
+They are block metadata; read them from the related `block`.
 
 ### pending_deploys
 Ephemeral snapshot of the node's deploy buffers — deploys signed and accepted by the node but **not yet included in any block**. Fully refreshed (DELETE + INSERT) by the indexer every sync cycle (`SYNC_INTERVAL`, default 5s); rows appear/disappear as the node's buffer changes. No `block_hash`/FK by design.
@@ -230,7 +233,17 @@ Read-only view that types the return of `get_block_descendants`.
 Analytics view over recent blocks (last 100 non-genesis blocks): `total_blocks`, `avg_block_time_seconds`, `earliest_block_time`, `latest_block_time`. Hasura-tracked.
 
 ### network_metrics_view
-Schema-holder view (composite type) for Hasura that types the return of `get_network_metrics`. Columns: `bucket_start` (timestamptz), `bucket_end` (timestamptz), `avg_block_time_seconds` (numeric), `avg_tps` (numeric), `deployments_count` (bigint), `transfers_count` (bigint). The view itself returns 0 rows (`LIMIT 0`) — use `get_network_metrics()` instead.
+Schema-holder view (composite type) for Hasura that types the return of `get_network_metrics`. Columns: `bucket_start` (timestamptz), `bucket_end` (timestamptz), `avg_block_time_seconds` (numeric), `avg_tps` (numeric), `deployments_count` (bigint), `transfers_count` (bigint). The view itself returns 0 rows (`LIMIT 0`) - use `get_network_metrics()` instead.
+
+### block_heights_view
+One row per DAG height, backed by the private `block_heights` table maintained by the `block_height_upsert` trigger. Tracked in Hasura with public SELECT and aggregate permission.
+
+**Fields:**
+- `height` (bigint, NOT NULL): Block number / height
+- `block_count` (integer, NOT NULL): Number of sibling blocks at this height
+- `latest_block_hash` (varchar(64), NOT NULL): Hash of the latest sibling by timestamp, then hash
+- `latest_timestamp` (bigint, NOT NULL): Latest sibling timestamp
+- `finalized_count` (integer, NOT NULL): Number of finalized siblings
 
 ## SQL Functions
 
@@ -251,6 +264,7 @@ These functions are `LANGUAGE sql STABLE` / `LANGUAGE plpgsql` and are tracked i
 ## Triggers (internal, not exposed via GraphQL)
 
 - `update_deployment_count` (AFTER INSERT/DELETE on `deployments`): keeps `blocks.deployment_count` in sync.
+- `block_height_upsert` (AFTER INSERT/DELETE/UPDATE on `blocks`): refreshes the private `block_heights` aggregate row for the affected height; `block_heights_view` reads that table.
 - `new_block_notify` (AFTER INSERT on `blocks`): `pg_notify('new_block', ...)` for real-time subscriptions.
 - `new_transfer_notify` (AFTER INSERT on `transfers`): `pg_notify('new_transfer', ...)` for real-time subscriptions.
 

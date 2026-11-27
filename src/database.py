@@ -1,6 +1,7 @@
 """Database connection and session management."""
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Dict
 
@@ -90,7 +91,11 @@ class Database:
             return await conn.fetch(query, *args)
     
     async def get_last_indexed_block(self) -> int:
-        """Get the last block height whose complete sibling set was indexed."""
+        """Get the last block height the sync loop covered.
+
+        Covered means every hash the observer reported at that height was
+        either indexed or permanently pruned there; see ``block_coverage``.
+        """
         query = """
             SELECT value::bigint AS block_number
             FROM indexer_state
@@ -101,7 +106,7 @@ class Database:
             return row["block_number"] if row else -1
 
     async def set_last_indexed_block(self, block_number: int) -> None:
-        """Record the last height whose complete sibling set was indexed."""
+        """Record the last height the sync loop covered."""
         query = """
             INSERT INTO indexer_state (key, value, updated_at)
             VALUES ('last_indexed_block', $1, NOW())
@@ -110,6 +115,51 @@ class Database:
         """
         async with self.pool.acquire() as conn:
             await conn.execute(query, str(block_number))
+
+    async def get_block_coverage(self) -> dict:
+        """Read the bounded ledger of permanently pruned bodies."""
+        async with self.pool.acquire() as conn:
+            value = await conn.fetchval(
+                "SELECT value FROM indexer_state WHERE key='block_coverage'"
+            )
+        if not value:
+            return {}
+        try:
+            loaded = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    async def save_block_coverage(self, state: dict) -> None:
+        """Replace the pruned-body ledger; the sync loop owns the whole value."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO indexer_state (key, value, updated_at)
+                   VALUES ('block_coverage', $1, NOW())
+                   ON CONFLICT (key) DO UPDATE
+                   SET value=EXCLUDED.value, updated_at=NOW()""",
+                json.dumps(state),
+            )
+
+    async def get_recovery_path(self) -> list:
+        """Read the unfinished child-to-parent path saved by the sync writer."""
+        async with self.pool.acquire() as conn:
+            value = await conn.fetchval(
+                "SELECT value FROM indexer_state WHERE key='ancestor_recovery_path'"
+            )
+        return json.loads(value) if value else []
+
+    async def save_recovery_path(self, path: list) -> None:
+        async with self.pool.acquire() as conn:
+            if path:
+                await conn.execute(
+                    """INSERT INTO indexer_state (key, value, updated_at)
+                       VALUES ('ancestor_recovery_path', $1, NOW())
+                       ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()""",
+                    json.dumps(path),
+                )
+            else:
+                await conn.execute("DELETE FROM indexer_state WHERE key='ancestor_recovery_path'")
 
 
 class AlertThrottleStore:
