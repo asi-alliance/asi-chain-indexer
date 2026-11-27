@@ -316,6 +316,10 @@ Read [POSTGRES_UPGRADE.md](POSTGRES_UPGRADE.md) and the
   `python -m src.migrate upgrade`. A database already tracked at
   003, 004, 005, 006 or 007 upgrades to 008. Compose restarts and SQLAlchemy `create_all()` do not upgrade
   existing schemas. See the migration guide for validation and backup requirements.
+- Migration 008 backfills `block_heights` from the existing blocks, but
+  `blocks.block_size` stays `NULL` for rows indexed before the new code and not
+  processed again. The Explorer shows `N/A` for those rows; newly indexed or
+  re-indexed blocks carry the node-reported size.
 - Populated databases marked for native-transfer backfill must complete
   `python -m src.reindex_transfers` with writes stopped. Do not manually clear
   the repair flag. Repair preserves blocks, the sync cursor and recorded precision.

@@ -227,6 +227,12 @@ Existing deployment rows keep `deployment_action = NULL` until the operator runs
 `scripts/backfill_deployment_actions.py`. The view and indexes are built in the
 migration; plan the operation while indexer writes are stopped.
 
+The migration creates `block_heights` from the existing `blocks` rows, so grouped
+heights are populated for history. `blocks.block_size` stays `NULL` for blocks
+that were indexed before migration 008 and are not processed again; the Explorer
+shows `N/A` for those rows. Blocks indexed by the new code (or re-indexed) carry
+the node-reported size.
+
 `pg_trgm` must be available to the indexer database role. It is a trusted
 extension on supported PostgreSQL versions; a managed database may require the
 extension allowlist to be updated first.

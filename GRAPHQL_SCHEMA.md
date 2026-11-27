@@ -26,7 +26,7 @@ Stores blockchain block data. **Primary key: `block_hash`** (DAG-aware — `bloc
 - `extra_bytes` (text): Extra block data
 - `version` (integer): Block version
 - `deployment_count` (integer, default 0): Number of deployments in block
-- `block_size` (bigint, nullable): Serialized block size in bytes as reported by the node's `LightBlockInfo.blockSize`; read from the existing block response
+- `block_size` (bigint, nullable): Serialized block size in bytes as reported by the node's `LightBlockInfo.blockSize`; read from the existing block response. `NULL` for rows indexed before migration 008 that have not been re-indexed
 - `finalization_status` (varchar(20), NOT NULL): `'finalized'` or `'unfinalized'` (real status from node, no default)
 - `bonds_map` (jsonb): Validator bonds at this block
 - `justifications` (jsonb): Block justifications
