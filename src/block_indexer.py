@@ -88,6 +88,88 @@ def _raised_in_database_driver(error: BaseException) -> bool:
     return False
 
 
+# Exact system-contract call markers. Broad words such as "bond" or "registry"
+# also occur in comments and unrelated contracts, so they are not used.
+_POS_ACTION_RE = re.compile(
+    r'@PoS!\s*\(\s*"(bond|withdraw|delegate|undelegate|completeUndelegate|claimDelegatorRewards)"'
+)
+_VAULT_TRANSFER_RE = re.compile(r'@(?:ASIVault|SystemVault)!\s*\(\s*"findOrCreate"')
+_TRANSFER_CALL_RE = re.compile(r'!\s*\(\s*"transfer"')
+_REGISTRY_ACTION_RE = re.compile(
+    r'rho:registry:(lookup|insertSigned|insertArbitrary|insert)'
+)
+
+_POS_ACTIONS = {
+    "bond": ("validator_operation", "pos_bond"),
+    "withdraw": ("validator_operation", "pos_withdraw"),
+    "delegate": ("validator_operation", "pos_delegate"),
+    "undelegate": ("validator_operation", "pos_undelegate"),
+    "completeUndelegate": ("validator_operation", "pos_complete_undelegate"),
+    "claimDelegatorRewards": ("validator_operation", "pos_claim_rewards"),
+}
+
+
+def _lexical_spans(term: str):
+    """Return (start, end, kind) spans for comments and string literals."""
+    spans = []
+    index = 0
+    while index < len(term):
+        if term.startswith("//", index):
+            end = term.find("\n", index)
+            end = len(term) if end < 0 else end
+            spans.append((index, end, "comment"))
+            index = end
+        elif term.startswith("/*", index):
+            start = index
+            depth = 1
+            index += 2
+            while index < len(term) and depth:
+                if term.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif term.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    index += 1
+            spans.append((start, index, "comment"))
+        elif term[index] in ('"', "`"):
+            quote = term[index]
+            start = index
+            index += 1
+            while index < len(term):
+                if term[index] == "\\":
+                    index += 2
+                elif term[index] == quote:
+                    index += 1
+                    break
+                else:
+                    index += 1
+            spans.append((start, index, "string" if quote == '"' else "backtick"))
+        else:
+            index += 1
+    return spans
+
+
+def _index_in_span(index: int, spans, kinds) -> bool:
+    return any(kind in kinds and start <= index < end for start, end, kind in spans)
+
+
+def _is_code_index(index: int, spans) -> bool:
+    return not _index_in_span(index, spans, ("comment", "string", "backtick"))
+
+
+def _has_backtick_literal(term: str, value: str, spans) -> bool:
+    return any(
+        kind == "backtick" and value in term[start + 1:end - 1]
+        for start, end, kind in spans
+    )
+
+
+def _is_backtick_index(index: int, spans) -> bool:
+    return _index_in_span(index, spans, ("backtick",))
+
+
 class BlockIndexer:
     """Enhanced indexer using the node gRPC/HTTP API for full blockchain data extraction."""
 
@@ -96,19 +178,89 @@ class BlockIndexer:
 
     @staticmethod
     def classify_deployment(term: str) -> str:
-        """Classify deployment type based on Rholang term content."""
-        if 'ASIVault' in term and 'transfer' in term:
-            return 'asi_transfer'
-        elif 'validator' in term or 'bond' in term:
-            return 'validator_operation'
-        elif 'finalizer' in term:
-            return 'finalizer_contract'
-        elif 'registry' in term and 'lookup' in term:
-            return 'registry_lookup'
-        elif 'auction' in term:
-            return 'auction_contract'
-        else:
-            return 'smart_contract'
+        """Return the coarse deployment family for a Rholang term.
+
+        Kept as a string-returning wrapper for compatibility with callers that
+        only need the family. New code should use classify_deployment_action().
+        """
+        return BlockIndexer.classify_deployment_action(term)[0]
+
+    @staticmethod
+    def classify_deployment_action(term: str) -> tuple[str, Optional[str]]:
+        """Return (family, action) using exact system-contract call markers.
+
+        The action is None for an unrecognised contract call. This runs once per
+        deployment during ingest; it never parses Rholang or calls the node.
+        """
+        if not term:
+            return "smart_contract", None
+
+        spans = _lexical_spans(term)
+        pos_action = next(
+            (
+                match
+                for match in _POS_ACTION_RE.finditer(term)
+                if _is_code_index(match.start(), spans)
+            ),
+            None,
+        )
+        if pos_action and _has_backtick_literal(term, "rho:system:pos", spans):
+            return _POS_ACTIONS[pos_action.group(1)]
+
+        vault_action = next(
+            (
+                match
+                for match in _VAULT_TRANSFER_RE.finditer(term)
+                if _is_code_index(match.start(), spans)
+                and (
+                    "ASIVault" in match.group(0)
+                    or _has_backtick_literal(term, "rho:vault:system", spans)
+                )
+            ),
+            None,
+        )
+        transfer_action = next(
+            (
+                match
+                for match in _TRANSFER_CALL_RE.finditer(term)
+                if _is_code_index(match.start(), spans)
+            ),
+            None,
+        )
+        if vault_action and transfer_action:
+            return "asi_transfer", "vault_transfer"
+
+        registry_action = next(
+            (
+                match
+                for match in _REGISTRY_ACTION_RE.finditer(term)
+                if _is_backtick_index(match.start(), spans)
+            ),
+            None,
+        )
+        if registry_action:
+            action = (
+                "registry_lookup"
+                if registry_action.group(1) == "lookup"
+                else "registry_insert"
+            )
+            return "registry_lookup", action
+
+        pos_marker = next(
+            (
+                index
+                for index in range(len(term))
+                if term.startswith("@PoS!", index)
+                and _is_code_index(index, spans)
+            ),
+            None,
+        )
+        if (
+            pos_marker is not None
+            and _has_backtick_literal(term, "rho:system:pos", spans)
+        ):
+            return "validator_operation", "pos_other"
+        return "smart_contract", None
 
     def __init__(self, alerts: Optional[AlertService] = None):
         self.client = None
@@ -828,13 +980,44 @@ class BlockIndexer:
         if not block_hash or block_number is None:
             raise ValueError("Block missing required blockHash or blockNumber")
 
-        # Check if already processed
+        raw_block_size = block_info.get("blockSize")
+        try:
+            block_size = (
+                int(raw_block_size) if raw_block_size not in (None, "") else None
+            )
+        except (TypeError, ValueError):
+            block_size = None
+
+        # Check if already processed. A known hash can still gain finality or a
+        # previously missing block size from the observer, so refresh those
+        # fields instead of returning before the height trigger sees them.
         async with db.session() as session:
             exists = await session.scalar(
                 select(Block).where(Block.block_hash == block_hash).limit(1)
             )
             if exists:
-                logger.debug("Block already indexed", block_number=block_number)
+                updates = {}
+                if "isFinalized" in block_info:
+                    desired_finalization = (
+                        "finalized" if block_info.get("isFinalized") else "unfinalized"
+                    )
+                    if exists.finalization_status != desired_finalization:
+                        updates["finalization_status"] = desired_finalization
+                if exists.block_size is None and block_size is not None:
+                    updates["block_size"] = block_size
+                if updates:
+                    await session.execute(
+                        update(Block)
+                        .where(Block.block_hash == block_hash)
+                        .values(**updates)
+                    )
+                    logger.info(
+                        "Block metadata refreshed",
+                        block_number=block_number,
+                        updates=sorted(updates),
+                    )
+                else:
+                    logger.debug("Block already indexed", block_number=block_number)
                 return
 
         if traces is None:
@@ -865,6 +1048,7 @@ class BlockIndexer:
                 extra_bytes=block_info.get("extraBytes"),
                 version=block_info.get("version"),
                 fault_tolerance=block_info.get("faultTolerance", 0.0),
+                block_size=block_size,
                 pre_state_hash=block_info.get("preStateHash"),
                 justifications=justifications
             ).on_conflict_do_nothing(index_elements=["block_hash"])
@@ -978,7 +1162,7 @@ class BlockIndexer:
 
         # Classify deployment and normalize error flags
         term = deploy_data.get("term", "")
-        deployment_type = self.classify_deployment(term)
+        deployment_type, deployment_action = self.classify_deployment_action(term)
 
         error_message = deploy_data.get("systemDeployError")
         # Only set error_message if it's not an empty string
@@ -1008,6 +1192,7 @@ class BlockIndexer:
             errored=errored,
             error_message=error_message,
             deployment_type=deployment_type,
+            deployment_action=deployment_action,
             status=deploy_data.get("status", "included"),
         )
         dep_upsert = dep_insert.on_conflict_do_update(
@@ -1020,6 +1205,7 @@ class BlockIndexer:
                 "errored": dep_insert.excluded.errored,
                 "error_message": dep_insert.excluded.error_message,
                 "deployment_type": dep_insert.excluded.deployment_type,
+                "deployment_action": dep_insert.excluded.deployment_action,
                 "timestamp": dep_insert.excluded.timestamp,
                 "sig_algorithm": dep_insert.excluded.sig_algorithm,
                 "deployer": dep_insert.excluded.deployer,
@@ -1432,6 +1618,7 @@ class BlockIndexer:
                 timestamp=block_info.get("timestamp"),
                 sig=deploy_id,
                 deployment_type="genesis_mint",
+                deployment_action="genesis_mint",
                 errored=False,
                 status="included"
             )
@@ -1472,6 +1659,7 @@ class BlockIndexer:
                 timestamp=block_info.get("timestamp"),
                 sig=deploy_id,
                 deployment_type="genesis_bond",
+                deployment_action="genesis_bond",
                 errored=False,
                 status="included"
             )

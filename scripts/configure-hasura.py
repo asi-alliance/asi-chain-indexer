@@ -6,12 +6,13 @@ Automatically tracks tables and sets up relationships
 
 import requests
 import json
+import os
 import time
 import sys
 
 # Hasura configuration
-HASURA_URL = "http://localhost:8080"
-ADMIN_SECRET = "myadminsecretkey"
+HASURA_URL = os.environ.get("HASURA_BASE", "http://localhost:8080")
+ADMIN_SECRET = os.environ.get("HASURA_ADMIN_SECRET", os.environ.get("HASURA_GRAPHQL_ADMIN_SECRET", "myadminsecretkey"))
 
 headers = {
     "Content-Type": "application/json",
@@ -198,7 +199,7 @@ def create_manual_array_relationship(table, relationship_name, column_mapping, r
         print(f"  ✅ Successfully created array relationship {relationship_name}")
     return True
 
-def set_table_permissions(table_name, role="public"):
+def set_table_permissions(table_name, role="public", allow_aggregations=False):
     """Set read permissions for public role"""
     print(f"🔒 Setting permissions for {table_name} (role: {role})")
     
@@ -214,7 +215,7 @@ def set_table_permissions(table_name, role="public"):
             "permission": {
                 "columns": "*",
                 "filter": {},
-                "allow_aggregations": True
+                "allow_aggregations": allow_aggregations
             }
         }
     }
@@ -296,7 +297,7 @@ def main():
         track_table(table)
 
     track_table("native_transfer_lifecycle")
-    set_table_permissions("native_transfer_lifecycle")
+    set_table_permissions("native_transfer_lifecycle", "public", False)
     for relationship, column, remote in [
         ("initiation_deployment", "initiation_deploy_id", "deployments"),
         ("completion_deployment", "completion_deploy_id", "deployments"),
@@ -316,7 +317,8 @@ def main():
     
     # Step 2: Track views (if any)
     print("\n👁️  Step 2: Tracking Views")
-    # Currently no views to track since network_stats is now a table
+    track_view("block_heights_view")
+    set_table_permissions("block_heights_view", "public", True)
     
     # Step 3: Create relationships
     print("\n🔗 Step 3: Creating Relationships")
@@ -393,8 +395,9 @@ def main():
     # Step 4: Set permissions
     print("\n🔒 Step 4: Setting Permissions")
     
+    aggregate_tables = {"blocks", "deployments", "transfers", "pending_deploys"}
     for table in tables:
-        set_table_permissions(table, "public")
+        set_table_permissions(table, "public", table in aggregate_tables)
     
     print("\n✅ Hasura configuration complete!")
     print(f"🌐 GraphQL Playground: {HASURA_URL}/console")

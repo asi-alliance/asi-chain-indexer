@@ -247,7 +247,7 @@ docker compose ps
 curl -fsS http://localhost:9090/status
 ```
 
-PostgreSQL runs SQL migrations 000–007 only when initializing an empty volume.
+PostgreSQL runs SQL migrations 000-008 only when initializing an empty volume.
 The Hasura script changes metadata and permissions; use it for a fresh installation,
 not as a read-only probe or a replacement for reviewing existing custom metadata.
 [deploy.sh](deploy.sh) validates configuration before startup and metadata
@@ -265,6 +265,31 @@ required environment values. Avoid its destructive `--clean` option for retained
 The volume is scoped to the Compose project. PostgreSQL 18's default PGDATA here
 is `/var/lib/postgresql/18/docker`. The metrics sidecar has no healthcheck;
 container startup is not proof of successful indexing or metric refresh.
+
+### Public API benchmark
+
+The public role exposes aggregates on `blocks`, `deployments`, `transfers`,
+`pending_deploys`, `transaction_history_view` and `block_heights_view`. The raw
+native-transfer lifecycle aggregates stay hidden. Migration 008 adds
+`block_heights_view` and `pg_trgm`/prefix indexes for the supported search shapes.
+
+The repository includes two disposable-data helpers:
+
+```bash
+# 1,000,000 blocks, 500,000 deployments, 500,000 transfers by default when
+# invoked with these explicit settings.
+python scripts/seed_benchmark_data.py --heights 500000 --siblings 2 \
+  --deployments-per-block 1 --transfers-per-block 1
+
+# Public role, no admin secret. Add --indexer http://localhost:9090 to probe
+# /status and /metrics when a local indexer is running.
+python scripts/benchmark_public_api.py --hasura http://localhost:8080/v1/graphql \
+  --iterations 20 --concurrency 20 --search-pattern '%seed%'
+```
+
+The scripts only target a disposable database. Clean a seeded run with
+`--clean --run-id <id>`. The measured 2026-11-27 results and query plans are in
+[docs/benchmarks/public-api.md](docs/benchmarks/public-api.md).
 
 ## Existing installations
 
@@ -285,17 +310,28 @@ Read [POSTGRES_UPGRADE.md](POSTGRES_UPGRADE.md) and the
   Select both settings from the node contract and metadata before a coordinated
   upgrade. Rebuilding or changing defaults does not rescale stored amounts.
 - On an empty database, `python -m src.migrate upgrade` applies tracked revisions
-  000–007. For an existing unversioned SQL schema, inspect its actual level, use
+  000-008. For an existing unversioned SQL schema, inspect its actual level, use
   `python -m src.migrate adopt --revision REVISION` once, selecting its actual
-  revision from `000`, `001`, `002`, `003`, `004`, `005`, `006` or `007`, then run
+  revision from `000`, `001`, `002`, `003`, `004`, `005`, `006`, `007` or `008`, then run
   `python -m src.migrate upgrade`. A database already tracked at
-  003, 004, 005 or 006 upgrades to 007. Compose restarts and SQLAlchemy `create_all()` do not upgrade
+  003, 004, 005, 006 or 007 upgrades to 008. Compose restarts and SQLAlchemy `create_all()` do not upgrade
   existing schemas. See the migration guide for validation and backup requirements.
+- Migration 008 backfills `block_heights` from the existing blocks, but
+  `blocks.block_size` stays `NULL` for rows indexed before the new code and not
+  processed again. The Explorer shows `N/A` for those rows; newly indexed or
+  re-indexed blocks carry the node-reported size.
 - Populated databases marked for native-transfer backfill must complete
   `python -m src.reindex_transfers` with writes stopped. Do not manually clear
   the repair flag. Repair preserves blocks, the sync cursor and recorded precision.
 - Review/reload Hasura metadata, then validate actual consumer queries,
   subscriptions, exact balances, cursor progress and metrics before resuming access.
+  After migration 008, apply the reviewed public metadata with
+  `scripts/full-init-hasura.sh` (or the equivalent Metadata API calls in
+  [migrations/README.md](migrations/README.md)); `reload_metadata` alone does not
+  track `block_heights_view` or grant `blocks_aggregate`.
+- After migration 008, run `python scripts/backfill_deployment_actions.py --dsn
+  "$DATABASE_URL"` once with writes stopped to classify historical deployments.
+  New rows are classified during ingest.
 
 Do not use `docker compose down -v`, `deploy.sh --clean`, `make docker-reset`
 or `python -m src.main --reset` as an upgrade procedure. These can delete data;

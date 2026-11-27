@@ -70,6 +70,9 @@ async def test_migration_preserves_history_and_roundtrips_wide_amounts(monkeypat
         await connection.execute(
             (ROOT / "migrations/004_uint256_phlo_prices.sql").read_text()
         )
+        await connection.execute(
+            (ROOT / "migrations/008_public_aggregates_search_and_actions.sql").read_text()
+        )
         assert (
             await connection.fetchval("SELECT phlo_price FROM deployments LIMIT 1")
             == 2**63 - 1
@@ -351,6 +354,7 @@ async def test_replayed_transfers_replace_false_rows_and_keep_identical_events(
             "001_bigint_amounts.sql",
             "002_executed_transfers.sql",
             "003_native_transfer_calls.sql",
+            "008_public_aggregates_search_and_actions.sql",
         ]:
             await connection.execute((ROOT / "migrations" / migration).read_text())
         await connection.execute("""
